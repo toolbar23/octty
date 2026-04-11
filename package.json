@@ -1,0 +1,29 @@
+{
+  "name": "octty",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "OCTTY_SOURCE_ROOT=$PWD electrobun dev",
+    "dev:terminal-debug": "OCTTY_DEBUG_TERMINAL=1 OCTTY_SOURCE_ROOT=$PWD electrobun dev",
+    "dev:headless-api": "OCTTY_HEADLESS_API=1 OCTTY_SOURCE_ROOT=$PWD electrobun dev",
+    "start": "OCTTY_SOURCE_ROOT=$PWD electrobun dev",
+    "build": "OCTTY_SOURCE_ROOT=$PWD electrobun build",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.3",
+    "electrobun": "^1.16.0",
+    "ghostty-web": "^0.4.0",
+    "node-pty": "^1.1.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "typescript": "^5.9.3"
+  }
+}
