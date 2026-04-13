@@ -1401,7 +1401,7 @@ function App(): React.ReactElement {
       if (event.defaultPrevented || event.isComposing) {
         return;
       }
-      if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) {
+      if (!event.ctrlKey || event.metaKey) {
         return;
       }
       if (event.key.toLowerCase() !== "w" && event.code !== "KeyW") {
@@ -1410,7 +1410,9 @@ function App(): React.ReactElement {
 
       event.preventDefault();
       event.stopPropagation();
-      invokeAppShortcut("close-pane");
+      if (event.shiftKey && !event.altKey) {
+        invokeAppShortcut("close-pane");
+      }
     };
 
     window.addEventListener("keydown", handleClosePaneKey, true);

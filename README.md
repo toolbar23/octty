@@ -44,3 +44,8 @@ bun test
 - Left sidebar: repos and workspaces
 - Right side: tiled taskspace with restorable panes
 - Workspace metadata comes from the filesystem and JJ
+
+## Docs
+
+- `docs/design.md`
+- `docs/architecture.md`

@@ -6,6 +6,8 @@ const LOADER_ENV_KEYS = [
   "LD_DEBUG_OUTPUT",
   "DYLD_INSERT_LIBRARIES",
   "DYLD_LIBRARY_PATH",
+  "TMUX",
+  "TMUX_PANE",
 ] as const;
 
 export function sanitizeChildEnv(

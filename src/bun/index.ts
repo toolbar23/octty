@@ -357,6 +357,7 @@ if (headlessApi) {
   // note, diff, and browser panes until Electrobun exposes a window-scoped shortcut
   // path that still fires while the native child webview owns focus.
   const appShortcuts = [
+    ["CommandOrControl+W", "block-window-close"],
     ["CommandOrControl+Shift+W", "close-pane"],
     ["CommandOrControl+Shift+Left", "focus-pane-left"],
     ["CommandOrControl+Shift+Right", "focus-pane-right"],

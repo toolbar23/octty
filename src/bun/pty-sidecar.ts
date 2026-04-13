@@ -1,6 +1,6 @@
-import { realpathSync } from "node:fs";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import type { SessionSnapshot, TerminalKind } from "../shared/types";
 import { sanitizeChildEnv } from "./env";
 import { defaultTerminalCommand, normalizeTerminalKind } from "../shared/terminal-kind";
@@ -22,6 +22,16 @@ interface LiveSession extends SessionSnapshot {
 }
 
 const MAX_SESSION_BUFFER = 64_000;
+const OCTTY_TMUX_SOCKET = "octty";
+const OCTTY_TMUX_CONFIG = `# Octty owns the outer UI chrome, so tmux should stay invisible and inert.
+set -g prefix None
+set -g prefix2 None
+set -g status off
+set -g pane-border-status off
+set -g mouse off
+unbind-key -a
+unbind-key -a -T root
+`;
 
 type SidecarListener = (message: {
   type: "ready" | "output" | "exit" | "error";
@@ -52,11 +62,18 @@ function resolveSidecarPath(): string {
   throw new Error("Could not locate PTY sidecar entrypoint");
 }
 
-function shellCommandFor(kind: TerminalKind): { command: string; args: string[] } {
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+}
+
+export function shellCommandFor(
+  kind: TerminalKind,
+  shellPath: string = process.env.SHELL || "/bin/bash",
+): { command: string; args: string[] } {
   switch (normalizeTerminalKind(kind)) {
     case "shell":
       return {
-        command: process.env.SHELL || "/bin/bash",
+        command: shellPath,
         args: ["-l"],
       };
     case "codex":
@@ -64,8 +81,8 @@ function shellCommandFor(kind: TerminalKind): { command: string; args: string[] 
     case "nvim":
     case "jjui":
       return {
-        command: defaultTerminalCommand(kind),
-        args: [],
+        command: shellPath,
+        args: ["-lc", `exec ${shellQuote(defaultTerminalCommand(kind))}`],
       };
   }
 }
@@ -78,6 +95,19 @@ function legacyTmuxSessionNameFor(sessionId: string): string {
   return `workspace-orbit-${sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}`;
 }
 
+function resolveTmuxConfigPath(): string {
+  const configDir = join(homedir(), ".cache", "octty");
+  const configPath = join(configDir, "tmux.conf");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(configPath, OCTTY_TMUX_CONFIG);
+  return configPath;
+}
+
+type TmuxTarget = {
+  mode: "octty" | "legacy-default";
+  sessionName: string;
+};
+
 export class PtySidecar {
   private readonly sessions = new Map<string, LiveSession>();
   private readonly listeners = new Set<SidecarListener>();
@@ -87,6 +117,7 @@ export class PtySidecar {
     end?: () => unknown;
   };
   private readonly childEnv = sanitizeChildEnv();
+  private readonly tmuxConfigPath = resolveTmuxConfigPath();
 
   constructor() {
     const sourceRoot = process.env.OCTTY_SOURCE_ROOT || process.env.WORKSPACE_ORBIT_SOURCE_ROOT;
@@ -151,9 +182,19 @@ export class PtySidecar {
     this.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
-  private runTmuxCapture(args: string[]): { success: boolean; stdout: string; stderr: string } {
+  private tmuxCommandArgs(mode: TmuxTarget["mode"], args: string[]): string[] {
+    if (mode === "octty") {
+      return ["-L", OCTTY_TMUX_SOCKET, "-f", this.tmuxConfigPath, ...args];
+    }
+    return args;
+  }
+
+  private runTmuxCapture(
+    args: string[],
+    mode: TmuxTarget["mode"] = "octty",
+  ): { success: boolean; stdout: string; stderr: string } {
     const result = Bun.spawnSync({
-      cmd: ["tmux", ...args],
+      cmd: ["tmux", ...this.tmuxCommandArgs(mode, args)],
       cwd: process.cwd(),
       env: this.childEnv,
       stdout: "pipe",
@@ -167,9 +208,9 @@ export class PtySidecar {
     };
   }
 
-  private spawnTmux(args: string[]): void {
+  private spawnTmux(args: string[], mode: TmuxTarget["mode"] = "octty"): void {
     const proc = Bun.spawn({
-      cmd: ["tmux", ...args],
+      cmd: ["tmux", ...this.tmuxCommandArgs(mode, args)],
       cwd: process.cwd(),
       env: this.childEnv,
       stdout: "ignore",
@@ -178,15 +219,20 @@ export class PtySidecar {
     void proc.exited.catch(() => {});
   }
 
-  private resolveTmuxSessionName(sessionId: string): string {
-    const names = [tmuxSessionNameFor(sessionId), legacyTmuxSessionNameFor(sessionId)];
-    for (const name of names) {
-      const result = this.runTmuxCapture(["has-session", "-t", name]);
+  private resolveTmuxTarget(sessionId: string): TmuxTarget {
+    const candidates: TmuxTarget[] = [
+      { mode: "octty", sessionName: tmuxSessionNameFor(sessionId) },
+      { mode: "octty", sessionName: legacyTmuxSessionNameFor(sessionId) },
+      { mode: "legacy-default", sessionName: legacyTmuxSessionNameFor(sessionId) },
+      { mode: "legacy-default", sessionName: tmuxSessionNameFor(sessionId) },
+    ];
+    for (const candidate of candidates) {
+      const result = this.runTmuxCapture(["has-session", "-t", candidate.sessionName], candidate.mode);
       if (result.success) {
-        return name;
+        return candidate;
       }
     }
-    return names[0]!;
+    return candidates[0]!;
   }
 
   onMessage(listener: SidecarListener): () => void {
@@ -205,7 +251,8 @@ export class PtySidecar {
     cols: number;
     rows: number;
   }): LiveSession {
-    const tmuxSessionName = this.resolveTmuxSessionName(input.sessionId);
+    const tmuxTarget = this.resolveTmuxTarget(input.sessionId);
+    const tmuxSessionName = tmuxTarget.sessionName;
     const { command, args } = shellCommandFor(input.kind);
     const session: LiveSession = {
       id: input.sessionId,
@@ -226,7 +273,16 @@ export class PtySidecar {
       type: "create",
       sessionId: session.id,
       command: "tmux",
-      args: ["new-session", "-A", "-s", tmuxSessionName, "-c", input.cwd, command, ...args],
+      args: this.tmuxCommandArgs(tmuxTarget.mode, [
+        "new-session",
+        "-A",
+        "-s",
+        tmuxSessionName,
+        "-c",
+        input.cwd,
+        command,
+        ...args,
+      ]),
       cwd: input.cwd,
       cols: input.cols,
       rows: input.rows,
@@ -244,13 +300,11 @@ export class PtySidecar {
       return "";
     }
 
-    const result = this.runTmuxCapture([
-      "capture-pane",
-      "-p",
-      "-e",
-      "-t",
-      `${this.resolveTmuxSessionName(sessionId)}:0.0`,
-    ]);
+    const tmuxTarget = this.resolveTmuxTarget(sessionId);
+    const result = this.runTmuxCapture(
+      ["capture-pane", "-p", "-e", "-t", `${tmuxTarget.sessionName}:0.0`],
+      tmuxTarget.mode,
+    );
     if (!result.success) {
       return this.sessions.get(sessionId)?.buffer ?? "";
     }
@@ -294,11 +348,13 @@ export class PtySidecar {
       });
       this.sessions.delete(sessionId);
     }
-    for (const tmuxSessionName of [
-      tmuxSessionNameFor(sessionId),
-      legacyTmuxSessionNameFor(sessionId),
-    ]) {
-      this.spawnTmux(["kill-session", "-t", tmuxSessionName]);
+    for (const tmuxTarget of [
+      { mode: "octty", sessionName: tmuxSessionNameFor(sessionId) },
+      { mode: "octty", sessionName: legacyTmuxSessionNameFor(sessionId) },
+      { mode: "legacy-default", sessionName: legacyTmuxSessionNameFor(sessionId) },
+      { mode: "legacy-default", sessionName: tmuxSessionNameFor(sessionId) },
+    ] as const) {
+      this.spawnTmux(["kill-session", "-t", tmuxTarget.sessionName], tmuxTarget.mode);
     }
   }
 

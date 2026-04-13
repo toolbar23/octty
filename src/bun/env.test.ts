@@ -10,6 +10,8 @@ describe("sanitizeChildEnv", () => {
       LD_PRELOAD: "./libcef.so:./libvk_swiftshader.so",
       LD_LIBRARY_PATH: "/tmp/cef",
       DYLD_INSERT_LIBRARIES: "/tmp/lib.dylib",
+      TMUX: "/tmp/tmux-1000/default,1234,0",
+      TMUX_PANE: "%1",
     });
 
     expect(env).toEqual({
