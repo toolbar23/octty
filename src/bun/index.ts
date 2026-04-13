@@ -1,4 +1,5 @@
 import Electrobun, { BrowserWindow, GlobalShortcut, PATHS } from "electrobun/bun";
+import { native, toCString } from "../../node_modules/electrobun/dist-linux-x64/api/bun/proc/native";
 import type {
   CreateNotePayload,
   OpenWorkspacePayload,
@@ -280,6 +281,12 @@ const shutdown = createShutdownController({
   exit: (code = 0) => process.exit(code),
 });
 
+// Electrobun already quits automatically when the last window closes. Running our
+// cleanup from before-quit keeps app teardown out of the native window-destroy path.
+Electrobun.events.on("before-quit", () => {
+  shutdown.shutdown(false);
+});
+
 const apiOrigin = `http://127.0.0.1:${server.port}`;
 const debugTerminal =
   process.env.OCTTY_DEBUG_TERMINAL === "1" || process.env.WORKSPACE_ORBIT_DEBUG_TERMINAL === "1"
@@ -386,6 +393,41 @@ if (headlessApi) {
     viewsRoot: PATHS.VIEWS_FOLDER,
   });
 
+  const relayoutTimers = new Set<Timer>();
+  let lastWebviewFrame = "";
+  const syncMainWebviewFrame = () => {
+    const frame = mainWindow.getFrame();
+    const frameKey = `${frame.width}:${frame.height}`;
+    if (frameKey === lastWebviewFrame) {
+      return;
+    }
+
+    lastWebviewFrame = frameKey;
+    native.symbols.resizeWebview(
+      mainWindow.webview.ptr,
+      0,
+      0,
+      frame.width,
+      frame.height,
+      toCString("[]"),
+    );
+  };
+  const scheduleMainWebviewSync = (delayMs: number) => {
+    const timer = setTimeout(() => {
+      relayoutTimers.delete(timer);
+      syncMainWebviewFrame();
+    }, delayMs);
+    relayoutTimers.add(timer);
+  };
+
+  mainWindow.on("resize", () => {
+    scheduleMainWebviewSync(0);
+  });
+
+  for (const delayMs of [0, 80, 220, 500, 1000]) {
+    scheduleMainWebviewSync(delayMs);
+  }
+
   // These are registered through Electrobun's native/global shortcut layer on purpose.
   // The embedded native browser webview can take focus in a way that bypasses the
   // renderer's DOM key handlers, so renderer-only shortcuts become unreliable whenever
@@ -436,8 +478,10 @@ if (headlessApi) {
 
   registerAppShortcuts();
   Electrobun.events.on(`close-${mainWindow.id}`, () => {
-    unregisterAppShortcuts();
-    shutdown.shutdown();
+    for (const timer of relayoutTimers) {
+      clearTimeout(timer);
+    }
+    relayoutTimers.clear();
   });
 }
 

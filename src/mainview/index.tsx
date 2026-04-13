@@ -717,34 +717,6 @@ function currentViewportWidth(): number {
   return Math.max(window.innerWidth || 0, 1);
 }
 
-function currentViewportSize(): { width: number; height: number } {
-  const docElement = document.documentElement;
-  const body = document.body;
-  const visualViewport = window.visualViewport;
-
-  const width = Math.max(
-    window.innerWidth || 0,
-    docElement?.clientWidth || 0,
-    body?.clientWidth || 0,
-    visualViewport?.width || 0,
-    window.outerWidth || 0,
-    1,
-  );
-  const height = Math.max(
-    window.innerHeight || 0,
-    docElement?.clientHeight || 0,
-    body?.clientHeight || 0,
-    visualViewport?.height || 0,
-    window.outerHeight || 0,
-    1,
-  );
-
-  return {
-    width: Math.round(width),
-    height: Math.round(height),
-  };
-}
-
 function listWorkspaceShortcutIds(workspaces: WorkspaceSummary[]): string[] {
   return workspaces
     .filter((workspace) => hasRecordedWorkspacePath(workspace.workspacePath))
@@ -862,71 +834,6 @@ function App(): React.ReactElement {
   useEffect(() => {
     detailsRef.current = details;
   }, [details]);
-
-  useEffect(() => {
-    let disposed = false;
-    const frameIds = new Set<number>();
-    const timeoutIds = new Set<number>();
-    const syncViewportSize = () => {
-      if (disposed) {
-        return;
-      }
-      const { width, height } = currentViewportSize();
-      document.documentElement.style.setProperty("--app-width", `${width}px`);
-      document.documentElement.style.setProperty("--app-height", `${height}px`);
-    };
-
-    const scheduleAnimationSync = (count: number) => {
-      for (let index = 0; index < count; index += 1) {
-        const frameId = window.requestAnimationFrame(() => {
-          frameIds.delete(frameId);
-          syncViewportSize();
-        });
-        frameIds.add(frameId);
-      }
-    };
-
-    syncViewportSize();
-    scheduleAnimationSync(8);
-    for (const delay of [0, 50, 120, 240, 500, 900]) {
-      const timeoutId = window.setTimeout(() => {
-        timeoutIds.delete(timeoutId);
-        syncViewportSize();
-      }, delay);
-      timeoutIds.add(timeoutId);
-    }
-
-    const handleResize = () => {
-      syncViewportSize();
-    };
-
-    const resizeObserver =
-      typeof ResizeObserver === "undefined"
-        ? null
-        : new ResizeObserver(() => {
-            syncViewportSize();
-          });
-    resizeObserver?.observe(document.documentElement);
-    if (document.body) {
-      resizeObserver?.observe(document.body);
-    }
-
-    window.addEventListener("resize", handleResize);
-    window.visualViewport?.addEventListener("resize", handleResize);
-
-    return () => {
-      disposed = true;
-      for (const frameId of frameIds) {
-        window.cancelAnimationFrame(frameId);
-      }
-      for (const timeoutId of timeoutIds) {
-        window.clearTimeout(timeoutId);
-      }
-      resizeObserver?.disconnect();
-      window.removeEventListener("resize", handleResize);
-      window.visualViewport?.removeEventListener("resize", handleResize);
-    };
-  }, []);
 
   useEffect(() => {
     activeWorkspaceIdRef.current = activeWorkspaceId;

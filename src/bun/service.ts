@@ -50,6 +50,7 @@ import {
   readWorkspaceStatus,
   resolveRepoRoot,
 } from "./jj";
+import { shouldIgnoreWorkspaceWatchPath } from "./workspace-watch";
 import { PtySidecar } from "./pty-sidecar";
 import { restoreTerminalPanePayload } from "./terminal-restore";
 import {
@@ -165,18 +166,6 @@ function extractNoteTitle(fileName: string, body: string): string {
     return heading.replace(/^#+\s*/, "").trim();
   }
   return fileName.replace(/\.note\.md$/i, "");
-}
-
-function shouldIgnoreWorkspaceWatchPath(pathValue: string): boolean {
-  const normalized = pathValue.replaceAll("\\", "/");
-  return (
-    normalized.includes("/node_modules/") ||
-    normalized.includes("/.git/") ||
-    normalized.includes("/.jj/") ||
-    normalized.includes("/dist/") ||
-    normalized.includes("/artifacts/") ||
-    normalized.includes("/.cache/")
-  );
 }
 
 export class WorkspaceService {
