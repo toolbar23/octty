@@ -339,18 +339,31 @@ textarea {
 }
 
 .workspace-item {
+  position: relative;
+  isolation: isolate;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
   gap: 6px;
-  padding: 8px 10px;
+  padding: 8px 0;
+  background: transparent;
+}
+
+.workspace-item::before {
+  content: "";
+  position: absolute;
+  inset: 0 -10px;
+  z-index: 0;
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
+  pointer-events: none;
 }
 
 .workspace-select {
   grid-column: 1;
+  position: relative;
+  z-index: 1;
   border: 0;
   background: transparent;
   color: inherit;
@@ -370,8 +383,12 @@ textarea {
 }
 
 .workspace-item.selected {
+  background: transparent;
+}
+
+.workspace-item.selected::before {
   background: var(--color-nav-selected);
-  border: 1px solid var(--color-nav-border);
+  border-color: var(--color-nav-border);
 }
 
 .workspace-item.selected .workspace-name {

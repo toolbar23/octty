@@ -786,10 +786,21 @@ function focusPaneTarget(
     return registeredFocus();
   }
 
+  if (pane.type === "shell") {
+    const target = paneElement.querySelector<HTMLElement>("textarea, [contenteditable='true']");
+    if (!target) {
+      return false;
+    }
+    try {
+      target.focus({ preventScroll: true });
+    } catch {
+      target.focus();
+    }
+    return document.activeElement === target;
+  }
+
   const selector =
-    pane.type === "shell"
-      ? "textarea, .terminal-runtime-host, .terminal-surface"
-      : pane.type === "note"
+    pane.type === "note"
         ? "textarea"
         : pane.type === "browser"
           ? "input, button"
@@ -1440,6 +1451,11 @@ function App(): React.ReactElement {
       type: PaneType,
       terminalKind: TerminalKind = "shell",
     ) => {
+      setKeyboardNavigationRequest({
+        workspaceId,
+        paneId: null,
+        nonce: Date.now(),
+      });
       mutateWorkspace(workspaceId, (detail) => ({
         ...detail,
         snapshot: addPane(
@@ -2898,25 +2914,29 @@ function TerminalPane({
     if (!container) {
       return false;
     }
-    const focusTarget = container.querySelector(
-      "textarea, [contenteditable='true'], .terminal-runtime-host",
-    );
-    if (focusTarget instanceof HTMLElement) {
-      focusTarget.focus();
+    runtimeRef.current?.term.focus();
+    const inputTarget = container.querySelector<HTMLElement>("textarea, [contenteditable='true']");
+    if (inputTarget) {
       logTerminalUi("focus-terminal", {
         paneId: pane.id,
-        target: describeElement(focusTarget),
+        target: describeElement(inputTarget),
         activeElement: describeElement(document.activeElement),
       });
-      return document.activeElement === focusTarget;
+      return document.activeElement === inputTarget;
     }
-    container.focus();
+
+    const host = container.querySelector<HTMLElement>(".terminal-runtime-host");
+    if (!host) {
+      return false;
+    }
+
+    host.focus();
     logTerminalUi("focus-terminal", {
       paneId: pane.id,
-      target: "container",
+      target: describeElement(host),
       activeElement: describeElement(document.activeElement),
     });
-    return document.activeElement === container;
+    return Boolean(document.activeElement instanceof HTMLElement && host.contains(document.activeElement));
   }, [pane.id]);
 
   useEffect(() => {
