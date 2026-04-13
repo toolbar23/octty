@@ -25,6 +25,9 @@ await service.init();
 const DEBUG_MESSAGE_RATES =
   process.env.OCTTY_DEBUG_MESSAGE_RATES === "1" ||
   process.env.WORKSPACE_ORBIT_DEBUG_MESSAGE_RATES === "1";
+const OPEN_DEVTOOLS_ON_START =
+  process.env.OCTTY_OPEN_DEVTOOLS === "1" ||
+  process.env.WORKSPACE_ORBIT_OPEN_DEVTOOLS === "1";
 
 type DebugRateBucket = {
   count: number;
@@ -500,17 +503,30 @@ if (headlessApi) {
     scheduleMainWebviewSync(delayMs);
   }
 
-  // Keep only the window-close overrides on Electrobun's native/global shortcut layer.
-  // Arrow-based pane/workspace navigation is still handled in the renderer because
-  // the current global shortcut path is unreliable for those chords under Hyprland.
-  // Once Electrobun exposes a dependable window-scoped native key event API, the
-  // browser-pane-only cases can move there without swallowing renderer shortcuts.
+  if (OPEN_DEVTOOLS_ON_START) {
+    const timer = setTimeout(() => {
+      relayoutTimers.delete(timer);
+      mainWindow.webview.openDevTools();
+    }, 900);
+    relayoutTimers.add(timer);
+  }
+
+  // Keep only the window-close overrides and native-only actions on Electrobun's
+  // native/global shortcut layer. Arrow-based pane/workspace navigation stays in
+  // the renderer because the current native shortcut path is unreliable for those
+  // chords under Hyprland.
   const nativeAppShortcuts = [
     ["CommandOrControl+W", "block-window-close"],
     ["CommandOrControl+Shift+W", "close-pane"],
+    ["CommandOrControl+Shift+I", "toggle-devtools"],
   ] as const;
 
   const invokeRendererShortcut = (action: (typeof nativeAppShortcuts)[number][1]) => {
+    if (action === "toggle-devtools") {
+      mainWindow.webview.toggleDevTools();
+      return;
+    }
+
     mainWindow.webview.executeJavascript(`
       window.dispatchEvent(
         new CustomEvent("octty-shortcut", { detail: ${JSON.stringify(action)} })

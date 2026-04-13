@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "OCTTY_SOURCE_ROOT=$PWD electrobun dev",
     "dev:terminal-debug": "OCTTY_DEBUG_TERMINAL=1 OCTTY_SOURCE_ROOT=$PWD electrobun dev",
+    "dev:profile": "BUN_OPTIONS='--cpu-prof --inspect' OCTTY_OPEN_DEVTOOLS=1 OCTTY_SOURCE_ROOT=$PWD electrobun dev",
     "dev:headless-api": "OCTTY_HEADLESS_API=1 OCTTY_SOURCE_ROOT=$PWD electrobun dev",
     "start": "OCTTY_SOURCE_ROOT=$PWD electrobun dev",
     "build": "OCTTY_SOURCE_ROOT=$PWD electrobun build",
