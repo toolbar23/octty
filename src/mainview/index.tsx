@@ -25,6 +25,7 @@ import {
   updatePane,
 } from "../shared/layout";
 import type {
+  AgentAttentionState,
   BootstrapPayload,
   BrowserPanePayload,
   NoteRecord,
@@ -40,6 +41,10 @@ import type {
   WorkspaceSummary,
 } from "../shared/types";
 import {
+  agentAttentionClassName,
+  agentAttentionLabel,
+} from "../shared/agent-attention";
+import {
   displayWorkspacePath,
   hasRecordedWorkspacePath,
 } from "../shared/types";
@@ -48,7 +53,8 @@ import {
   shouldFlushTerminalInputImmediately,
   takeStringChunk,
 } from "../shared/terminal-batching";
-import { terminalKindLabel } from "../shared/terminal-kind";
+import { shouldRemapShiftEnterToCtrlJ } from "../shared/terminal-shortcuts";
+import { isAgentTerminalKind, terminalKindLabel } from "../shared/terminal-kind";
 
 const apiOrigin =
   document
@@ -73,6 +79,7 @@ const TERMINAL_TOOLBAR_KINDS: TerminalKind[] = ["shell", "codex", "pi", "nvim", 
 const TASKSPACE_DRAG_MIME = "application/x-octty-layout";
 const MIN_STACK_PANE_HEIGHT_PX = 96;
 const KEYBOARD_COLUMN_RESIZE_STEP_PX = 80;
+const CTRL_J = "\x0a";
 
 function isElectrobunRuntime(): boolean {
   const electrobunWindow = window as Window & {
@@ -279,8 +286,8 @@ function createTerminalRuntime(paneId: string): TerminalRuntime {
   term.loadAddon(fitAddon);
   term.open(host);
   applyTerminalTheme(term);
-  if (debugTerminal) {
-    term.attachCustomKeyEventHandler((event) => {
+  term.attachCustomKeyEventHandler((event) => {
+    if (debugTerminal) {
       logTerminalUi("ghostty-keydown", () => ({
         paneId,
         key: event.key,
@@ -294,9 +301,19 @@ function createTerminalRuntime(paneId: string): TerminalRuntime {
         target: describeElement(event.target),
         activeElement: describeElement(document.activeElement),
       }));
-      return false;
-    });
-  }
+    }
+
+    if (shouldRemapShiftEnterToCtrlJ(event)) {
+      logTerminalUi("term-remap-shift-enter", () => ({
+        paneId,
+        sessionId: runtime.sessionId,
+      }));
+      runtime.enqueueInput(CTRL_J);
+      return true;
+    }
+
+    return false;
+  });
   host.tabIndex = 0;
   host.setAttribute("spellcheck", "false");
   scrubTerminalSurface(host);
@@ -557,6 +574,14 @@ function summarizeSocketMessage(message: unknown): Record<string, unknown> {
       sessionId: typeof payload.sessionId === "string" ? payload.sessionId : null,
       cols: typeof payload.cols === "number" ? payload.cols : null,
       rows: typeof payload.rows === "number" ? payload.rows : null,
+    };
+  }
+
+  if (data.type === "terminal-focus") {
+    return {
+      type: data.type,
+      sessionId: typeof payload.sessionId === "string" ? payload.sessionId : null,
+      focused: typeof payload.focused === "boolean" ? payload.focused : null,
     };
   }
 
@@ -1047,6 +1072,7 @@ function App(): React.ReactElement {
           exitCode: number | null;
           embeddedSession: TerminalPanePayload["embeddedSession"];
           embeddedSessionCorrelationId: string | null;
+          agentAttentionState: AgentAttentionState | null;
         };
         setDetails((current) => {
           const detail = current[payload.workspaceId];
@@ -1076,6 +1102,7 @@ function App(): React.ReactElement {
                     autoStart: false,
                     embeddedSession: payload.embeddedSession,
                     embeddedSessionCorrelationId: payload.embeddedSessionCorrelationId,
+                    agentAttentionState: payload.agentAttentionState,
                   },
                 };
               }),
@@ -1258,6 +1285,7 @@ function App(): React.ReactElement {
           autoStart: false,
           embeddedSession: session.embeddedSession,
           embeddedSessionCorrelationId: session.embeddedSessionCorrelationId,
+          agentAttentionState: session.agentAttentionState,
         },
       }));
       return session;
@@ -1539,6 +1567,12 @@ function App(): React.ReactElement {
                         }}
                       >
                         <div className="workspace-item-row workspace-item-head">
+                          {agentAttentionClassName(workspace.agentAttentionState) && (
+                            <span
+                              className={`agent-attention-dot workspace-attention-dot ${agentAttentionClassName(workspace.agentAttentionState)}`}
+                              title={agentAttentionLabel(workspace.agentAttentionState) ?? undefined}
+                            />
+                          )}
                           <span className="workspace-name">{workspace.workspaceName}</span>
                           {workspace.bookmarks.length > 0 && (
                             <span className="workspace-branch-info">{workspace.bookmarks.join(", ")}</span>
@@ -1775,6 +1809,12 @@ function App(): React.ReactElement {
                     payload: { sessionId, cols, rows },
                   })
                 }
+                onSetSessionFocus={(sessionId, focused) =>
+                  sendSocketMessage({
+                    type: "terminal-focus",
+                    payload: { sessionId, focused },
+                  })
+                }
                 onCloseSession={(sessionId) =>
                   sendSocketMessage({
                     type: "terminal-close",
@@ -1808,6 +1848,7 @@ type WorkspaceTaskspaceProps = {
   onFetchSession: (sessionId: string) => Promise<SessionSnapshot>;
   onSendSessionInput: (sessionId: string, data: string) => void;
   onResizeSession: (sessionId: string, cols: number, rows: number) => void;
+  onSetSessionFocus: (sessionId: string, focused: boolean) => void;
   onCloseSession: (sessionId: string) => void;
   onAddPane: (type: PaneType, terminalKind?: TerminalKind) => void;
   keyboardNavigationRequest: KeyboardNavigationRequest | null;
@@ -1828,6 +1869,7 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
     onFetchSession,
     onSendSessionInput,
     onResizeSession,
+    onSetSessionFocus,
     onCloseSession,
     onAddPane,
     keyboardNavigationRequest,
@@ -2103,6 +2145,7 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
           onFetchSession={onFetchSession}
           onSendSessionInput={onSendSessionInput}
           onResizeSession={onResizeSession}
+          onSetSessionFocus={onSetSessionFocus}
           onCreateNote={onCreateNote}
           onSaveNote={onSaveNote}
           onMarkNoteRead={onMarkNoteRead}
@@ -2120,6 +2163,7 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
       onCreateNote,
       onCreateSession,
       onFetchSession,
+      onSetSessionFocus,
       onMarkNoteRead,
       onResizeSession,
       onSaveNote,
@@ -2297,6 +2341,7 @@ type PaneFrameProps = {
   onFetchSession: WorkspaceTaskspaceProps["onFetchSession"];
   onSendSessionInput: WorkspaceTaskspaceProps["onSendSessionInput"];
   onResizeSession: WorkspaceTaskspaceProps["onResizeSession"];
+  onSetSessionFocus: WorkspaceTaskspaceProps["onSetSessionFocus"];
   onCreateNote: WorkspaceTaskspaceProps["onCreateNote"];
   onSaveNote: WorkspaceTaskspaceProps["onSaveNote"];
   onMarkNoteRead: WorkspaceTaskspaceProps["onMarkNoteRead"];
@@ -2325,6 +2370,7 @@ function PaneFrame(props: PaneFrameProps): React.ReactElement {
     onFetchSession,
     onSendSessionInput,
     onResizeSession,
+    onSetSessionFocus,
     onCreateNote,
     onSaveNote,
     onMarkNoteRead,
@@ -2332,6 +2378,14 @@ function PaneFrame(props: PaneFrameProps): React.ReactElement {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
   const terminalPayload =
     pane.type === "shell" ? pane.payload as TerminalPanePayload : null;
+  const attentionClassName =
+    terminalPayload && isAgentTerminalKind(terminalPayload.kind)
+      ? agentAttentionClassName(terminalPayload.agentAttentionState)
+      : null;
+  const attentionLabel =
+    terminalPayload && isAgentTerminalKind(terminalPayload.kind)
+      ? agentAttentionLabel(terminalPayload.agentAttentionState)
+      : null;
   const resumeCommand =
     terminalPayload?.embeddedSession
       ? terminalPayload.command
@@ -2364,6 +2418,12 @@ function PaneFrame(props: PaneFrameProps): React.ReactElement {
           <button className="drag-handle" draggable onDragStart={onDragStartPane}>
             ::
           </button>
+          {attentionClassName && (
+            <span
+              className={`agent-attention-dot ${attentionClassName}`}
+              title={attentionLabel ?? undefined}
+            />
+          )}
           <div className="pane-title">{pane.title}</div>
         </div>
         <div className="pane-actions">
@@ -2403,11 +2463,13 @@ function PaneFrame(props: PaneFrameProps): React.ReactElement {
             pane={pane}
             workspace={workspace}
             isVisible={isVisible}
+            isActive={isActive}
             subscribeSession={subscribeSession}
             onCreateSession={onCreateSession}
             onFetchSession={onFetchSession}
             onSendSessionInput={onSendSessionInput}
             onResizeSession={onResizeSession}
+            onSetSessionFocus={onSetSessionFocus}
             onUpdatePane={onUpdatePane}
           />
         )}
@@ -2466,21 +2528,25 @@ function TerminalPane({
   pane,
   workspace,
   isVisible,
+  isActive,
   subscribeSession,
   onCreateSession,
   onFetchSession,
   onSendSessionInput,
   onResizeSession,
+  onSetSessionFocus,
   onUpdatePane,
 }: {
   pane: PaneState;
   workspace: WorkspaceSummary;
   isVisible: boolean;
+  isActive: boolean;
   subscribeSession: WorkspaceTaskspaceProps["subscribeSession"];
   onCreateSession: WorkspaceTaskspaceProps["onCreateSession"];
   onFetchSession: WorkspaceTaskspaceProps["onFetchSession"];
   onSendSessionInput: WorkspaceTaskspaceProps["onSendSessionInput"];
   onResizeSession: WorkspaceTaskspaceProps["onResizeSession"];
+  onSetSessionFocus: WorkspaceTaskspaceProps["onSetSessionFocus"];
   onUpdatePane: (updater: (pane: PaneState) => PaneState) => void;
 }): React.ReactElement {
   const payload = pane.payload as TerminalPanePayload;
@@ -2493,6 +2559,7 @@ function TerminalPane({
   const onFetchSessionRef = useRef(onFetchSession);
   const onSendSessionInputRef = useRef(onSendSessionInput);
   const onResizeSessionRef = useRef(onResizeSession);
+  const onSetSessionFocusRef = useRef(onSetSessionFocus);
   const onUpdatePaneRef = useRef(onUpdatePane);
   const pendingSessionStartRef = useRef<Promise<void> | null>(null);
   const resizeFrameRef = useRef<number | null>(null);
@@ -2509,15 +2576,28 @@ function TerminalPane({
     onFetchSessionRef.current = onFetchSession;
     onSendSessionInputRef.current = onSendSessionInput;
     onResizeSessionRef.current = onResizeSession;
+    onSetSessionFocusRef.current = onSetSessionFocus;
     onUpdatePaneRef.current = onUpdatePane;
   }, [
     onCreateSession,
     onFetchSession,
     onResizeSession,
+    onSetSessionFocus,
     onSendSessionInput,
     onUpdatePane,
     subscribeSession,
   ]);
+
+  useEffect(() => {
+    if (!payload.sessionId || !isAgentTerminalKind(payload.kind)) {
+      return;
+    }
+    const focused = isVisible && isActive;
+    onSetSessionFocusRef.current(payload.sessionId, focused);
+    return () => {
+      onSetSessionFocusRef.current(payload.sessionId!, false);
+    };
+  }, [isActive, isVisible, payload.kind, payload.sessionId]);
 
   const resetSurface = useCallback(() => {
     resetTerminalSurface(containerRef.current);

@@ -201,6 +201,7 @@ describe("layout helpers", () => {
             restoredBuffer: "",
             embeddedSession: null,
             embeddedSessionCorrelationId: null,
+            agentAttentionState: null,
           },
         },
         "pane-diff": {

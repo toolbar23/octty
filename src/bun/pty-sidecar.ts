@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { SessionSnapshot, TerminalKind } from "../shared/types";
 import { sanitizeChildEnv } from "./env";
-import { defaultTerminalCommand, normalizeTerminalKind } from "../shared/terminal-kind";
+import { defaultTerminalCommand, isAgentTerminalKind, normalizeTerminalKind } from "../shared/terminal-kind";
 
 interface SidecarEnvelope {
   type: "create" | "write" | "resize" | "kill";
@@ -263,6 +263,7 @@ export class PtySidecar {
     displayCommand?: string;
     embeddedSession: SessionSnapshot["embeddedSession"];
     embeddedSessionCorrelationId: SessionSnapshot["embeddedSessionCorrelationId"];
+    agentAttentionState?: SessionSnapshot["agentAttentionState"];
   }): LiveSession {
     const tmuxTarget = this.resolveTmuxTarget(input.sessionId);
     const tmuxSessionName = tmuxTarget.sessionName;
@@ -280,6 +281,9 @@ export class PtySidecar {
       exitCode: null,
       embeddedSession: input.embeddedSession,
       embeddedSessionCorrelationId: input.embeddedSessionCorrelationId,
+      agentAttentionState:
+        input.agentAttentionState ??
+        (isAgentTerminalKind(normalizeTerminalKind(input.kind)) ? "idle-seen" : null),
       tmuxSessionName,
     };
 

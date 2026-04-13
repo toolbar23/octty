@@ -206,6 +206,7 @@ const server = Bun.serve<WebSocketData>({
       const message = JSON.parse(text) as
         | { type: "terminal-input"; payload: { sessionId: string; data: string } }
         | { type: "terminal-resize"; payload: { sessionId: string; cols: number; rows: number } }
+        | { type: "terminal-focus"; payload: { sessionId: string; focused: boolean } }
         | { type: "terminal-detach"; payload: { sessionId: string } }
         | { type: "terminal-close"; payload: { sessionId: string } }
         | {
@@ -223,6 +224,10 @@ const server = Bun.serve<WebSocketData>({
           message.payload.cols,
           message.payload.rows,
         );
+      }
+
+      if (message.type === "terminal-focus") {
+        service.setSessionFocused(message.payload.sessionId, message.payload.focused);
       }
 
       if (message.type === "terminal-detach") {

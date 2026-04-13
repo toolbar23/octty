@@ -24,6 +24,22 @@ async function updateStaleWorkspace(workspacePath: string): Promise<void> {
   await runCheckedCommand(["jj", "workspace", "update-stale"], workspacePath);
 }
 
+export async function withStaleWorkspaceRetry<T>(
+  workspacePath: string,
+  operation: () => Promise<T>,
+  updateWorkspace: (workspacePath: string) => Promise<void> = updateStaleWorkspace,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (!isStaleWorkingCopyError(error)) {
+      throw error;
+    }
+    await updateWorkspace(workspacePath);
+    return await operation();
+  }
+}
+
 function hashWorkspace(rootPath: string, workspaceName: string): string {
   return createHash("sha1")
     .update(`${rootPath}\0${workspaceName}`)
@@ -69,22 +85,31 @@ export function fallbackWorkspacePath(
 }
 
 export async function resolveRepoRoot(inputPath: string): Promise<string> {
-  const root = (await runCheckedCommand(["jj", "root", "-R", inputPath])).trim();
+  const root = (
+    await withStaleWorkspaceRetry(inputPath, () =>
+      runCheckedCommand(["jj", "root", "-R", inputPath]),
+    )
+  ).trim();
   return realpath(root);
 }
 
 export async function discoverWorkspaces(rootPath: string): Promise<DiscoveredWorkspace[]> {
   const resolvedRootPath = await realpath(rootPath);
-  const currentWorkspaceName = await readCurrentWorkspaceName(resolvedRootPath);
-  const namesOutput = await runCheckedCommand([
-    "jj",
-    "workspace",
-    "list",
-    "-R",
+  const { currentWorkspaceName, namesOutput } = await withStaleWorkspaceRetry(
     resolvedRootPath,
-    "-T",
-    "name ++ \"\\n\"",
-  ]);
+    async () => ({
+      currentWorkspaceName: await readCurrentWorkspaceName(resolvedRootPath),
+      namesOutput: await runCheckedCommand([
+        "jj",
+        "workspace",
+        "list",
+        "-R",
+        resolvedRootPath,
+        "-T",
+        "name ++ \"\\n\"",
+      ]),
+    }),
+  );
 
   const names = namesOutput
     .split("\n")
@@ -165,17 +190,7 @@ export async function readWorkspaceStatus(workspacePath: string): Promise<Worksp
       runCheckedCommand(["jj", "diff", "-r", "@", "--git", "--color=never"], workspacePath),
     ]);
 
-  let bookmarkOutput: string;
-  let diffText: string;
-  try {
-    [bookmarkOutput, diffText] = await readStatus();
-  } catch (error) {
-    if (!isStaleWorkingCopyError(error)) {
-      throw error;
-    }
-    await updateStaleWorkspace(workspacePath);
-    [bookmarkOutput, diffText] = await readStatus();
-  }
+  const [bookmarkOutput, diffText] = await withStaleWorkspaceRetry(workspacePath, readStatus);
 
   const bookmarks = bookmarkOutput
     .trim()
@@ -188,6 +203,7 @@ export async function readWorkspaceStatus(workspacePath: string): Promise<Worksp
     bookmarks,
     unreadNotes: 0,
     activeAgentCount: 0,
+    agentAttentionState: null,
     recentActivityAt: Date.now(),
     diffText,
   };

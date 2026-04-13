@@ -18,6 +18,7 @@ function makeWorkspaceSummary(): WorkspaceSummary {
     bookmarks: [],
     unreadNotes: 0,
     activeAgentCount: 0,
+    agentAttentionState: null,
     recentActivityAt: 0,
     diffText: "",
     createdAt: 1,
@@ -61,6 +62,7 @@ describe("AppDatabase session state", () => {
       exitCode: 0,
       embeddedSession: null,
       embeddedSessionCorrelationId: null,
+      agentAttentionState: null,
     });
 
     expect(db.getSessionStateByPane("pane-shell")).toEqual({
@@ -75,6 +77,7 @@ describe("AppDatabase session state", () => {
       exitCode: 0,
       embeddedSession: null,
       embeddedSessionCorrelationId: null,
+      agentAttentionState: null,
     });
   });
 
@@ -97,6 +100,7 @@ describe("AppDatabase session state", () => {
       exitCode: null,
       embeddedSession: null,
       embeddedSessionCorrelationId: "octty-embedded-session:1:session-1",
+      agentAttentionState: null,
     });
 
     const terminalPayload = shellPane.payload as {
@@ -105,12 +109,14 @@ describe("AppDatabase session state", () => {
       restoredBuffer: string;
       embeddedSession: unknown;
       embeddedSessionCorrelationId: string | null;
+      agentAttentionState: string | null;
     };
     terminalPayload.sessionId = null;
     terminalPayload.sessionState = "missing";
     terminalPayload.restoredBuffer = "";
     terminalPayload.embeddedSession = null;
     terminalPayload.embeddedSessionCorrelationId = null;
+    terminalPayload.agentAttentionState = null;
 
     db.saveSnapshot(snapshot);
 
@@ -136,6 +142,7 @@ describe("AppDatabase session state", () => {
       exitCode: 0,
       embeddedSession: null,
       embeddedSessionCorrelationId: "octty-embedded-session:1:session-old",
+      agentAttentionState: null,
     });
 
     const terminalPayload = shellPane.payload as {
@@ -144,12 +151,14 @@ describe("AppDatabase session state", () => {
       restoredBuffer: string;
       embeddedSession: unknown;
       embeddedSessionCorrelationId: string | null;
+      agentAttentionState: string | null;
     };
     terminalPayload.sessionId = "session-new";
     terminalPayload.sessionState = "live";
     terminalPayload.restoredBuffer = "";
     terminalPayload.embeddedSession = null;
     terminalPayload.embeddedSessionCorrelationId = null;
+    terminalPayload.agentAttentionState = null;
 
     db.saveSnapshot(snapshot);
 
@@ -175,6 +184,7 @@ describe("AppDatabase session state", () => {
         detectedAt: 123,
       },
       embeddedSessionCorrelationId: null,
+      agentAttentionState: "idle-unseen",
     });
 
     expect(db.getSessionStateByPane("pane-shell")?.embeddedSession).toEqual({
@@ -198,10 +208,30 @@ describe("AppDatabase session state", () => {
       exitCode: null,
       embeddedSession: null,
       embeddedSessionCorrelationId: "octty-embedded-session:123:session-correlation",
+      agentAttentionState: null,
     });
 
     expect(db.getSessionStateByPane("pane-shell")?.embeddedSessionCorrelationId).toBe(
       "octty-embedded-session:123:session-correlation",
     );
+  });
+
+  test("round-trips agent attention state", () => {
+    db.saveSessionState({
+      id: "session-attention",
+      workspaceId: "workspace-1",
+      paneId: "pane-shell",
+      kind: "codex",
+      cwd: "/tmp/repo",
+      command: "codex",
+      buffer: "",
+      state: "live",
+      exitCode: null,
+      embeddedSession: null,
+      embeddedSessionCorrelationId: null,
+      agentAttentionState: "thinking",
+    });
+
+    expect(db.getSessionStateByPane("pane-shell")?.agentAttentionState).toBe("thinking");
   });
 });

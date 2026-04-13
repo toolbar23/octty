@@ -19,6 +19,7 @@ import {
   updatePane,
 } from "../shared/layout";
 import type {
+  AgentAttentionState,
   BootstrapPayload,
   CreateWorkspacePayload,
   NoteRecord,
@@ -32,10 +33,12 @@ import type {
   WorkspaceSummary,
 } from "../shared/types";
 import { hasRecordedWorkspacePath } from "../shared/types";
+import { aggregateAgentAttentionStates } from "../shared/agent-attention";
 import { AppDatabase } from "./db";
 import {
   buildTerminalLaunch,
   createEmbeddedSessionCorrelationId,
+  detectAgentPrompt,
   detectEmbeddedSession,
   getEmbeddedSessionProvider,
 } from "./embedded-sessions";
@@ -115,6 +118,9 @@ export class WorkspaceService {
   private readonly refreshTimers = new Map<string, Timer>();
   private readonly sessionPersistTimers = new Map<string, Timer>();
   private readonly embeddedSessionDetectTimers = new Map<string, Timer>();
+  private readonly agentAttentionTimers = new Map<string, Timer>();
+  private readonly agentPendingSessions = new Set<string>();
+  private readonly focusedAgentSessions = new Set<string>();
 
   private logTerminal(
     message: string,
@@ -140,6 +146,13 @@ export class WorkspaceService {
           chunk: formatTerminalChunk(data),
         }));
         this.ptySidecar.appendOutput(sessionId, data);
+        const session = this.ptySidecar.getSession(sessionId);
+        if (session && isAgentTerminalKind(session.kind) && this.agentPendingSessions.has(sessionId)) {
+          if (session.agentAttentionState !== "thinking") {
+            this.setAgentAttentionState(session, "thinking");
+          }
+          this.scheduleAgentAttentionSettle(sessionId);
+        }
         this.scheduleSessionPersist(sessionId);
         this.broadcast({
           type: "terminal-output",
@@ -160,10 +173,14 @@ export class WorkspaceService {
           clearTimeout(persistTimer);
           this.sessionPersistTimers.delete(message.sessionId);
         }
+        this.cancelAgentAttentionSettle(message.sessionId);
+        this.agentPendingSessions.delete(message.sessionId);
+        this.focusedAgentSessions.delete(message.sessionId);
         const session = this.ptySidecar.getSession(message.sessionId);
         if (session) {
           session.state = "stopped";
           session.exitCode = message.exitCode ?? null;
+          session.agentAttentionState = isAgentTerminalKind(session.kind) ? "idle-seen" : null;
           this.db.saveSessionState(session);
           this.syncTerminalPaneSnapshot(session.workspaceId, session.paneId, (payload) => ({
             ...payload,
@@ -173,6 +190,7 @@ export class WorkspaceService {
             exitCode: session.exitCode,
             cwd: session.cwd,
             command: session.command,
+            agentAttentionState: session.agentAttentionState,
           }));
           this.updateActiveAgentCounts(session.workspaceId);
         }
@@ -204,11 +222,17 @@ export class WorkspaceService {
     for (const timer of this.embeddedSessionDetectTimers.values()) {
       clearTimeout(timer);
     }
+    for (const timer of this.agentAttentionTimers.values()) {
+      clearTimeout(timer);
+    }
     for (const watcher of this.watchers.values()) {
       void watcher.close();
     }
     this.watchers.clear();
     this.embeddedSessionDetectTimers.clear();
+    this.agentAttentionTimers.clear();
+    this.agentPendingSessions.clear();
+    this.focusedAgentSessions.clear();
     this.ptySidecar.dispose();
     this.db.close();
   }
@@ -306,6 +330,7 @@ export class WorkspaceService {
         bookmarks: existing?.bookmarks ?? [],
         unreadNotes: existing?.unreadNotes ?? 0,
         activeAgentCount: existing?.activeAgentCount ?? 0,
+        agentAttentionState: existing?.agentAttentionState ?? null,
         recentActivityAt: existing?.recentActivityAt ?? 0,
         diffText: existing?.diffText ?? "",
         createdAt: existing?.createdAt ?? now(),
@@ -391,6 +416,87 @@ export class WorkspaceService {
     this.sessionPersistTimers.set(sessionId, timer);
   }
 
+  private cancelAgentAttentionSettle(sessionId: string): void {
+    const timer = this.agentAttentionTimers.get(sessionId);
+    if (timer) {
+      clearTimeout(timer);
+      this.agentAttentionTimers.delete(sessionId);
+    }
+  }
+
+  private aggregateWorkspaceAgentAttentionState(workspaceId: string): AgentAttentionState | null {
+    const sessions = this.db
+      .listSessionStates(workspaceId)
+      .filter((session) => isAgentTerminalKind(session.kind) && session.state === "live");
+    return aggregateAgentAttentionStates(sessions.map((session) => session.agentAttentionState));
+  }
+
+  private setAgentAttentionState(
+    session: SessionSnapshot,
+    nextState: AgentAttentionState | null,
+  ): void {
+    if (session.agentAttentionState === nextState) {
+      return;
+    }
+
+    session.agentAttentionState = nextState;
+    this.db.saveSessionState(session);
+    this.syncTerminalPaneSnapshot(session.workspaceId, session.paneId, (payload) => ({
+      ...payload,
+      agentAttentionState: nextState,
+    }));
+    this.broadcast({
+      type: "terminal-session-update",
+      payload: {
+        workspaceId: session.workspaceId,
+        paneId: session.paneId,
+        sessionId: session.id,
+        kind: session.kind,
+        cwd: session.cwd,
+        command: session.command,
+        sessionState: session.state,
+        exitCode: session.exitCode,
+        embeddedSession: session.embeddedSession,
+        embeddedSessionCorrelationId: session.embeddedSessionCorrelationId,
+        agentAttentionState: nextState,
+      },
+    });
+    this.updateActiveAgentCounts(session.workspaceId);
+  }
+
+  private scheduleAgentAttentionSettle(sessionId: string): void {
+    this.cancelAgentAttentionSettle(sessionId);
+    const timer = setTimeout(() => {
+      const session = this.ptySidecar.getSession(sessionId);
+      if (!session || session.state !== "live" || !isAgentTerminalKind(session.kind)) {
+        this.cancelAgentAttentionSettle(sessionId);
+        return;
+      }
+
+      if (!this.agentPendingSessions.has(sessionId) && session.agentAttentionState !== "thinking") {
+        this.cancelAgentAttentionSettle(sessionId);
+        return;
+      }
+
+      const promptVisible = detectAgentPrompt(
+        session.kind,
+        this.ptySidecar.captureScreen(sessionId),
+      );
+      if (promptVisible) {
+        this.agentPendingSessions.delete(sessionId);
+        this.setAgentAttentionState(
+          session,
+          this.focusedAgentSessions.has(sessionId) ? "idle-seen" : "idle-unseen",
+        );
+        this.cancelAgentAttentionSettle(sessionId);
+        return;
+      }
+
+      this.scheduleAgentAttentionSettle(sessionId);
+    }, 1_200);
+    this.agentAttentionTimers.set(sessionId, timer);
+  }
+
   private cancelEmbeddedSessionDetection(sessionId: string): void {
     const timer = this.embeddedSessionDetectTimers.get(sessionId);
     if (timer) {
@@ -451,6 +557,7 @@ export class WorkspaceService {
             exitCode: liveSession.exitCode,
             embeddedSession,
             embeddedSessionCorrelationId: null,
+            agentAttentionState: liveSession.agentAttentionState,
           },
         });
         this.cancelEmbeddedSessionDetection(session.id);
@@ -521,6 +628,7 @@ export class WorkspaceService {
         diffText: "",
         unreadNotes: 0,
         activeAgentCount: 0,
+        agentAttentionState: null,
         recentActivityAt: now(),
       });
       const nextWorkspace = this.db.listWorkspaces().find((item) => item.id === workspaceId);
@@ -547,6 +655,7 @@ export class WorkspaceService {
         .filter((session) => isAgentTerminalKind(session.kind) && session.state !== "stopped")
         .map((session) => session.id),
     ).size;
+    const agentAttentionState = this.aggregateWorkspaceAgentAttentionState(workspaceId);
 
     this.db.updateWorkspaceStatus(workspaceId, {
       dirty: status.dirty,
@@ -554,6 +663,7 @@ export class WorkspaceService {
       diffText: status.diffText,
       unreadNotes: notes.filter((note) => note.unread).length,
       activeAgentCount,
+      agentAttentionState,
       recentActivityAt: now(),
     });
 
@@ -578,8 +688,10 @@ export class WorkspaceService {
         .filter((session) => isAgentTerminalKind(session.kind) && session.state !== "stopped")
         .map((session) => session.id),
     ).size;
+    const agentAttentionState = this.aggregateWorkspaceAgentAttentionState(workspaceId);
     this.db.updateWorkspaceStatus(workspaceId, {
       activeAgentCount,
+      agentAttentionState,
       recentActivityAt: now(),
     });
     const workspace = this.db.listWorkspaces().find((item) => item.id === workspaceId);
@@ -601,6 +713,9 @@ export class WorkspaceService {
     }
 
     for (const sessionId of runtime.sessionIds) {
+      this.cancelAgentAttentionSettle(sessionId);
+      this.agentPendingSessions.delete(sessionId);
+      this.focusedAgentSessions.delete(sessionId);
       this.cancelEmbeddedSessionDetection(sessionId);
       this.ptySidecar.kill(sessionId);
     }
@@ -773,9 +888,14 @@ export class WorkspaceService {
         restoredBuffer: "",
         embeddedSession: reusedSession.embeddedSession,
         embeddedSessionCorrelationId: reusedSession.embeddedSessionCorrelationId,
+        agentAttentionState: reusedSession.agentAttentionState,
       }));
       this.updateActiveAgentCounts(workspace.id);
       this.scheduleEmbeddedSessionDetection(reusedSession, launchedAt);
+      if (reusedSession.agentAttentionState === "thinking") {
+        this.agentPendingSessions.add(reusedSession.id);
+        this.scheduleAgentAttentionSettle(reusedSession.id);
+      }
       return reusedSession;
     }
 
@@ -805,6 +925,7 @@ export class WorkspaceService {
       displayCommand: launch.displayCommand,
       embeddedSession,
       embeddedSessionCorrelationId: nextCorrelationId,
+      agentAttentionState: savedSession?.agentAttentionState ?? undefined,
     });
     this.logTerminal("create-session", {
       workspaceId: workspace.id,
@@ -828,9 +949,14 @@ export class WorkspaceService {
       restoredBuffer: "",
       embeddedSession: session.embeddedSession,
       embeddedSessionCorrelationId: session.embeddedSessionCorrelationId,
+      agentAttentionState: session.agentAttentionState,
     }));
     this.updateActiveAgentCounts(workspace.id);
     this.scheduleEmbeddedSessionDetection(session, launchedAt);
+    if (session.agentAttentionState === "thinking") {
+      this.agentPendingSessions.add(session.id);
+      this.scheduleAgentAttentionSettle(session.id);
+    }
     return session;
   }
 
@@ -850,7 +976,35 @@ export class WorkspaceService {
       sessionId,
       chunk: formatTerminalChunk(data),
     }));
+    const session = this.ptySidecar.getSession(sessionId);
+    if (
+      session &&
+      session.state === "live" &&
+      isAgentTerminalKind(session.kind) &&
+      /[\r\n]/.test(data)
+    ) {
+      this.agentPendingSessions.add(sessionId);
+      this.setAgentAttentionState(session, "thinking");
+      this.scheduleAgentAttentionSettle(sessionId);
+    }
     this.ptySidecar.write(sessionId, data);
+  }
+
+  setSessionFocused(sessionId: string, focused: boolean): void {
+    const session = this.ptySidecar.getSession(sessionId);
+    if (!session || !isAgentTerminalKind(session.kind)) {
+      return;
+    }
+
+    if (focused) {
+      this.focusedAgentSessions.add(sessionId);
+      if (session.agentAttentionState === "idle-unseen") {
+        this.setAgentAttentionState(session, "idle-seen");
+      }
+      return;
+    }
+
+    this.focusedAgentSessions.delete(sessionId);
   }
 
   resizeSession(sessionId: string, cols: number, rows: number): void {
@@ -869,6 +1023,9 @@ export class WorkspaceService {
     for (const runtime of this.runtimes.values()) {
       runtime.sessionIds.delete(sessionId);
     }
+    this.cancelAgentAttentionSettle(sessionId);
+    this.agentPendingSessions.delete(sessionId);
+    this.focusedAgentSessions.delete(sessionId);
     this.cancelEmbeddedSessionDetection(sessionId);
     this.ptySidecar.detach(sessionId);
   }
@@ -880,6 +1037,9 @@ export class WorkspaceService {
     for (const runtime of this.runtimes.values()) {
       runtime.sessionIds.delete(sessionId);
     }
+    this.cancelAgentAttentionSettle(sessionId);
+    this.agentPendingSessions.delete(sessionId);
+    this.focusedAgentSessions.delete(sessionId);
     this.cancelEmbeddedSessionDetection(sessionId);
     this.ptySidecar.kill(sessionId);
   }

@@ -4,6 +4,7 @@ export type PanePlacement = "new-column" | "stack";
 export type SidebarTarget = "left" | "right";
 export type ColumnPin = SidebarTarget | null;
 export type SessionState = "live" | "stopped" | "missing";
+export type AgentAttentionState = "idle-seen" | "thinking" | "idle-unseen";
 
 export interface EmbeddedSessionRef {
   provider: string;
@@ -25,6 +26,7 @@ export interface WorkspaceStatus {
   bookmarks: string[];
   unreadNotes: number;
   activeAgentCount: number;
+  agentAttentionState: AgentAttentionState | null;
   recentActivityAt: number;
   diffText: string;
 }
@@ -63,6 +65,7 @@ export interface TerminalPanePayload {
   restoredBuffer: string;
   embeddedSession: EmbeddedSessionRef | null;
   embeddedSessionCorrelationId: string | null;
+  agentAttentionState: AgentAttentionState | null;
 }
 
 export interface NotePanePayload {
@@ -130,6 +133,7 @@ export interface SessionSnapshot {
   exitCode: number | null;
   embeddedSession: EmbeddedSessionRef | null;
   embeddedSessionCorrelationId: string | null;
+  agentAttentionState: AgentAttentionState | null;
 }
 
 export interface BootstrapPayload {
@@ -194,6 +198,7 @@ export interface WorkspaceEventEnvelope {
     | "workspace-status"
     | "workspace-detail"
     | "terminal-session-update"
+    | "terminal-focus"
     | "terminal-output"
     | "terminal-exit";
   payload: unknown;

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { defaultTerminalCommand } from "../shared/terminal-kind";
 import type { EmbeddedSessionRef, TerminalKind } from "../shared/types";
+import { applyConfiguredTerminalArgs, configuredTerminalArgs } from "./terminal-launch-args";
 
 type TerminalLaunchSpec = {
   argv: string[];
@@ -21,6 +22,7 @@ type EmbeddedSessionProvider = {
   buildLaunch(
     embeddedSession: EmbeddedSessionRef | null,
     correlationId?: string | null,
+    env?: Record<string, string | undefined>,
   ): TerminalLaunchSpec;
   detectExternalSession(args: DetectEmbeddedSessionArgs): Promise<EmbeddedSessionRef | null>;
 };
@@ -37,6 +39,8 @@ type CodexSessionMeta = {
 const CODEX_SESSION_LOOKBACK_MS = 10 * 60_000;
 const CODEX_SESSION_EARLY_SKEW_MS = 60_000;
 const EMBEDDED_SESSION_CORRELATION_PREFIX = "octty-embedded-session:";
+const ANSI_ESCAPE_SEQUENCE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+const CODEX_PROMPT_LINE = /^\s*›(?:\s|$)/m;
 
 function joinShellWords(argv: string[]): string {
   return argv
@@ -44,6 +48,10 @@ function joinShellWords(argv: string[]): string {
       /^[A-Za-z0-9_./:-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\"'\"'`)}'`,
     )
     .join(" ");
+}
+
+function stripAnsi(text: string): string {
+  return text.replace(ANSI_ESCAPE_SEQUENCE, "");
 }
 
 function dateDirFor(timestamp: number): string {
@@ -172,15 +180,17 @@ async function detectCodexSessionFromRoot(
 const codexProvider: EmbeddedSessionProvider = {
   providerName: "codex",
   kind: "codex",
-  buildLaunch(embeddedSession, correlationId) {
-    const argv = embeddedSession
+  buildLaunch(embeddedSession, correlationId, env = process.env) {
+    const baseArgv = embeddedSession
       ? ["codex", "resume", embeddedSession.id]
       : correlationId
         ? ["codex", codexCorrelationPrompt(correlationId)]
         : ["codex"];
+    const argv = applyConfiguredTerminalArgs(baseArgv, "codex", env);
+    const displayArgv = embeddedSession ? argv : ["codex", ...configuredTerminalArgs("codex", env)];
     return {
       argv,
-      displayCommand: embeddedSession ? joinShellWords(argv) : "codex",
+      displayCommand: joinShellWords(displayArgv),
     };
   },
   detectExternalSession(args) {
@@ -203,16 +213,18 @@ export function buildTerminalLaunch(
   kind: TerminalKind,
   embeddedSession: EmbeddedSessionRef | null,
   correlationId: string | null = null,
+  env: Record<string, string | undefined> = process.env,
 ): TerminalLaunchSpec {
   const provider = getEmbeddedSessionProvider(kind);
   if (provider) {
-    return provider.buildLaunch(embeddedSession, correlationId);
+    return provider.buildLaunch(embeddedSession, correlationId, env);
   }
 
   const command = defaultTerminalCommand(kind);
+  const argv = applyConfiguredTerminalArgs([command], kind, env);
   return {
-    argv: [command],
-    displayCommand: command,
+    argv,
+    displayCommand: joinShellWords(argv),
   };
 }
 
@@ -228,8 +240,20 @@ export async function detectEmbeddedSession(
   return provider.detectExternalSession(args);
 }
 
+export function detectAgentPrompt(kind: TerminalKind, screen: string): boolean | null {
+  const normalized = stripAnsi(screen);
+  switch (kind) {
+    case "codex":
+    case "pi":
+      return CODEX_PROMPT_LINE.test(normalized);
+    default:
+      return null;
+  }
+}
+
 export const __testOnly = {
   detectCodexSessionFromRoot,
   codexCorrelationPrompt,
   timestampFromCorrelationId,
+  stripAnsi,
 };

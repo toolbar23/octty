@@ -32,6 +32,16 @@ bun run typecheck
 bun test
 ```
 
+Per-tool launch arguments can be configured with environment variables:
+
+```bash
+OCTTY_TERMINAL_ARGS_CODEX='--profile dev --approval-mode "never ask"' bun run dev
+OCTTY_TERMINAL_ARGS_PI='--some-flag value' bun run dev
+```
+
+Octty inserts these arguments immediately after the executable, so a resumed Codex pane launches as
+`codex <your args> resume <session-id>`.
+
 ## Storage
 
 - App state DB: `~/.local/share/octty/state.sqlite`

@@ -100,6 +100,7 @@ function makeTerminalPayload(
     restoredBuffer: "",
     embeddedSession: null,
     embeddedSessionCorrelationId: null,
+    agentAttentionState: null,
   };
 }
 
@@ -843,6 +844,7 @@ export function sanitizeSnapshot(
       payload.restoredBuffer ||= "";
       payload.embeddedSession ??= null;
       payload.embeddedSessionCorrelationId ??= null;
+      payload.agentAttentionState ??= null;
     }
 
     if (pane.type === "browser") {

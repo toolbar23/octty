@@ -16,6 +16,7 @@ export function restoreTerminalPanePayload(
       command: liveSession.command,
       embeddedSession: liveSession.embeddedSession,
       embeddedSessionCorrelationId: liveSession.embeddedSessionCorrelationId,
+      agentAttentionState: liveSession.agentAttentionState,
     };
   }
 
@@ -30,6 +31,7 @@ export function restoreTerminalPanePayload(
       command: savedSession.command,
       embeddedSession: savedSession.embeddedSession,
       embeddedSessionCorrelationId: savedSession.embeddedSessionCorrelationId,
+      agentAttentionState: savedSession.agentAttentionState,
     };
   }
 

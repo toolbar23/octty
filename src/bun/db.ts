@@ -42,6 +42,7 @@ export class AppDatabase {
         bookmarks text not null default '',
         unread_notes integer not null default 0,
         active_agent_count integer not null default 0,
+        agent_attention_state text,
         recent_activity_at integer not null default 0,
         diff_text text not null default '',
         created_at integer not null,
@@ -84,6 +85,7 @@ export class AppDatabase {
         exit_code integer,
         embedded_session_json text,
         embedded_session_correlation_id text,
+        agent_attention_state text,
         buffer text not null default '',
         updated_at integer not null
       );
@@ -100,6 +102,15 @@ export class AppDatabase {
     }
     if (!sessionStateColumns.some((column) => column.name === "embedded_session_correlation_id")) {
       this.db.exec("alter table session_state add column embedded_session_correlation_id text");
+    }
+    if (!sessionStateColumns.some((column) => column.name === "agent_attention_state")) {
+      this.db.exec("alter table session_state add column agent_attention_state text");
+    }
+    const workspaceColumns = this.db
+      .prepare("pragma table_info(workspaces)")
+      .all() as Array<{ name: string }>;
+    if (!workspaceColumns.some((column) => column.name === "agent_attention_state")) {
+      this.db.exec("alter table workspaces add column agent_attention_state text");
     }
   }
 
@@ -153,12 +164,14 @@ export class AppDatabase {
           bookmarks,
           unread_notes,
           active_agent_count,
+          agent_attention_state,
           recent_activity_at,
           diff_text,
           created_at,
           updated_at,
           last_opened_at
         ) values (
+          ?,
           ?,
           ?,
           ?,
@@ -185,6 +198,7 @@ export class AppDatabase {
           bookmarks = excluded.bookmarks,
           unread_notes = excluded.unread_notes,
           active_agent_count = excluded.active_agent_count,
+          agent_attention_state = excluded.agent_attention_state,
           recent_activity_at = excluded.recent_activity_at,
           diff_text = excluded.diff_text,
           updated_at = excluded.updated_at,
@@ -201,6 +215,7 @@ export class AppDatabase {
         JSON.stringify(workspace.bookmarks),
         workspace.unreadNotes,
         workspace.activeAgentCount,
+        workspace.agentAttentionState,
         workspace.recentActivityAt,
         workspace.diffText,
         workspace.createdAt,
@@ -223,6 +238,7 @@ export class AppDatabase {
           bookmarks,
           unread_notes as unreadNotes,
           active_agent_count as activeAgentCount,
+          agent_attention_state as agentAttentionState,
           recent_activity_at as recentActivityAt,
           diff_text as diffText,
           created_at as createdAt,
@@ -244,6 +260,8 @@ export class AppDatabase {
       bookmarks: JSON.parse(String(row.bookmarks)),
       unreadNotes: Number(row.unreadNotes),
       activeAgentCount: Number(row.activeAgentCount),
+      agentAttentionState:
+        typeof row.agentAttentionState === "string" ? String(row.agentAttentionState) as WorkspaceSummary["agentAttentionState"] : null,
       recentActivityAt: Number(row.recentActivityAt),
       diffText: String(row.diffText),
       createdAt: Number(row.createdAt),
@@ -305,7 +323,8 @@ export class AppDatabase {
             state,
             exit_code as exitCode,
             embedded_session_json as embeddedSessionJson,
-            embedded_session_correlation_id as embeddedSessionCorrelationId
+            embedded_session_correlation_id as embeddedSessionCorrelationId,
+            agent_attention_state as agentAttentionState
           from session_state
           where workspace_id = ?
         `)
@@ -319,6 +338,7 @@ export class AppDatabase {
           exitCode: number | null;
           embeddedSessionJson: string | null;
           embeddedSessionCorrelationId: string | null;
+          agentAttentionState: SessionSnapshot["agentAttentionState"];
         }>;
       const existingBuffers = Object.fromEntries(
         existingSessionRows.map((row) => [row.paneId, row]),
@@ -351,6 +371,7 @@ export class AppDatabase {
             restoredBuffer: string;
             embeddedSession: unknown;
             embeddedSessionCorrelationId: string | null;
+            agentAttentionState: SessionSnapshot["agentAttentionState"];
           };
           const existingSession = existingBuffers[pane.id] as
             | {
@@ -362,6 +383,7 @@ export class AppDatabase {
                 exitCode: number | null;
                 embeddedSessionJson: string | null;
                 embeddedSessionCorrelationId: string | null;
+                agentAttentionState: SessionSnapshot["agentAttentionState"];
               }
             | undefined;
           const persistedSessionId = payload.sessionId || existingSession?.sessionId || null;
@@ -380,6 +402,10 @@ export class AppDatabase {
             payload.embeddedSessionCorrelationId ??
             existingSession?.embeddedSessionCorrelationId ??
             null;
+          const persistedAgentAttentionState =
+            payload.agentAttentionState ??
+            existingSession?.agentAttentionState ??
+            null;
           this.db
             .prepare(`
               insert into session_state (
@@ -393,9 +419,10 @@ export class AppDatabase {
                 exit_code,
                 embedded_session_json,
                 embedded_session_correlation_id,
+                agent_attention_state,
                 buffer,
                 updated_at
-              ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `)
             .run(
               pane.id,
@@ -408,6 +435,7 @@ export class AppDatabase {
               persistedExitCode,
               persistedEmbeddedSessionJson,
               persistedEmbeddedSessionCorrelationId,
+              persistedAgentAttentionState,
               "",
               Date.now(),
             );
@@ -528,9 +556,10 @@ export class AppDatabase {
           exit_code,
           embedded_session_json,
           embedded_session_correlation_id,
+          agent_attention_state,
           buffer,
           updated_at
-        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         on conflict(pane_id) do update set
           session_id = excluded.session_id,
           kind = excluded.kind,
@@ -540,6 +569,7 @@ export class AppDatabase {
           exit_code = excluded.exit_code,
           embedded_session_json = excluded.embedded_session_json,
           embedded_session_correlation_id = excluded.embedded_session_correlation_id,
+          agent_attention_state = excluded.agent_attention_state,
           buffer = excluded.buffer,
           updated_at = excluded.updated_at
       `)
@@ -554,6 +584,7 @@ export class AppDatabase {
         session.exitCode,
         session.embeddedSession ? JSON.stringify(session.embeddedSession) : null,
         session.embeddedSessionCorrelationId,
+        session.agentAttentionState,
         session.buffer,
         Date.now(),
       );
@@ -573,7 +604,8 @@ export class AppDatabase {
           state,
           exit_code as exitCode,
           embedded_session_json as embeddedSessionJson,
-          embedded_session_correlation_id as embeddedSessionCorrelationId
+          embedded_session_correlation_id as embeddedSessionCorrelationId,
+          agent_attention_state as agentAttentionState
         from session_state
         where pane_id = ?
       `)
@@ -590,6 +622,7 @@ export class AppDatabase {
           exitCode: number | null;
           embeddedSessionJson: string | null;
           embeddedSessionCorrelationId: string | null;
+          agentAttentionState: SessionSnapshot["agentAttentionState"];
         }
       | undefined;
 
@@ -609,6 +642,7 @@ export class AppDatabase {
       exitCode: row.exitCode,
       embeddedSession: row.embeddedSessionJson ? JSON.parse(row.embeddedSessionJson) : null,
       embeddedSessionCorrelationId: row.embeddedSessionCorrelationId,
+      agentAttentionState: row.agentAttentionState,
     };
   }
 
@@ -626,7 +660,8 @@ export class AppDatabase {
           state,
           exit_code as exitCode,
           embedded_session_json as embeddedSessionJson,
-          embedded_session_correlation_id as embeddedSessionCorrelationId
+          embedded_session_correlation_id as embeddedSessionCorrelationId,
+          agent_attention_state as agentAttentionState
         from session_state
         where workspace_id = ?
       `)
@@ -642,6 +677,7 @@ export class AppDatabase {
         exitCode: number | null;
         embeddedSessionJson: string | null;
         embeddedSessionCorrelationId: string | null;
+        agentAttentionState: SessionSnapshot["agentAttentionState"];
       }>;
 
     return rows
@@ -658,6 +694,7 @@ export class AppDatabase {
         exitCode: row.exitCode,
         embeddedSession: row.embeddedSessionJson ? JSON.parse(row.embeddedSessionJson) : null,
         embeddedSessionCorrelationId: row.embeddedSessionCorrelationId,
+        agentAttentionState: row.agentAttentionState,
       }));
   }
 

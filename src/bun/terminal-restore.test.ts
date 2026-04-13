@@ -14,6 +14,7 @@ function makePayload(overrides: Partial<TerminalPanePayload> = {}): TerminalPane
     restoredBuffer: "",
     embeddedSession: null,
     embeddedSessionCorrelationId: null,
+    agentAttentionState: null,
     ...overrides,
   };
 }
@@ -31,6 +32,7 @@ function makeSession(overrides: Partial<SessionSnapshot> = {}): SessionSnapshot 
     exitCode: null,
     embeddedSession: null,
     embeddedSessionCorrelationId: null,
+    agentAttentionState: null,
     ...overrides,
   };
 }
@@ -103,6 +105,16 @@ describe("restoreTerminalPanePayload", () => {
     );
 
     expect(next.embeddedSessionCorrelationId).toBe("octty-embedded-session:123:session-1");
+  });
+
+  test("restores agent attention state from saved state", () => {
+    const next = restoreTerminalPanePayload(
+      makePayload(),
+      null,
+      makeSession({ agentAttentionState: "idle-unseen" }),
+    );
+
+    expect(next.agentAttentionState).toBe("idle-unseen");
   });
 
   test("drops stale live handles from older snapshots without auto-restart", () => {

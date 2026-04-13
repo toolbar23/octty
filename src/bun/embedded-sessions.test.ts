@@ -7,6 +7,7 @@ import {
   __testOnly,
   buildTerminalLaunch,
   createEmbeddedSessionCorrelationId,
+  detectAgentPrompt,
 } from "./embedded-sessions";
 
 describe("embedded session providers", () => {
@@ -36,6 +37,31 @@ describe("embedded session providers", () => {
     });
   });
 
+  test("applies configured codex args to a fresh launch without exposing the prompt", () => {
+    const correlationId = createEmbeddedSessionCorrelationId(123, "session-1");
+
+    expect(
+      buildTerminalLaunch(
+        "codex",
+        null,
+        correlationId,
+        {
+          OCTTY_TERMINAL_ARGS_CODEX: '--profile dev --approval-mode "never ask"',
+        },
+      ),
+    ).toEqual({
+      argv: [
+        "codex",
+        "--profile",
+        "dev",
+        "--approval-mode",
+        "never ask",
+        __testOnly.codexCorrelationPrompt(correlationId),
+      ],
+      displayCommand: 'codex --profile dev --approval-mode \'never ask\'',
+    });
+  });
+
   test("builds a resume launch when there is an external session", () => {
     expect(
       buildTerminalLaunch("codex", {
@@ -47,6 +73,38 @@ describe("embedded session providers", () => {
     ).toEqual({
       argv: ["codex", "resume", "session-ext"],
       displayCommand: "codex resume session-ext",
+    });
+  });
+
+  test("applies configured codex args to a resume launch", () => {
+    expect(
+      buildTerminalLaunch(
+        "codex",
+        {
+          provider: "codex",
+          id: "session-ext",
+          label: "Saved session",
+          detectedAt: 1,
+        },
+        null,
+        {
+          OCTTY_TERMINAL_ARGS_CODEX: "--profile dev",
+        },
+      ),
+    ).toEqual({
+      argv: ["codex", "--profile", "dev", "resume", "session-ext"],
+      displayCommand: "codex --profile dev resume session-ext",
+    });
+  });
+
+  test("applies configured args to non-provider tool launches", () => {
+    expect(
+      buildTerminalLaunch("nvim", null, null, {
+        OCTTY_TERMINAL_ARGS_NVIM: "--clean",
+      }),
+    ).toEqual({
+      argv: ["nvim", "--clean"],
+      displayCommand: "nvim --clean",
     });
   });
 
@@ -121,6 +179,15 @@ describe("embedded session providers", () => {
       provider: "codex",
       id: "019d869d-d5ca-74a3-a1ba-b8a23a3b09d6",
     });
+  });
+
+  test("detects the codex prompt on an idle screen", () => {
+    expect(
+      detectAgentPrompt(
+        "codex",
+        "\u001b[2mTip\u001b[0m\n\n› Run /review on my current changes\n",
+      ),
+    ).toBe(true);
   });
 
 });
