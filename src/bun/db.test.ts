@@ -19,6 +19,7 @@ function makeWorkspaceSummary(): WorkspaceSummary {
     effectiveAddedLines: 0,
     effectiveRemovedLines: 0,
     bookmarks: [],
+    bookmarkRelation: "none",
     unreadNotes: 0,
     activeAgentCount: 0,
     agentAttentionState: null,

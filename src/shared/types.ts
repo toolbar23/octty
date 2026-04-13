@@ -5,6 +5,7 @@ export type SidebarTarget = "left" | "right";
 export type ColumnPin = SidebarTarget | null;
 export type SessionState = "live" | "stopped" | "missing";
 export type AgentAttentionState = "idle-seen" | "thinking" | "idle-unseen";
+export type WorkspaceBookmarkRelation = "none" | "exact" | "above";
 export type WorkspaceState =
   | "published"
   | "merged-local"
@@ -33,6 +34,7 @@ export interface WorkspaceStatus {
   effectiveAddedLines: number;
   effectiveRemovedLines: number;
   bookmarks: string[];
+  bookmarkRelation: WorkspaceBookmarkRelation;
   unreadNotes: number;
   activeAgentCount: number;
   agentAttentionState: AgentAttentionState | null;

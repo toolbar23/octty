@@ -2,6 +2,7 @@ import { realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import {
   encodeMissingWorkspacePath,
+  type WorkspaceBookmarkRelation,
   type WorkspaceStatus,
   type WorkspaceState,
 } from "../shared/types";
@@ -9,6 +10,7 @@ import { summarizeUnifiedDiff } from "../shared/diff-stats";
 import { runCheckedCommand } from "./command";
 
 const EFFECTIVE_WORKSPACE_REVSET = "coalesce(@ ~ empty(), @-)";
+const DISPLAY_BOOKMARK_REVSET = `heads(first_ancestors(${EFFECTIVE_WORKSPACE_REVSET}) & bookmarks())`;
 const PUBLISHED_WORKSPACE_REVSET = `${EFFECTIVE_WORKSPACE_REVSET} & ::remote_bookmarks()`;
 const MERGED_LOCAL_WORKSPACE_REVSET = `${EFFECTIVE_WORKSPACE_REVSET} & ::(working_copies() ~ @)`;
 const CONFLICTED_WORKSPACE_REVSET = `${EFFECTIVE_WORKSPACE_REVSET} & conflicts()`;
@@ -215,6 +217,30 @@ export function classifyWorkspaceState({
   return "draft";
 }
 
+function parseBookmarks(output: string): string[] {
+  return output
+    .trim()
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function classifyBookmarkRelation({
+  exactBookmarks,
+  displayBookmarks,
+}: {
+  exactBookmarks: string[];
+  displayBookmarks: string[];
+}): WorkspaceBookmarkRelation {
+  if (exactBookmarks.length > 0) {
+    return "exact";
+  }
+  if (displayBookmarks.length > 0) {
+    return "above";
+  }
+  return "none";
+}
+
 export async function readWorkspaceStatus(workspacePath: string): Promise<WorkspaceStatus> {
   const readStatus = () =>
     Promise.all([
@@ -223,6 +249,17 @@ export async function readWorkspaceStatus(workspacePath: string): Promise<Worksp
         "log",
         "-r",
         EFFECTIVE_WORKSPACE_REVSET,
+        "-n",
+        "1",
+        "--no-graph",
+        "-T",
+        "bookmarks.map(|b| b.name()).join(\",\") ++ \"\\n\"",
+      ], workspacePath),
+      runCheckedCommand([
+        "jj",
+        "log",
+        "-r",
+        DISPLAY_BOOKMARK_REVSET,
         "-n",
         "1",
         "--no-graph",
@@ -244,7 +281,8 @@ export async function readWorkspaceStatus(workspacePath: string): Promise<Worksp
     ]);
 
   const [
-    bookmarkOutput,
+    exactBookmarkOutput,
+    displayBookmarkOutput,
     diffText,
     effectiveDiffText,
     conflictedCount,
@@ -252,11 +290,13 @@ export async function readWorkspaceStatus(workspacePath: string): Promise<Worksp
     mergedLocalCount,
   ] = await withStaleWorkspaceRetry(workspacePath, readStatus);
 
-  const bookmarks = bookmarkOutput
-    .trim()
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
+  const exactBookmarks = parseBookmarks(exactBookmarkOutput);
+  const displayBookmarks = parseBookmarks(displayBookmarkOutput);
+  const bookmarks = exactBookmarks.length > 0 ? exactBookmarks : displayBookmarks;
+  const bookmarkRelation = classifyBookmarkRelation({
+    exactBookmarks,
+    displayBookmarks,
+  });
   const hasWorkingCopyChanges = diffText.trim().length > 0;
   const workspaceState = classifyWorkspaceState({
     hasConflicts: conflictedCount > 0,
@@ -271,6 +311,7 @@ export async function readWorkspaceStatus(workspacePath: string): Promise<Worksp
     effectiveAddedLines: effectiveDiffStats.addedLines,
     effectiveRemovedLines: effectiveDiffStats.removedLines,
     bookmarks,
+    bookmarkRelation,
     unreadNotes: 0,
     activeAgentCount: 0,
     agentAttentionState: null,

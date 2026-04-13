@@ -44,6 +44,7 @@ export class AppDatabase {
         effective_added_lines integer not null default 0,
         effective_removed_lines integer not null default 0,
         bookmarks text not null default '',
+        bookmark_relation text not null default 'none',
         unread_notes integer not null default 0,
         active_agent_count integer not null default 0,
         agent_attention_state text,
@@ -138,6 +139,11 @@ export class AppDatabase {
         "alter table workspaces add column effective_removed_lines integer not null default 0",
       );
     }
+    if (!workspaceColumns.some((column) => column.name === "bookmark_relation")) {
+      this.db.exec(
+        "alter table workspaces add column bookmark_relation text not null default 'none'",
+      );
+    }
   }
 
   close(): void {
@@ -192,6 +198,7 @@ export class AppDatabase {
           effective_added_lines,
           effective_removed_lines,
           bookmarks,
+          bookmark_relation,
           unread_notes,
           active_agent_count,
           agent_attention_state,
@@ -201,6 +208,7 @@ export class AppDatabase {
           updated_at,
           last_opened_at
         ) values (
+          ?,
           ?,
           ?,
           ?,
@@ -234,6 +242,7 @@ export class AppDatabase {
           effective_added_lines = excluded.effective_added_lines,
           effective_removed_lines = excluded.effective_removed_lines,
           bookmarks = excluded.bookmarks,
+          bookmark_relation = excluded.bookmark_relation,
           unread_notes = excluded.unread_notes,
           active_agent_count = excluded.active_agent_count,
           agent_attention_state = excluded.agent_attention_state,
@@ -255,6 +264,7 @@ export class AppDatabase {
         workspace.effectiveAddedLines,
         workspace.effectiveRemovedLines,
         JSON.stringify(workspace.bookmarks),
+        workspace.bookmarkRelation,
         workspace.unreadNotes,
         workspace.activeAgentCount,
         workspace.agentAttentionState,
@@ -281,6 +291,7 @@ export class AppDatabase {
           effective_added_lines as effectiveAddedLines,
           effective_removed_lines as effectiveRemovedLines,
           bookmarks,
+          bookmark_relation as bookmarkRelation,
           unread_notes as unreadNotes,
           active_agent_count as activeAgentCount,
           agent_attention_state as agentAttentionState,
@@ -306,6 +317,7 @@ export class AppDatabase {
       effectiveAddedLines: Number(row.effectiveAddedLines),
       effectiveRemovedLines: Number(row.effectiveRemovedLines),
       bookmarks: JSON.parse(String(row.bookmarks)),
+      bookmarkRelation: String(row.bookmarkRelation) as WorkspaceSummary["bookmarkRelation"],
       unreadNotes: Number(row.unreadNotes),
       activeAgentCount: Number(row.activeAgentCount),
       agentAttentionState:

@@ -243,7 +243,6 @@ textarea {
 
 .workspace-header-meta,
 .project-path,
-.workspace-meta,
 .pane-subheader,
 .eyebrow {
   color: var(--color-text-muted);
@@ -251,7 +250,6 @@ textarea {
 }
 
 .sidebar .project-path,
-.sidebar .workspace-meta,
 .sidebar .eyebrow {
   color: var(--color-nav-muted);
 }
@@ -469,7 +467,7 @@ textarea {
 }
 
 .workspace-attention-dot {
-  margin-right: 2px;
+  margin-left: 2px;
 }
 
 @keyframes agent-attention-spin {
@@ -484,10 +482,6 @@ textarea {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.workspace-activity-badge {
-  flex: 0 0 auto;
 }
 
 .workspace-side-actions {

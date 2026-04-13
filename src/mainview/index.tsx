@@ -46,7 +46,6 @@ import {
   agentAttentionLabel,
 } from "../shared/agent-attention";
 import {
-  displayWorkspacePath,
   hasRecordedWorkspacePath,
 } from "../shared/types";
 import {
@@ -662,24 +661,6 @@ function terminalStatusLabel(payload: TerminalPanePayload): string {
   return "inactive";
 }
 
-function relativeTime(timestamp: number): string {
-  if (!timestamp) {
-    return "";
-  }
-
-  const diff = Date.now() - timestamp;
-  if (diff < 60_000) {
-    return "active now";
-  }
-  if (diff < 3_600_000) {
-    return `${Math.max(1, Math.round(diff / 60_000))}m`;
-  }
-  if (diff < 86_400_000) {
-    return `${Math.max(1, Math.round(diff / 3_600_000))}h`;
-  }
-  return `${Math.max(1, Math.round(diff / 86_400_000))}d`;
-}
-
 function workspaceStateDescription(state: WorkspaceState): string {
   switch (state) {
     case "published":
@@ -720,6 +701,14 @@ function workspaceStateBeadText(workspace: WorkspaceSummary): string {
     return `${label} +${workspace.effectiveAddedLines}/-${workspace.effectiveRemovedLines}`;
   }
   return label;
+}
+
+function workspaceBookmarkLabel(workspace: WorkspaceSummary): string {
+  const names = workspace.bookmarks.join(", ");
+  if (workspace.bookmarkRelation === "above") {
+    return `${names} (+)`;
+  }
+  return names;
 }
 
 function currentViewportWidth(): number {
@@ -1618,25 +1607,19 @@ function App(): React.ReactElement {
                         }}
                       >
                         <div className="workspace-item-row workspace-item-head">
+                          <span className="workspace-name">{workspace.workspaceName}</span>
                           {agentAttentionClassName(workspace.agentAttentionState) && (
                             <span
                               className={`agent-attention-dot workspace-attention-dot ${agentAttentionClassName(workspace.agentAttentionState)}`}
                               title={agentAttentionLabel(workspace.agentAttentionState) ?? undefined}
                             />
                           )}
-                          <span className="workspace-name">{workspace.workspaceName}</span>
-                          {workspace.recentActivityAt > 0 && (
-                            <span className="badge accent workspace-activity-badge">
-                              {relativeTime(workspace.recentActivityAt)}
-                            </span>
-                          )}
-                          {workspace.bookmarks.length > 0 && (
-                            <span className="workspace-branch-info">{workspace.bookmarks.join(", ")}</span>
-                          )}
                         </div>
-                        <div className="workspace-item-row workspace-meta">
-                          <span>{displayWorkspacePath(workspace.workspacePath)}</span>
-                        </div>
+                        {workspace.bookmarks.length > 0 && (
+                          <div className="workspace-item-row workspace-bookmark-row">
+                            <span className="workspace-branch-info">{workspaceBookmarkLabel(workspace)}</span>
+                          </div>
+                        )}
                         <div className="workspace-badges">
                           {!hasRecordedWorkspacePath(workspace.workspacePath) && (
                             <span className="badge warning">missing path</span>
