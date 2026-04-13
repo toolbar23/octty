@@ -3,7 +3,6 @@ import { init as initGhostty, Terminal, FitAddon, type ITheme } from "ghostty-we
 import React, {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -53,10 +52,12 @@ import {
   shouldFlushTerminalInputImmediately,
   takeStringChunk,
 } from "../shared/terminal-batching";
+import { appShortcutActionForKeyEvent } from "../shared/app-shortcuts";
 import { shouldRemapShiftEnterToCtrlJ } from "../shared/terminal-shortcuts";
 import {
   isAgentTerminalKind,
   supportsTerminalAttention,
+  terminalRestoreRerenderMode,
   terminalKindLabel,
 } from "../shared/terminal-kind";
 import {
@@ -806,7 +807,16 @@ function mergeWorkspace(
   workspaces: WorkspaceSummary[],
   workspace: WorkspaceSummary,
 ): WorkspaceSummary[] {
-  return workspaces.map((item) => (item.id === workspace.id ? workspace : item));
+  const next = workspaces.map((item) => (item.id === workspace.id ? workspace : item));
+  return next.some((item) => item.id === workspace.id) ? next : [...next, workspace];
+}
+
+function mergeProjectRoot(
+  roots: BootstrapPayload["projectRoots"],
+  root: BootstrapPayload["projectRoots"][number],
+): BootstrapPayload["projectRoots"] {
+  const next = roots.map((item) => (item.id === root.id ? root : item));
+  return next.some((item) => item.id === root.id) ? next : [...next, root];
 }
 
 function App(): React.ReactElement {
@@ -819,11 +829,14 @@ function App(): React.ReactElement {
   const [error, setError] = useState<string | null>(null);
   const [loadingWorkspaceId, setLoadingWorkspaceId] = useState<string | null>(null);
   const [showRootForm, setShowRootForm] = useState(false);
-  const [showWorkspaceForm, setShowWorkspaceForm] = useState(false);
   const [rootPathInput, setRootPathInput] = useState("");
-  const [workspaceRootId, setWorkspaceRootId] = useState<string>("");
-  const [workspacePathInput, setWorkspacePathInput] = useState("");
-  const [workspaceNameInput, setWorkspaceNameInput] = useState("");
+  const [openRootMenuId, setOpenRootMenuId] = useState<string | null>(null);
+  const [openWorkspaceMenuId, setOpenWorkspaceMenuId] = useState<string | null>(null);
+  const [editingRootId, setEditingRootId] = useState<string | null>(null);
+  const [editingRootDisplayName, setEditingRootDisplayName] = useState("");
+  const [editingWorkspaceId, setEditingWorkspaceId] = useState<string | null>(null);
+  const [editingWorkspaceDisplayName, setEditingWorkspaceDisplayName] = useState("");
+  const [creatingWorkspaceRootId, setCreatingWorkspaceRootId] = useState<string | null>(null);
   const [keyboardNavigationRequest, setKeyboardNavigationRequest] =
     useState<KeyboardNavigationRequest | null>(null);
 
@@ -906,6 +919,22 @@ function App(): React.ReactElement {
   useEffect(() => {
     activeWorkspaceIdRef.current = activeWorkspaceId;
   }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("[data-nav-menu-root='true']")) {
+        return;
+      }
+      setOpenRootMenuId(null);
+      setOpenWorkspaceMenuId(null);
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, []);
 
   const subscribeSession = useCallback(
     (sessionId: string, listener: (event: SessionEvent) => void) => {
@@ -1025,9 +1054,6 @@ function App(): React.ReactElement {
     void apiFetch<BootstrapPayload>("/api/bootstrap")
       .then((payload) => {
         setBootstrap(payload);
-        if (payload.workspaces.length > 0) {
-          setWorkspaceRootId(payload.projectRoots[0]?.id ?? "");
-        }
       })
       .catch((err) => {
         setError(err instanceof Error ? err.message : String(err));
@@ -1061,9 +1087,6 @@ function App(): React.ReactElement {
       if (message.type === "nav-updated") {
         const payload = message.payload as BootstrapPayload;
         setBootstrap(payload);
-        if (!activeWorkspaceIdRef.current && payload.workspaces.length > 0) {
-          setWorkspaceRootId(payload.projectRoots[0]?.id ?? "");
-        }
         return;
       }
 
@@ -1183,19 +1206,6 @@ function App(): React.ReactElement {
     socket.send(JSON.stringify(message));
   }, []);
 
-  const activeWorkspace = useMemo(
-    () =>
-      activeWorkspaceId
-        ? bootstrap.workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null
-        : null,
-    [activeWorkspaceId, bootstrap.workspaces],
-  );
-
-  const openAddWorkspace = useCallback(() => {
-    setWorkspaceRootId(bootstrap.projectRoots[0]?.id ?? "");
-    setShowWorkspaceForm(true);
-  }, [bootstrap.projectRoots]);
-
   const browseRoot = useCallback(async () => {
     try {
       const data = await apiFetch<{ path: string | null }>("/api/dialog/directory", {
@@ -1210,20 +1220,6 @@ function App(): React.ReactElement {
     }
   }, [rootPathInput]);
 
-  const browseWorkspacePath = useCallback(async () => {
-    try {
-      const data = await apiFetch<{ path: string | null }>("/api/dialog/directory", {
-        method: "POST",
-        body: JSON.stringify({ startingFolder: workspacePathInput || undefined }),
-      });
-      if (data.path) {
-        setWorkspacePathInput(data.path);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }, [workspacePathInput]);
-
   const submitRoot = useCallback(async () => {
     try {
       await apiFetch("/api/project-roots", {
@@ -1237,23 +1233,26 @@ function App(): React.ReactElement {
     }
   }, [rootPathInput]);
 
-  const submitWorkspace = useCallback(async () => {
+  const createWorkspace = useCallback(async (rootId: string) => {
+    setCreatingWorkspaceRootId(rootId);
     try {
-      await apiFetch("/api/workspaces", {
+      const workspace = await apiFetch<WorkspaceSummary>("/api/workspaces", {
         method: "POST",
         body: JSON.stringify({
-          rootId: workspaceRootId,
-          destinationPath: workspacePathInput,
-          workspaceName: workspaceNameInput || undefined,
+          rootId,
         }),
       });
-      setShowWorkspaceForm(false);
-      setWorkspacePathInput("");
-      setWorkspaceNameInput("");
+      setBootstrap((current) => ({
+        ...current,
+        workspaces: mergeWorkspace(current.workspaces, workspace),
+      }));
+      await loadWorkspace(workspace.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCreatingWorkspaceRootId((current) => (current === rootId ? null : current));
     }
-  }, [workspaceNameInput, workspacePathInput, workspaceRootId]);
+  }, [loadWorkspace]);
 
   const forgetWorkspace = useCallback(async (workspaceId: string) => {
     const confirmed = window.confirm("Forget this workspace from JJ and the app?");
@@ -1288,6 +1287,83 @@ function App(): React.ReactElement {
       await apiFetch(`/api/project-roots/${encodeURIComponent(rootId)}`, {
         method: "DELETE",
       });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  const startRootRename = useCallback((root: BootstrapPayload["projectRoots"][number]) => {
+    setEditingRootId(root.id);
+    setEditingRootDisplayName(root.displayName);
+    setOpenRootMenuId(null);
+  }, []);
+
+  const startWorkspaceRename = useCallback((workspace: WorkspaceSummary) => {
+    setEditingWorkspaceId(workspace.id);
+    setEditingWorkspaceDisplayName(workspace.displayName);
+    setOpenWorkspaceMenuId(null);
+  }, []);
+
+  const renameProjectRoot = useCallback(async (rootId: string, displayName: string) => {
+    const nextDisplayName = displayName.trim();
+    if (!nextDisplayName) {
+      setError("Display name cannot be empty");
+      return;
+    }
+
+    try {
+      const root = await apiFetch<BootstrapPayload["projectRoots"][number]>(
+        `/api/project-roots/${encodeURIComponent(rootId)}/display-name`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ displayName: nextDisplayName }),
+        },
+      );
+      setBootstrap((current) => ({
+        ...current,
+        projectRoots: mergeProjectRoot(current.projectRoots, root),
+      }));
+      setEditingRootId(null);
+      setEditingRootDisplayName("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  const renameWorkspace = useCallback(async (workspaceId: string, displayName: string) => {
+    const nextDisplayName = displayName.trim();
+    if (!nextDisplayName) {
+      setError("Display name cannot be empty");
+      return;
+    }
+
+    try {
+      const workspace = await apiFetch<WorkspaceSummary>(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/display-name`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ displayName: nextDisplayName }),
+        },
+      );
+      setBootstrap((current) => ({
+        ...current,
+        workspaces: mergeWorkspace(current.workspaces, workspace),
+      }));
+      setDetails((current) => {
+        const detail = current[workspaceId];
+        if (!detail) {
+          return current;
+        }
+        return {
+          ...current,
+          [workspaceId]: {
+            ...detail,
+            workspace,
+          },
+        };
+      });
+      setEditingWorkspaceId(null);
+      setEditingWorkspaceDisplayName("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -1360,6 +1436,34 @@ function App(): React.ReactElement {
       const activePaneId = detail?.snapshot.activePaneId ?? null;
 
       switch (action) {
+        case "open-shell-pane":
+        case "open-codex-pane":
+        case "open-pi-pane":
+        case "open-nvim-pane":
+        case "open-jjui-pane":
+        case "open-diff-pane": {
+          if (!detail) {
+            return;
+          }
+
+          if (action === "open-diff-pane") {
+            addPaneToWorkspace(detail.workspace.id, "diff");
+            return;
+          }
+
+          const terminalKind =
+            action === "open-shell-pane"
+              ? "shell"
+              : action === "open-codex-pane"
+                ? "codex"
+                : action === "open-pi-pane"
+                  ? "pi"
+                  : action === "open-nvim-pane"
+                    ? "nvim"
+                    : "jjui";
+          addPaneToWorkspace(detail.workspace.id, "shell", terminalKind);
+          return;
+        }
         case "resize-pane-left":
         case "resize-pane-right": {
           if (!detail || !activePaneId) {
@@ -1473,7 +1577,14 @@ function App(): React.ReactElement {
           return;
       }
     },
-    [activeWorkspaceId, bootstrap.workspaces, loadWorkspace, mutateWorkspace, sendSocketMessage],
+    [
+      activeWorkspaceId,
+      addPaneToWorkspace,
+      bootstrap.workspaces,
+      loadWorkspace,
+      mutateWorkspace,
+      sendSocketMessage,
+    ],
   );
 
   useEffect(() => {
@@ -1481,53 +1592,17 @@ function App(): React.ReactElement {
       if (event.defaultPrevented || event.isComposing) {
         return;
       }
-      if (showRootForm || showWorkspaceForm) {
+      if (showRootForm || editingRootId || editingWorkspaceId) {
         return;
       }
       if (!event.ctrlKey || event.metaKey) {
         return;
       }
-
-      if (
-        event.altKey &&
-        !event.shiftKey &&
-        (event.key === "ArrowLeft" || event.key === "ArrowRight")
-      ) {
+      const action = appShortcutActionForKeyEvent(event);
+      if (action) {
         event.preventDefault();
         event.stopPropagation();
-        invokeAppShortcut(event.key === "ArrowRight" ? "resize-pane-right" : "resize-pane-left");
-        return;
-      }
-
-      if (
-        event.shiftKey &&
-        event.altKey &&
-        (event.key === "ArrowLeft" || event.key === "ArrowRight")
-      ) {
-        event.preventDefault();
-        event.stopPropagation();
-        invokeAppShortcut(event.key === "ArrowLeft" ? "move-pane-left" : "move-pane-right");
-        return;
-      }
-
-      if (event.altKey) {
-        return;
-      }
-
-      if (
-        event.shiftKey &&
-        (event.key === "ArrowLeft" || event.key === "ArrowRight")
-      ) {
-        event.preventDefault();
-        event.stopPropagation();
-        invokeAppShortcut(event.key === "ArrowLeft" ? "focus-pane-left" : "focus-pane-right");
-        return;
-      }
-
-      if (event.shiftKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
-        event.preventDefault();
-        event.stopPropagation();
-        invokeAppShortcut(event.key === "ArrowUp" ? "focus-workspace-up" : "focus-workspace-down");
+        invokeAppShortcut(action);
         return;
       }
     };
@@ -1536,7 +1611,7 @@ function App(): React.ReactElement {
     return () => {
       window.removeEventListener("keydown", handleShortcut, true);
     };
-  }, [activeWorkspaceId, bootstrap.workspaces, invokeAppShortcut, loadWorkspace, mutateWorkspace, showRootForm, showWorkspaceForm]);
+  }, [activeWorkspaceId, bootstrap.workspaces, editingRootId, editingWorkspaceId, invokeAppShortcut, loadWorkspace, mutateWorkspace, showRootForm]);
 
   useEffect(() => {
     const orbitWindow = window as WorkspaceOrbitWindow;
@@ -1579,78 +1654,261 @@ function App(): React.ReactElement {
             <section key={root.id} className="project-group">
               <div className="project-header">
                 <div className="project-header-copy">
-                  <div className="project-title">{root.label}</div>
+                  <div className="project-title-row">
+                    {editingRootId === root.id ? (
+                      <input
+                        autoFocus
+                        className="inline-rename-input"
+                        value={editingRootDisplayName}
+                        onChange={(event) => setEditingRootDisplayName(event.target.value)}
+                        onClick={(event) => event.stopPropagation()}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            event.currentTarget.dataset.skipCommit = "0";
+                            event.currentTarget.blur();
+                          }
+                          if (event.key === "Escape") {
+                            event.preventDefault();
+                            event.currentTarget.dataset.skipCommit = "1";
+                            setEditingRootId(null);
+                            setEditingRootDisplayName("");
+                            event.currentTarget.blur();
+                          }
+                        }}
+                        onBlur={(event) => {
+                          if (event.currentTarget.dataset.skipCommit === "1") {
+                            event.currentTarget.dataset.skipCommit = "0";
+                            return;
+                          }
+                          if (editingRootDisplayName.trim() === root.displayName) {
+                            setEditingRootId(null);
+                            setEditingRootDisplayName("");
+                            return;
+                          }
+                          void renameProjectRoot(root.id, editingRootDisplayName);
+                        }}
+                      />
+                    ) : (
+                      <span
+                        className="project-title"
+                        onDoubleClick={(event) => {
+                          event.stopPropagation();
+                          startRootRename(root);
+                        }}
+                      >
+                        {root.displayName}
+                      </span>
+                    )}
+                    <div className="inline-menu-root" data-nav-menu-root="true">
+                      <button
+                        className="sidebar-inline-button inline-menu-trigger"
+                        aria-label={`Project actions for ${root.displayName}`}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setOpenWorkspaceMenuId(null);
+                          setOpenRootMenuId((current) => (current === root.id ? null : root.id));
+                        }}
+                      >
+                        ...
+                      </button>
+                      {openRootMenuId === root.id && (
+                        <div className="inline-menu">
+                          <button
+                            className="inline-menu-item"
+                            disabled={creatingWorkspaceRootId === root.id}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setOpenRootMenuId(null);
+                              void createWorkspace(root.id);
+                            }}
+                          >
+                            {creatingWorkspaceRootId === root.id ? "Creating..." : "New Workspace"}
+                          </button>
+                          <button
+                            className="inline-menu-item"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              startRootRename(root);
+                            }}
+                          >
+                            Rename
+                          </button>
+                          <button
+                            className="inline-menu-item"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setOpenRootMenuId(null);
+                              void removeProjectRoot(root.id);
+                            }}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
-                <button className="sidebar-inline-button" onClick={() => removeProjectRoot(root.id)}>
-                  Remove
-                </button>
               </div>
 
               <div className="workspace-list">
                 {bootstrap.workspaces
                   .filter((workspace) => workspace.rootId === root.id)
-                  .map((workspace) => (
-                    <div
-                      key={workspace.id}
-                      className={`workspace-item ${workspace.id === activeWorkspaceId ? "selected" : ""} ${hasRecordedWorkspacePath(workspace.workspacePath) ? "" : "unavailable"}`}
-                    >
-                      <button
-                        className="workspace-select"
-                        onClick={() => {
-                          if (!hasRecordedWorkspacePath(workspace.workspacePath)) {
-                            setError(
-                              `JJ reports no recorded path for workspace "${workspace.workspaceName}". Forget it in JJ or reopen it from a real workspace directory.`,
-                            );
-                            return;
-                          }
-                          void loadWorkspace(workspace.id);
-                        }}
+                  .map((workspace) => {
+                    const attentionClassName = agentAttentionClassName(workspace.agentAttentionState);
+                    const attentionLabel = agentAttentionLabel(workspace.agentAttentionState);
+
+                    return (
+                      <div
+                        key={workspace.id}
+                        className={`workspace-item ${workspace.id === activeWorkspaceId ? "selected" : ""} ${hasRecordedWorkspacePath(workspace.workspacePath) ? "" : "unavailable"}`}
                       >
-                        <div className="workspace-item-row workspace-item-head">
-                          <span className="workspace-name">{workspace.workspaceName}</span>
-                          {agentAttentionClassName(workspace.agentAttentionState) && (
-                            <span
-                              className={`agent-attention-dot workspace-attention-dot ${agentAttentionClassName(workspace.agentAttentionState)}`}
-                              title={agentAttentionLabel(workspace.agentAttentionState) ?? undefined}
-                            />
-                          )}
-                        </div>
-                        {workspace.bookmarks.length > 0 && (
-                          <div className="workspace-item-row workspace-bookmark-row">
-                            <span className="workspace-branch-info">{workspaceBookmarkLabel(workspace)}</span>
-                          </div>
-                        )}
-                        <div className="workspace-badges">
-                          {!hasRecordedWorkspacePath(workspace.workspacePath) && (
-                            <span className="badge warning">missing path</span>
-                          )}
-                          {workspace.unreadNotes > 0 && (
-                            <span className="badge">{workspace.unreadNotes} note</span>
-                          )}
-                          {workspace.activeAgentCount > 0 && (
-                            <span className="badge">{workspace.activeAgentCount} agent</span>
-                          )}
-                        </div>
-                      </button>
-                      <div className="workspace-side-actions">
-                        <span
-                          className={`workspace-state-bead ${workspaceStateClassName(workspace.workspaceState)} ${workspace.hasWorkingCopyChanges ? "changed" : "unchanged"}`}
-                          title={workspaceStateTitle(workspace)}
-                          aria-label={workspaceStateTitle(workspace)}
-                        >
-                          {workspaceStateBeadText(workspace)}
-                        </span>
-                        <button
-                          className="sidebar-inline-button inline-action"
+                        <div
+                          className="workspace-select"
+                          role="button"
+                          tabIndex={0}
                           onClick={() => {
-                            void forgetWorkspace(workspace.id);
+                            if (!hasRecordedWorkspacePath(workspace.workspacePath)) {
+                              setError(
+                                `JJ reports no recorded path for workspace "${workspace.workspaceName}". Forget it in JJ or reopen it from a real workspace directory.`,
+                              );
+                              return;
+                            }
+                            void loadWorkspace(workspace.id);
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key !== "Enter" && event.key !== " ") {
+                              return;
+                            }
+                            event.preventDefault();
+                            if (!hasRecordedWorkspacePath(workspace.workspacePath)) {
+                              setError(
+                                `JJ reports no recorded path for workspace "${workspace.workspaceName}". Forget it in JJ or reopen it from a real workspace directory.`,
+                              );
+                              return;
+                            }
+                            void loadWorkspace(workspace.id);
                           }}
                         >
-                          Forget
-                        </button>
+                          <div className="workspace-item-row workspace-item-head">
+                            <div className="workspace-title-row">
+                              <span
+                                className={`agent-attention-dot workspace-attention-dot ${attentionClassName ?? "workspace-attention-dot-null"}`}
+                                title={attentionLabel ?? "No activity"}
+                                aria-hidden="true"
+                              />
+                              {editingWorkspaceId === workspace.id ? (
+                                <input
+                                  autoFocus
+                                  className="inline-rename-input"
+                                  value={editingWorkspaceDisplayName}
+                                  onChange={(event) => setEditingWorkspaceDisplayName(event.target.value)}
+                                  onClick={(event) => event.stopPropagation()}
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Enter") {
+                                      event.preventDefault();
+                                      event.currentTarget.dataset.skipCommit = "0";
+                                      event.currentTarget.blur();
+                                    }
+                                    if (event.key === "Escape") {
+                                      event.preventDefault();
+                                      event.currentTarget.dataset.skipCommit = "1";
+                                      setEditingWorkspaceId(null);
+                                      setEditingWorkspaceDisplayName("");
+                                      event.currentTarget.blur();
+                                    }
+                                  }}
+                                  onBlur={(event) => {
+                                    if (event.currentTarget.dataset.skipCommit === "1") {
+                                      event.currentTarget.dataset.skipCommit = "0";
+                                      return;
+                                    }
+                                    if (editingWorkspaceDisplayName.trim() === workspace.displayName) {
+                                      setEditingWorkspaceId(null);
+                                      setEditingWorkspaceDisplayName("");
+                                      return;
+                                    }
+                                    void renameWorkspace(workspace.id, editingWorkspaceDisplayName);
+                                  }}
+                                />
+                              ) : (
+                                <span
+                                  className="workspace-name"
+                                  onDoubleClick={(event) => {
+                                    event.stopPropagation();
+                                    startWorkspaceRename(workspace);
+                                  }}
+                                >
+                                  {workspace.displayName}
+                                </span>
+                              )}
+                              <span
+                                className={`workspace-state-bead ${workspaceStateClassName(workspace.workspaceState)} ${workspace.hasWorkingCopyChanges ? "changed" : "unchanged"}`}
+                                title={workspaceStateTitle(workspace)}
+                                aria-label={workspaceStateTitle(workspace)}
+                              >
+                                {workspaceStateBeadText(workspace)}
+                              </span>
+                              <div className="inline-menu-root" data-nav-menu-root="true">
+                                <button
+                                  className="sidebar-inline-button inline-menu-trigger"
+                                  aria-label={`Workspace actions for ${workspace.displayName}`}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    setOpenRootMenuId(null);
+                                    setOpenWorkspaceMenuId((current) =>
+                                      current === workspace.id ? null : workspace.id,
+                                    );
+                                  }}
+                                >
+                                  ...
+                                </button>
+                                {openWorkspaceMenuId === workspace.id && (
+                                  <div className="inline-menu">
+                                    <button
+                                      className="inline-menu-item"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        startWorkspaceRename(workspace);
+                                      }}
+                                    >
+                                      Rename
+                                    </button>
+                                    <button
+                                      className="inline-menu-item"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        setOpenWorkspaceMenuId(null);
+                                        void forgetWorkspace(workspace.id);
+                                      }}
+                                    >
+                                      Forget
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                          {workspace.bookmarks.length > 0 && (
+                            <div className="workspace-item-row workspace-bookmark-row">
+                              <span className="workspace-branch-info">{workspaceBookmarkLabel(workspace)}</span>
+                            </div>
+                          )}
+                          <div className="workspace-badges">
+                            {!hasRecordedWorkspacePath(workspace.workspacePath) && (
+                              <span className="badge warning">missing path</span>
+                            )}
+                            {workspace.unreadNotes > 0 && (
+                              <span className="badge">{workspace.unreadNotes} note</span>
+                            )}
+                            {workspace.activeAgentCount > 0 && (
+                              <span className="badge">{workspace.activeAgentCount} agent</span>
+                            )}
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
               </div>
             </section>
           ))}
@@ -1665,9 +1923,6 @@ function App(): React.ReactElement {
         <div className="sidebar-footer">
           <div className="sidebar-actions">
             <button onClick={() => setShowRootForm(true)}>Add repo</button>
-            <button onClick={openAddWorkspace} disabled={bootstrap.projectRoots.length === 0}>
-              New workspace
-            </button>
           </div>
         </div>
       </aside>
@@ -1706,50 +1961,6 @@ function App(): React.ReactElement {
                 <button onClick={() => setShowRootForm(false)}>Cancel</button>
                 <button onClick={() => void submitRoot()} disabled={!rootPathInput.trim()}>
                   Add
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {showWorkspaceForm && (
-          <div className="modal-backdrop">
-            <div className="modal">
-              <h3>Create workspace</h3>
-              <label>
-                Project root
-                <select value={workspaceRootId} onChange={(event) => setWorkspaceRootId(event.target.value)}>
-                  {bootstrap.projectRoots.map((root) => (
-                    <option key={root.id} value={root.id}>
-                      {root.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Destination path
-                <div className="field-row">
-                  <input
-                    value={workspacePathInput}
-                    onChange={(event) => setWorkspacePathInput(event.target.value)}
-                  />
-                  <button onClick={() => void browseWorkspacePath()}>Browse</button>
-                </div>
-              </label>
-              <label>
-                Workspace name
-                <input
-                  value={workspaceNameInput}
-                  onChange={(event) => setWorkspaceNameInput(event.target.value)}
-                />
-              </label>
-              <div className="modal-actions">
-                <button onClick={() => setShowWorkspaceForm(false)}>Cancel</button>
-                <button
-                  onClick={() => void submitWorkspace()}
-                  disabled={!workspaceRootId || !workspacePathInput.trim()}
-                >
-                  Create
                 </button>
               </div>
             </div>
@@ -2605,6 +2816,7 @@ function TerminalPane({
   const onUpdatePaneRef = useRef(onUpdatePane);
   const pendingSessionStartRef = useRef<Promise<void> | null>(null);
   const resizeFrameRef = useRef<number | null>(null);
+  const restoreRerenderTimerRef = useRef<number | null>(null);
   const [statusText, setStatusText] = useState<string>(terminalStatusLabel(payload));
 
   useEffect(() => {
@@ -2688,6 +2900,13 @@ function TerminalPane({
     };
   }, []);
 
+  const cancelRestoreRerender = useCallback(() => {
+    if (restoreRerenderTimerRef.current !== null) {
+      window.clearTimeout(restoreRerenderTimerRef.current);
+      restoreRerenderTimerRef.current = null;
+    }
+  }, []);
+
   const scheduleFitAndResizeSync = useCallback(() => {
     if (resizeFrameRef.current !== null) {
       window.cancelAnimationFrame(resizeFrameRef.current);
@@ -2714,6 +2933,26 @@ function TerminalPane({
       onResizeSessionRef.current(activePayload.sessionId, cols, rows);
     });
   }, [pane.id]);
+
+  const scheduleRestoreRerender = useCallback((sessionId: string, kind: TerminalKind) => {
+    const rerenderMode = terminalRestoreRerenderMode(kind);
+    if (!rerenderMode) {
+      return;
+    }
+
+    cancelRestoreRerender();
+    restoreRerenderTimerRef.current = window.setTimeout(() => {
+      restoreRerenderTimerRef.current = null;
+      if (rerenderMode === "resize") {
+        scheduleFitAndResizeSync();
+        window.setTimeout(() => {
+          if (payloadRef.current.sessionId === sessionId) {
+            scheduleFitAndResizeSync();
+          }
+        }, 80);
+      }
+    }, 40);
+  }, [cancelRestoreRerender, scheduleFitAndResizeSync]);
 
   useEffect(() => {
     if (!isVisible) {
@@ -2750,7 +2989,7 @@ function TerminalPane({
   }, [isVisible, pane.id, scheduleFitAndResizeSync]);
 
   const startSession = useCallback(
-    (kind: TerminalKind, options?: { focus?: boolean }) => {
+    (kind: TerminalKind, options?: { focus?: boolean; rerenderAfterRestore?: boolean }) => {
       const pending = pendingSessionStartRef.current;
       if (pending) {
         return pending;
@@ -2771,6 +3010,9 @@ function TerminalPane({
         .current(workspace.id, pane.id, kind, cols, rows)
         .then((session) => {
           onResizeSessionRef.current(session.id, cols, rows);
+          if (options?.rerenderAfterRestore) {
+            scheduleRestoreRerender(session.id, session.kind);
+          }
           setStatusText("live");
           if (options?.focus) {
             focusTerminalInput();
@@ -2799,7 +3041,7 @@ function TerminalPane({
       pendingSessionStartRef.current = next;
       return next;
     },
-    [currentTerminalSize, focusTerminalInput, pane.id, workspace.id],
+    [currentTerminalSize, focusTerminalInput, pane.id, scheduleRestoreRerender, workspace.id],
   );
 
   useEffect(() => {
@@ -2813,6 +3055,7 @@ function TerminalPane({
 
       runtime = getOrCreateTerminalRuntime(pane.id);
       runtimeRef.current = runtime;
+      cancelRestoreRerender();
       runtime.sendInput = (sessionId, data) => onSendSessionInputRef.current(sessionId, data);
       runtime.resizeSession = (sessionId, cols, rows) =>
         onResizeSessionRef.current(sessionId, cols, rows);
@@ -2867,6 +3110,7 @@ function TerminalPane({
             if (session.screen) {
               runtime.enqueueWrite(session.screen);
             }
+            scheduleRestoreRerender(session.id, session.kind);
           } else {
             onUpdatePaneRef.current((current) => ({
               ...current,
@@ -2909,7 +3153,10 @@ function TerminalPane({
           if (disposed) {
             return;
           }
-          await startSession(payload.kind, { focus: false });
+          await startSession(payload.kind, {
+            focus: false,
+            rerenderAfterRestore: true,
+          });
         } else {
           setStatusText(terminalStatusLabel(payload));
         }
@@ -2929,6 +3176,7 @@ function TerminalPane({
         window.cancelAnimationFrame(resizeFrameRef.current);
         resizeFrameRef.current = null;
       }
+      cancelRestoreRerender();
       if (runtime) {
         runtime.onExit = () => {};
         runtime.flushInput();
@@ -2947,7 +3195,9 @@ function TerminalPane({
     payload.kind,
     payload.sessionId,
     payload.sessionState,
+    cancelRestoreRerender,
     resetSurface,
+    scheduleRestoreRerender,
     startSession,
     workspace.id,
   ]);

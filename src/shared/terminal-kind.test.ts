@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { isAgentTerminalKind, supportsTerminalAttention } from "./terminal-kind";
+import {
+  isAgentTerminalKind,
+  supportsTerminalAttention,
+  terminalRestoreRerenderMode,
+} from "./terminal-kind";
 
 describe("terminal attention kinds", () => {
   test("keeps agent-only behavior for Codex and Pi", () => {
@@ -14,5 +18,13 @@ describe("terminal attention kinds", () => {
     expect(supportsTerminalAttention("pi")).toBe(true);
     expect(supportsTerminalAttention("nvim")).toBe(false);
     expect(supportsTerminalAttention("jjui")).toBe(false);
+  });
+
+  test("defines a restore rerender mode for every terminal kind", () => {
+    expect(terminalRestoreRerenderMode("shell")).toBe("resize");
+    expect(terminalRestoreRerenderMode("codex")).toBe("resize");
+    expect(terminalRestoreRerenderMode("pi")).toBe("resize");
+    expect(terminalRestoreRerenderMode("nvim")).toBe("resize");
+    expect(terminalRestoreRerenderMode("jjui")).toBe("resize");
   });
 });

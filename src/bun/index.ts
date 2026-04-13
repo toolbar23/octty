@@ -8,6 +8,7 @@ import type {
   PickDirectoryPayload,
   SaveNotePayload,
   TerminalCreateRequest,
+  UpdateDisplayNamePayload,
   WorkspaceSnapshotPayload,
 } from "../shared/types";
 import { WorkspaceService } from "./service";
@@ -100,10 +101,25 @@ const server = Bun.serve<WebSocketData>({
           return noContent();
         }
 
+        if (request.method === "PUT" && url.pathname.endsWith("/display-name") && url.pathname.startsWith("/api/project-roots/")) {
+          const rootId = decodeURIComponent(
+            url.pathname.replace("/api/project-roots/", "").replace("/display-name", ""),
+          );
+          const payload = await readJson<UpdateDisplayNamePayload>(request);
+          return json(await service.updateProjectRootDisplayName(rootId, payload.displayName));
+        }
+
         if (request.method === "POST" && url.pathname === "/api/workspaces") {
           const payload = await readJson<CreateWorkspacePayload>(request);
-          await service.createWorkspace(payload);
-          return noContent();
+          return json(await service.createWorkspace(payload), 201);
+        }
+
+        if (request.method === "PUT" && url.pathname.endsWith("/display-name") && url.pathname.startsWith("/api/workspaces/")) {
+          const workspaceId = decodeURIComponent(
+            url.pathname.replace("/api/workspaces/", "").replace("/display-name", ""),
+          );
+          const payload = await readJson<UpdateDisplayNamePayload>(request);
+          return json(await service.updateWorkspaceDisplayName(workspaceId, payload.displayName));
         }
 
         if (request.method === "DELETE" && url.pathname.startsWith("/api/workspaces/")) {

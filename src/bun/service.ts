@@ -1,4 +1,4 @@
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import {
@@ -67,6 +67,51 @@ interface WorkspaceRuntime {
 
 const DEBUG_TERMINAL_IO =
   process.env.OCTTY_DEBUG_TERMINAL === "1" || process.env.WORKSPACE_ORBIT_DEBUG_TERMINAL === "1";
+const DEFAULT_WORKSPACE_DIRECTORY = join(homedir(), "workspaces");
+const WORKSPACE_NAME_ADJECTIVES = [
+  "amber",
+  "blue",
+  "brisk",
+  "calm",
+  "clear",
+  "crisp",
+  "daring",
+  "ember",
+  "frost",
+  "gentle",
+  "golden",
+  "granite",
+  "green",
+  "lively",
+  "quiet",
+  "silver",
+  "steady",
+  "swift",
+  "tidy",
+  "wild",
+] as const;
+const WORKSPACE_NAME_NOUNS = [
+  "badger",
+  "bear",
+  "beetle",
+  "falcon",
+  "fox",
+  "gecko",
+  "heron",
+  "lynx",
+  "martin",
+  "otter",
+  "owl",
+  "panda",
+  "raven",
+  "seal",
+  "sparrow",
+  "stoat",
+  "swift",
+  "tiger",
+  "wolf",
+  "yak",
+] as const;
 
 function defaultDbPath(): string {
   const octtyPath = join(homedir(), ".local", "share", "octty", "state.sqlite");
@@ -76,6 +121,26 @@ function defaultDbPath(): string {
 
 function now(): number {
   return Date.now();
+}
+
+function sanitizeDisplayName(input: string): string {
+  return input.trim().replace(/\s+/g, " ");
+}
+
+function sanitizePathSegment(input: string): string {
+  const normalized = input
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || "workspace";
+}
+
+function randomWorkspaceSlug(): string {
+  const adjective =
+    WORKSPACE_NAME_ADJECTIVES[Math.floor(Math.random() * WORKSPACE_NAME_ADJECTIVES.length)];
+  const noun = WORKSPACE_NAME_NOUNS[Math.floor(Math.random() * WORKSPACE_NAME_NOUNS.length)];
+  return `${adjective}-${noun}`;
 }
 
 function formatTerminalChunk(data: string, limit = 120): string {
@@ -294,7 +359,7 @@ export class WorkspaceService {
     const record: ProjectRootRecord = {
       id: globalThis.crypto.randomUUID(),
       rootPath,
-      label: basename(rootPath),
+      displayName: basename(rootPath),
       createdAt: now(),
       updatedAt: now(),
     };
@@ -337,8 +402,9 @@ export class WorkspaceService {
         id: workspace.id,
         rootId,
         rootPath,
-        projectLabel: current?.label ?? basename(rootPath),
+        projectDisplayName: current?.displayName ?? basename(rootPath),
         workspaceName: workspace.workspaceName,
+        displayName: existing?.displayName ?? workspace.workspaceName,
         workspacePath: workspace.workspacePath,
         workspaceState: existing?.workspaceState ?? "unknown",
         hasWorkingCopyChanges: existing?.hasWorkingCopyChanges ?? false,
@@ -846,18 +912,119 @@ export class WorkspaceService {
     return sanitized;
   }
 
-  async createWorkspace(payload: CreateWorkspacePayload): Promise<void> {
+  private async buildWorkspaceDefaults(root: ProjectRootRecord): Promise<{
+    workspaceName: string;
+    destinationPath: string;
+  }> {
+    const repoDirectoryName = basename(root.rootPath) || "repo";
+    const baseDirectory = join(DEFAULT_WORKSPACE_DIRECTORY, repoDirectoryName);
+    const existingNames = new Set(
+      this.db
+        .listWorkspaces()
+        .filter((workspace) => workspace.rootId === root.id)
+        .map((workspace) => workspace.workspaceName),
+    );
+
+    await mkdir(baseDirectory, { recursive: true });
+
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const baseName = randomWorkspaceSlug();
+      const workspaceName = attempt === 0 ? baseName : `${baseName}-${attempt + 1}`;
+      const destinationPath = join(baseDirectory, workspaceName);
+      if (existingNames.has(workspaceName) || existsSync(destinationPath)) {
+        continue;
+      }
+      return {
+        workspaceName,
+        destinationPath,
+      };
+    }
+
+    throw new Error(`Could not find an unused workspace name under ${baseDirectory}`);
+  }
+
+  async createWorkspace(payload: CreateWorkspacePayload): Promise<WorkspaceSummary> {
     const root = this.db.listProjectRoots().find((item) => item.id === payload.rootId);
     if (!root) {
       throw new Error("Project root not found");
     }
 
-    await jjCreateWorkspace(root.rootPath, payload.destinationPath, payload.workspaceName);
+    const generated = await this.buildWorkspaceDefaults(root);
+    const requestedDestinationPath = payload.destinationPath?.trim() || "";
+    const workspaceName = payload.workspaceName?.trim()
+      ? sanitizePathSegment(payload.workspaceName)
+      : requestedDestinationPath
+        ? sanitizePathSegment(basename(requestedDestinationPath))
+        : generated.workspaceName;
+    const destinationPath =
+      requestedDestinationPath ||
+      join(DEFAULT_WORKSPACE_DIRECTORY, basename(root.rootPath) || "repo", workspaceName);
+
+    await mkdir(dirname(destinationPath), { recursive: true });
+    await jjCreateWorkspace(root.rootPath, destinationPath, workspaceName);
     await this.syncProjectRoot(root.id, root.rootPath);
+    const created = this.db
+      .listWorkspaces()
+      .find(
+        (workspace) =>
+          workspace.rootId === root.id &&
+          workspace.workspaceName === workspaceName,
+      );
+    if (!created) {
+      throw new Error(`Workspace "${workspaceName}" was created but not discovered`);
+    }
     this.broadcast({
       type: "nav-updated",
       payload: this.getBootstrap(),
     });
+    return created;
+  }
+
+  async updateProjectRootDisplayName(rootId: string, inputDisplayName: string): Promise<ProjectRootRecord> {
+    const root = this.db.listProjectRoots().find((item) => item.id === rootId);
+    if (!root) {
+      throw new Error("Project root not found");
+    }
+
+    const displayName = sanitizeDisplayName(inputDisplayName);
+    if (!displayName) {
+      throw new Error("Display name cannot be empty");
+    }
+
+    this.db.updateProjectRootDisplayName(rootId, displayName);
+    this.db.updateWorkspaceProjectDisplayName(rootId, displayName);
+    const updated = this.db.listProjectRoots().find((item) => item.id === rootId);
+    if (!updated) {
+      throw new Error("Project root not found after update");
+    }
+    this.broadcast({
+      type: "nav-updated",
+      payload: this.getBootstrap(),
+    });
+    return updated;
+  }
+
+  async updateWorkspaceDisplayName(workspaceId: string, inputDisplayName: string): Promise<WorkspaceSummary> {
+    const workspace = this.db.listWorkspaces().find((item) => item.id === workspaceId);
+    if (!workspace) {
+      throw new Error("Workspace not found");
+    }
+
+    const displayName = sanitizeDisplayName(inputDisplayName);
+    if (!displayName) {
+      throw new Error("Display name cannot be empty");
+    }
+
+    this.db.updateWorkspaceDisplayName(workspaceId, displayName);
+    const updated = this.db.listWorkspaces().find((item) => item.id === workspaceId);
+    if (!updated) {
+      throw new Error("Workspace not found after update");
+    }
+    this.broadcast({
+      type: "nav-updated",
+      payload: this.getBootstrap(),
+    });
+    return updated;
   }
 
   async forgetWorkspace(workspaceId: string): Promise<void> {

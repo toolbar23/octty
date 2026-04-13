@@ -37,6 +37,7 @@ export class AppDatabase {
         root_path text not null,
         project_label text not null,
         workspace_name text not null,
+        display_name text not null default '',
         workspace_path text not null unique,
         dirty integer not null default 0,
         workspace_state text not null default 'unknown',
@@ -139,6 +140,12 @@ export class AppDatabase {
         "alter table workspaces add column effective_removed_lines integer not null default 0",
       );
     }
+    if (!workspaceColumns.some((column) => column.name === "display_name")) {
+      this.db.exec(
+        "alter table workspaces add column display_name text not null default ''",
+      );
+      this.db.exec("update workspaces set display_name = workspace_name where display_name = ''");
+    }
     if (!workspaceColumns.some((column) => column.name === "bookmark_relation")) {
       this.db.exec(
         "alter table workspaces add column bookmark_relation text not null default 'none'",
@@ -160,7 +167,7 @@ export class AppDatabase {
           label = excluded.label,
           updated_at = excluded.updated_at
       `)
-      .run(root.id, root.rootPath, root.label, root.createdAt, root.updatedAt);
+      .run(root.id, root.rootPath, root.displayName, root.createdAt, root.updatedAt);
   }
 
   listProjectRoots(): ProjectRootRecord[] {
@@ -169,7 +176,7 @@ export class AppDatabase {
         select
           id,
           root_path as rootPath,
-          label,
+          label as displayName,
           created_at as createdAt,
           updated_at as updatedAt
         from project_roots
@@ -182,6 +189,12 @@ export class AppDatabase {
     this.db.prepare("delete from project_roots where id = ?").run(rootId);
   }
 
+  updateProjectRootDisplayName(rootId: string, displayName: string): void {
+    this.db
+      .prepare("update project_roots set label = ?, updated_at = ? where id = ?")
+      .run(displayName, Date.now(), rootId);
+  }
+
   upsertWorkspace(workspace: WorkspaceSummary): void {
     this.db
       .prepare(`
@@ -191,6 +204,7 @@ export class AppDatabase {
           root_path,
           project_label,
           workspace_name,
+          display_name,
           workspace_path,
           dirty,
           workspace_state,
@@ -228,6 +242,7 @@ export class AppDatabase {
           ?,
           ?,
           ?,
+          ?,
           ?
         )
         on conflict(id) do update set
@@ -235,6 +250,7 @@ export class AppDatabase {
           root_path = excluded.root_path,
           project_label = excluded.project_label,
           workspace_name = excluded.workspace_name,
+          display_name = excluded.display_name,
           workspace_path = excluded.workspace_path,
           dirty = excluded.dirty,
           workspace_state = excluded.workspace_state,
@@ -255,8 +271,9 @@ export class AppDatabase {
         workspace.id,
         workspace.rootId,
         workspace.rootPath,
-        workspace.projectLabel,
+        workspace.projectDisplayName,
         workspace.workspaceName,
+        workspace.displayName,
         workspace.workspacePath,
         workspace.hasWorkingCopyChanges ? 1 : 0,
         workspace.workspaceState,
@@ -283,8 +300,9 @@ export class AppDatabase {
           id,
           root_id as rootId,
           root_path as rootPath,
-          project_label as projectLabel,
+          project_label as projectDisplayName,
           workspace_name as workspaceName,
+          display_name as displayName,
           workspace_path as workspacePath,
           workspace_state as workspaceState,
           has_working_copy_changes as hasWorkingCopyChanges,
@@ -301,7 +319,7 @@ export class AppDatabase {
           updated_at as updatedAt,
           last_opened_at as lastOpenedAt
         from workspaces
-        order by project_label asc, workspace_name asc
+        order by project_label asc, display_name asc, workspace_name asc
       `)
       .all() as Array<Record<string, unknown>>;
 
@@ -309,8 +327,9 @@ export class AppDatabase {
       id: String(row.id),
       rootId: String(row.rootId),
       rootPath: String(row.rootPath),
-      projectLabel: String(row.projectLabel),
+      projectDisplayName: String(row.projectDisplayName),
       workspaceName: String(row.workspaceName),
+      displayName: String(row.displayName),
       workspacePath: String(row.workspacePath),
       workspaceState: String(row.workspaceState) as WorkspaceSummary["workspaceState"],
       hasWorkingCopyChanges: Number(row.hasWorkingCopyChanges) === 1,
@@ -332,6 +351,18 @@ export class AppDatabase {
 
   deleteWorkspace(workspaceId: string): void {
     this.db.prepare("delete from workspaces where id = ?").run(workspaceId);
+  }
+
+  updateWorkspaceDisplayName(workspaceId: string, displayName: string): void {
+    this.db
+      .prepare("update workspaces set display_name = ?, updated_at = ? where id = ?")
+      .run(displayName, Date.now(), workspaceId);
+  }
+
+  updateWorkspaceProjectDisplayName(rootId: string, projectDisplayName: string): void {
+    this.db
+      .prepare("update workspaces set project_label = ?, updated_at = ? where root_id = ?")
+      .run(projectDisplayName, Date.now(), rootId);
   }
 
   deleteWorkspacesMissing(rootId: string, workspaceIds: string[]): void {

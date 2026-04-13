@@ -23,7 +23,7 @@ export interface EmbeddedSessionRef {
 export interface ProjectRootRecord {
   id: string;
   rootPath: string;
-  label: string;
+  displayName: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -46,8 +46,9 @@ export interface WorkspaceSummary extends WorkspaceStatus {
   id: string;
   rootId: string;
   rootPath: string;
-  projectLabel: string;
+  projectDisplayName: string;
   workspaceName: string;
+  displayName: string;
   workspacePath: string;
   createdAt: number;
   updatedAt: number;
@@ -174,8 +175,12 @@ export interface CreateProjectRootPayload {
 
 export interface CreateWorkspacePayload {
   rootId: string;
-  destinationPath: string;
+  destinationPath?: string;
   workspaceName?: string;
+}
+
+export interface UpdateDisplayNamePayload {
+  displayName: string;
 }
 
 export interface CreateNotePayload {

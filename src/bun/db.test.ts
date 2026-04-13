@@ -11,8 +11,9 @@ function makeWorkspaceSummary(): WorkspaceSummary {
     id: "workspace-1",
     rootId: "root-1",
     rootPath: "/tmp/repo",
-    projectLabel: "repo",
+    projectDisplayName: "repo",
     workspaceName: "default",
+    displayName: "default",
     workspacePath: "/tmp/repo",
     workspaceState: "unknown",
     hasWorkingCopyChanges: false,
@@ -41,7 +42,7 @@ describe("AppDatabase session state", () => {
     db.upsertProjectRoot({
       id: "root-1",
       rootPath: "/tmp/repo",
-      label: "repo",
+      displayName: "repo",
       createdAt: 1,
       updatedAt: 1,
     });
@@ -237,5 +238,18 @@ describe("AppDatabase session state", () => {
     });
 
     expect(db.getSessionStateByPane("pane-shell")?.agentAttentionState).toBe("thinking");
+  });
+
+  test("persists repo and workspace display names separately from JJ names", () => {
+    db.updateProjectRootDisplayName("root-1", "Panda");
+    db.updateWorkspaceDisplayName("workspace-1", "Review");
+    db.updateWorkspaceProjectDisplayName("root-1", "Panda");
+
+    expect(db.listProjectRoots()[0]?.displayName).toBe("Panda");
+    expect(db.listWorkspaces()[0]).toMatchObject({
+      projectDisplayName: "Panda",
+      workspaceName: "default",
+      displayName: "Review",
+    });
   });
 });
