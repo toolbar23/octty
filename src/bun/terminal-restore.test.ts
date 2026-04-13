@@ -12,6 +12,8 @@ function makePayload(overrides: Partial<TerminalPanePayload> = {}): TerminalPane
     exitCode: null,
     autoStart: false,
     restoredBuffer: "",
+    embeddedSession: null,
+    embeddedSessionCorrelationId: null,
     ...overrides,
   };
 }
@@ -27,6 +29,8 @@ function makeSession(overrides: Partial<SessionSnapshot> = {}): SessionSnapshot 
     buffer: "prompt$ ",
     state: "live",
     exitCode: null,
+    embeddedSession: null,
+    embeddedSessionCorrelationId: null,
     ...overrides,
   };
 }
@@ -65,6 +69,40 @@ describe("restoreTerminalPanePayload", () => {
       autoStart: true,
       exitCode: 0,
     });
+  });
+
+  test("restores an embedded durable session reference from saved state", () => {
+    const next = restoreTerminalPanePayload(
+      makePayload(),
+      null,
+      makeSession({
+        embeddedSession: {
+          provider: "codex",
+          id: "session-ext",
+          label: "Codex session",
+          detectedAt: 1,
+        },
+      }),
+    );
+
+    expect(next.embeddedSession).toEqual({
+      provider: "codex",
+      id: "session-ext",
+      label: "Codex session",
+      detectedAt: 1,
+    });
+  });
+
+  test("restores an embedded session correlation id from saved state", () => {
+    const next = restoreTerminalPanePayload(
+      makePayload(),
+      null,
+      makeSession({
+        embeddedSessionCorrelationId: "octty-embedded-session:123:session-1",
+      }),
+    );
+
+    expect(next.embeddedSessionCorrelationId).toBe("octty-embedded-session:123:session-1");
   });
 
   test("drops stale live handles from older snapshots without auto-restart", () => {

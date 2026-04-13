@@ -34,6 +34,12 @@ import type {
 import { hasRecordedWorkspacePath } from "../shared/types";
 import { AppDatabase } from "./db";
 import {
+  buildTerminalLaunch,
+  createEmbeddedSessionCorrelationId,
+  detectEmbeddedSession,
+  getEmbeddedSessionProvider,
+} from "./embedded-sessions";
+import {
   createWorkspace as jjCreateWorkspace,
   discoverWorkspaces,
   forgetWorkspace as jjForgetWorkspace,
@@ -108,6 +114,7 @@ export class WorkspaceService {
   private readonly watchers = new Map<string, ReturnType<typeof chokidar.watch>>();
   private readonly refreshTimers = new Map<string, Timer>();
   private readonly sessionPersistTimers = new Map<string, Timer>();
+  private readonly embeddedSessionDetectTimers = new Map<string, Timer>();
 
   private logTerminal(
     message: string,
@@ -169,7 +176,6 @@ export class WorkspaceService {
           }));
           this.updateActiveAgentCounts(session.workspaceId);
         }
-
         this.broadcast({
           type: "terminal-exit",
           payload: {
@@ -195,10 +201,14 @@ export class WorkspaceService {
     for (const timer of this.sessionPersistTimers.values()) {
       clearTimeout(timer);
     }
+    for (const timer of this.embeddedSessionDetectTimers.values()) {
+      clearTimeout(timer);
+    }
     for (const watcher of this.watchers.values()) {
       void watcher.close();
     }
     this.watchers.clear();
+    this.embeddedSessionDetectTimers.clear();
     this.ptySidecar.dispose();
     this.db.close();
   }
@@ -381,6 +391,90 @@ export class WorkspaceService {
     this.sessionPersistTimers.set(sessionId, timer);
   }
 
+  private cancelEmbeddedSessionDetection(sessionId: string): void {
+    const timer = this.embeddedSessionDetectTimers.get(sessionId);
+    if (timer) {
+      clearTimeout(timer);
+      this.embeddedSessionDetectTimers.delete(sessionId);
+    }
+  }
+
+  private scheduleEmbeddedSessionDetection(
+    session: SessionSnapshot,
+    launchedAt: number,
+  ): void {
+    if (session.embeddedSession || !getEmbeddedSessionProvider(session.kind)) {
+      return;
+    }
+
+    this.cancelEmbeddedSessionDetection(session.id);
+
+    const runAttempt = async () => {
+      const liveSession = this.ptySidecar.getSession(session.id);
+      if (!liveSession || liveSession.state !== "live") {
+        this.cancelEmbeddedSessionDetection(session.id);
+        return;
+      }
+
+      if (liveSession.embeddedSession) {
+        this.cancelEmbeddedSessionDetection(session.id);
+        return;
+      }
+
+      const embeddedSession = await detectEmbeddedSession(liveSession.kind, {
+        cwd: liveSession.cwd,
+        launchedAt,
+        correlationId: liveSession.embeddedSessionCorrelationId,
+      });
+      if (embeddedSession) {
+        const resumeLaunch = buildTerminalLaunch(liveSession.kind, embeddedSession);
+        liveSession.embeddedSession = embeddedSession;
+        liveSession.embeddedSessionCorrelationId = null;
+        liveSession.command = resumeLaunch.displayCommand;
+        this.db.saveSessionState(liveSession);
+        this.syncTerminalPaneSnapshot(liveSession.workspaceId, liveSession.paneId, (payload) => ({
+          ...payload,
+          command: resumeLaunch.displayCommand,
+          embeddedSession,
+          embeddedSessionCorrelationId: null,
+        }));
+        this.broadcast({
+          type: "terminal-session-update",
+          payload: {
+            workspaceId: liveSession.workspaceId,
+            paneId: liveSession.paneId,
+            sessionId: liveSession.id,
+            kind: liveSession.kind,
+            cwd: liveSession.cwd,
+            command: resumeLaunch.displayCommand,
+            sessionState: liveSession.state,
+            exitCode: liveSession.exitCode,
+            embeddedSession,
+            embeddedSessionCorrelationId: null,
+          },
+        });
+        this.cancelEmbeddedSessionDetection(session.id);
+        return;
+      }
+
+      const timer = setTimeout(() => {
+        void runAttempt().catch((error) => {
+          console.warn(`[embedded-session] detection failed for ${session.id}: ${String(error)}`);
+          this.cancelEmbeddedSessionDetection(session.id);
+        });
+      }, 2_000);
+      this.embeddedSessionDetectTimers.set(session.id, timer);
+    };
+
+    const timer = setTimeout(() => {
+      void runAttempt().catch((error) => {
+        console.warn(`[embedded-session] detection failed for ${session.id}: ${String(error)}`);
+        this.cancelEmbeddedSessionDetection(session.id);
+      });
+    }, 1_500);
+    this.embeddedSessionDetectTimers.set(session.id, timer);
+  }
+
   private syncTerminalPaneSnapshot(
     workspaceId: string,
     paneId: string,
@@ -507,6 +601,7 @@ export class WorkspaceService {
     }
 
     for (const sessionId of runtime.sessionIds) {
+      this.cancelEmbeddedSessionDetection(sessionId);
       this.ptySidecar.kill(sessionId);
     }
     this.runtimes.delete(workspaceId);
@@ -634,6 +729,7 @@ export class WorkspaceService {
     const kind = normalizeTerminalKind(request.kind);
     const savedSession = this.db.getSessionStateByPane(request.paneId);
     const stableSessionId = savedSession?.id || globalThis.crypto.randomUUID();
+    const launchedAt = now();
 
     const runtime =
       this.runtimes.get(workspace.id) ??
@@ -675,10 +771,27 @@ export class WorkspaceService {
         command: reusedSession.command,
         kind: reusedSession.kind,
         restoredBuffer: "",
+        embeddedSession: reusedSession.embeddedSession,
+        embeddedSessionCorrelationId: reusedSession.embeddedSessionCorrelationId,
       }));
       this.updateActiveAgentCounts(workspace.id);
+      this.scheduleEmbeddedSessionDetection(reusedSession, launchedAt);
       return reusedSession;
     }
+
+    const correlationId =
+      savedSession?.embeddedSession
+        ? null
+        : savedSession?.embeddedSessionCorrelationId ??
+          createEmbeddedSessionCorrelationId(launchedAt, stableSessionId);
+    const embeddedSession =
+      savedSession?.embeddedSession ??
+      (await detectEmbeddedSession(kind, {
+        cwd: workspace.workspacePath,
+        correlationId,
+      }));
+    const nextCorrelationId = embeddedSession ? null : correlationId;
+    const launch = buildTerminalLaunch(kind, embeddedSession, nextCorrelationId);
 
     const session = this.ptySidecar.createSession({
       sessionId: stableSessionId,
@@ -688,6 +801,10 @@ export class WorkspaceService {
       cwd: workspace.workspacePath,
       cols: request.cols,
       rows: request.rows,
+      launchArgv: launch.argv,
+      displayCommand: launch.displayCommand,
+      embeddedSession,
+      embeddedSessionCorrelationId: nextCorrelationId,
     });
     this.logTerminal("create-session", {
       workspaceId: workspace.id,
@@ -709,8 +826,11 @@ export class WorkspaceService {
       command: session.command,
       kind: session.kind,
       restoredBuffer: "",
+      embeddedSession: session.embeddedSession,
+      embeddedSessionCorrelationId: session.embeddedSessionCorrelationId,
     }));
     this.updateActiveAgentCounts(workspace.id);
+    this.scheduleEmbeddedSessionDetection(session, launchedAt);
     return session;
   }
 
@@ -749,6 +869,7 @@ export class WorkspaceService {
     for (const runtime of this.runtimes.values()) {
       runtime.sessionIds.delete(sessionId);
     }
+    this.cancelEmbeddedSessionDetection(sessionId);
     this.ptySidecar.detach(sessionId);
   }
 
@@ -759,6 +880,7 @@ export class WorkspaceService {
     for (const runtime of this.runtimes.values()) {
       runtime.sessionIds.delete(sessionId);
     }
+    this.cancelEmbeddedSessionDetection(sessionId);
     this.ptySidecar.kill(sessionId);
   }
 

@@ -10,9 +10,9 @@ describe("shellCommandFor", () => {
   });
 
   test("wraps codex panes in the user's login shell", () => {
-    expect(shellCommandFor("codex", "/bin/zsh")).toEqual({
+    expect(shellCommandFor("codex", "/bin/zsh", ["codex"])).toEqual({
       command: "/bin/zsh",
-      args: ["-lc", "exec 'codex'"],
+      args: ["-lic", "exec codex"],
     });
   });
 });

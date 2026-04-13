@@ -82,6 +82,8 @@ export class AppDatabase {
         command text not null,
         state text not null,
         exit_code integer,
+        embedded_session_json text,
+        embedded_session_correlation_id text,
         buffer text not null default '',
         updated_at integer not null
       );
@@ -92,6 +94,12 @@ export class AppDatabase {
       .all() as Array<{ name: string }>;
     if (!sessionStateColumns.some((column) => column.name === "buffer")) {
       this.db.exec("alter table session_state add column buffer text not null default ''");
+    }
+    if (!sessionStateColumns.some((column) => column.name === "embedded_session_json")) {
+      this.db.exec("alter table session_state add column embedded_session_json text");
+    }
+    if (!sessionStateColumns.some((column) => column.name === "embedded_session_correlation_id")) {
+      this.db.exec("alter table session_state add column embedded_session_correlation_id text");
     }
   }
 
@@ -295,7 +303,9 @@ export class AppDatabase {
             cwd,
             command,
             state,
-            exit_code as exitCode
+            exit_code as exitCode,
+            embedded_session_json as embeddedSessionJson,
+            embedded_session_correlation_id as embeddedSessionCorrelationId
           from session_state
           where workspace_id = ?
         `)
@@ -307,6 +317,8 @@ export class AppDatabase {
           command: string;
           state: string;
           exitCode: number | null;
+          embeddedSessionJson: string | null;
+          embeddedSessionCorrelationId: string | null;
         }>;
       const existingBuffers = Object.fromEntries(
         existingSessionRows.map((row) => [row.paneId, row]),
@@ -337,6 +349,8 @@ export class AppDatabase {
             sessionState: string;
             exitCode: number | null;
             restoredBuffer: string;
+            embeddedSession: unknown;
+            embeddedSessionCorrelationId: string | null;
           };
           const existingSession = existingBuffers[pane.id] as
             | {
@@ -346,6 +360,8 @@ export class AppDatabase {
                 command: string;
                 state: string;
                 exitCode: number | null;
+                embeddedSessionJson: string | null;
+                embeddedSessionCorrelationId: string | null;
               }
             | undefined;
           const persistedSessionId = payload.sessionId || existingSession?.sessionId || null;
@@ -356,6 +372,14 @@ export class AppDatabase {
           const persistedState = payload.sessionState || existingSession?.state || "missing";
           const persistedExitCode =
             payload.exitCode ?? existingSession?.exitCode ?? null;
+          const persistedEmbeddedSessionJson =
+            payload.embeddedSession != null
+              ? JSON.stringify(payload.embeddedSession)
+              : existingSession?.embeddedSessionJson ?? null;
+          const persistedEmbeddedSessionCorrelationId =
+            payload.embeddedSessionCorrelationId ??
+            existingSession?.embeddedSessionCorrelationId ??
+            null;
           this.db
             .prepare(`
               insert into session_state (
@@ -367,9 +391,11 @@ export class AppDatabase {
                 command,
                 state,
                 exit_code,
+                embedded_session_json,
+                embedded_session_correlation_id,
                 buffer,
                 updated_at
-              ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `)
             .run(
               pane.id,
@@ -380,6 +406,8 @@ export class AppDatabase {
               persistedCommand,
               persistedState,
               persistedExitCode,
+              persistedEmbeddedSessionJson,
+              persistedEmbeddedSessionCorrelationId,
               "",
               Date.now(),
             );
@@ -498,9 +526,11 @@ export class AppDatabase {
           command,
           state,
           exit_code,
+          embedded_session_json,
+          embedded_session_correlation_id,
           buffer,
           updated_at
-        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         on conflict(pane_id) do update set
           session_id = excluded.session_id,
           kind = excluded.kind,
@@ -508,6 +538,8 @@ export class AppDatabase {
           command = excluded.command,
           state = excluded.state,
           exit_code = excluded.exit_code,
+          embedded_session_json = excluded.embedded_session_json,
+          embedded_session_correlation_id = excluded.embedded_session_correlation_id,
           buffer = excluded.buffer,
           updated_at = excluded.updated_at
       `)
@@ -520,6 +552,8 @@ export class AppDatabase {
         session.command,
         session.state,
         session.exitCode,
+        session.embeddedSession ? JSON.stringify(session.embeddedSession) : null,
+        session.embeddedSessionCorrelationId,
         session.buffer,
         Date.now(),
       );
@@ -537,7 +571,9 @@ export class AppDatabase {
           command,
           buffer,
           state,
-          exit_code as exitCode
+          exit_code as exitCode,
+          embedded_session_json as embeddedSessionJson,
+          embedded_session_correlation_id as embeddedSessionCorrelationId
         from session_state
         where pane_id = ?
       `)
@@ -552,6 +588,8 @@ export class AppDatabase {
           buffer: string;
           state: "live" | "stopped" | "missing";
           exitCode: number | null;
+          embeddedSessionJson: string | null;
+          embeddedSessionCorrelationId: string | null;
         }
       | undefined;
 
@@ -569,6 +607,8 @@ export class AppDatabase {
       buffer: row.buffer,
       state: row.state,
       exitCode: row.exitCode,
+      embeddedSession: row.embeddedSessionJson ? JSON.parse(row.embeddedSessionJson) : null,
+      embeddedSessionCorrelationId: row.embeddedSessionCorrelationId,
     };
   }
 
@@ -584,7 +624,9 @@ export class AppDatabase {
           command,
           buffer,
           state,
-          exit_code as exitCode
+          exit_code as exitCode,
+          embedded_session_json as embeddedSessionJson,
+          embedded_session_correlation_id as embeddedSessionCorrelationId
         from session_state
         where workspace_id = ?
       `)
@@ -598,6 +640,8 @@ export class AppDatabase {
         buffer: string;
         state: "live" | "stopped" | "missing";
         exitCode: number | null;
+        embeddedSessionJson: string | null;
+        embeddedSessionCorrelationId: string | null;
       }>;
 
     return rows
@@ -612,6 +656,8 @@ export class AppDatabase {
         buffer: row.buffer,
         state: row.state,
         exitCode: row.exitCode,
+        embeddedSession: row.embeddedSessionJson ? JSON.parse(row.embeddedSessionJson) : null,
+        embeddedSessionCorrelationId: row.embeddedSessionCorrelationId,
       }));
   }
 

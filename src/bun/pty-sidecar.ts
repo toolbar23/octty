@@ -66,9 +66,18 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\"'\"'`)}'`;
 }
 
+function shellExecTarget(command: string): string {
+  return /^[A-Za-z0-9_./:-]+$/.test(command) ? command : shellQuote(command);
+}
+
+function shellJoinWords(argv: string[]): string {
+  return argv.map((value) => shellExecTarget(value)).join(" ");
+}
+
 export function shellCommandFor(
   kind: TerminalKind,
   shellPath: string = process.env.SHELL || "/bin/bash",
+  toolArgv?: string[],
 ): { command: string; args: string[] } {
   switch (normalizeTerminalKind(kind)) {
     case "shell":
@@ -82,7 +91,7 @@ export function shellCommandFor(
     case "jjui":
       return {
         command: shellPath,
-        args: ["-lc", `exec ${shellQuote(defaultTerminalCommand(kind))}`],
+        args: ["-lic", `exec ${shellJoinWords(toolArgv ?? [defaultTerminalCommand(kind)])}`],
       };
   }
 }
@@ -250,21 +259,27 @@ export class PtySidecar {
     cwd: string;
     cols: number;
     rows: number;
+    launchArgv?: string[];
+    displayCommand?: string;
+    embeddedSession: SessionSnapshot["embeddedSession"];
+    embeddedSessionCorrelationId: SessionSnapshot["embeddedSessionCorrelationId"];
   }): LiveSession {
     const tmuxTarget = this.resolveTmuxTarget(input.sessionId);
     const tmuxSessionName = tmuxTarget.sessionName;
-    const { command, args } = shellCommandFor(input.kind);
+    const { command, args } = shellCommandFor(input.kind, undefined, input.launchArgv);
     const session: LiveSession = {
       id: input.sessionId,
       workspaceId: input.workspaceId,
       paneId: input.paneId,
       kind: normalizeTerminalKind(input.kind),
       cwd: input.cwd,
-      command,
+      command: input.displayCommand || command,
       commandArgs: args,
       buffer: "",
       state: "live",
       exitCode: null,
+      embeddedSession: input.embeddedSession,
+      embeddedSessionCorrelationId: input.embeddedSessionCorrelationId,
       tmuxSessionName,
     };
 

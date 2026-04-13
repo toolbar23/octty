@@ -735,6 +735,11 @@ textarea {
   background: rgb(255 255 255 / 0.06);
 }
 
+.pane-header .pane-actions .copy-resume-button.copy-error {
+  border-color: #8a4351;
+  color: #ffb3bf;
+}
+
 .drag-handle {
   padding: 2px 6px;
   min-width: 0;

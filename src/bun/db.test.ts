@@ -59,6 +59,8 @@ describe("AppDatabase session state", () => {
       buffer: "hello\nworld\n",
       state: "stopped",
       exitCode: 0,
+      embeddedSession: null,
+      embeddedSessionCorrelationId: null,
     });
 
     expect(db.getSessionStateByPane("pane-shell")).toEqual({
@@ -71,6 +73,8 @@ describe("AppDatabase session state", () => {
       buffer: "hello\nworld\n",
       state: "stopped",
       exitCode: 0,
+      embeddedSession: null,
+      embeddedSessionCorrelationId: null,
     });
   });
 
@@ -91,16 +95,22 @@ describe("AppDatabase session state", () => {
       buffer: "persist me",
       state: "live",
       exitCode: null,
+      embeddedSession: null,
+      embeddedSessionCorrelationId: "octty-embedded-session:1:session-1",
     });
 
     const terminalPayload = shellPane.payload as {
       sessionId: string | null;
       sessionState: string;
       restoredBuffer: string;
+      embeddedSession: unknown;
+      embeddedSessionCorrelationId: string | null;
     };
     terminalPayload.sessionId = null;
     terminalPayload.sessionState = "missing";
     terminalPayload.restoredBuffer = "";
+    terminalPayload.embeddedSession = null;
+    terminalPayload.embeddedSessionCorrelationId = null;
 
     db.saveSnapshot(snapshot);
 
@@ -124,20 +134,74 @@ describe("AppDatabase session state", () => {
       buffer: "old transcript",
       state: "stopped",
       exitCode: 0,
+      embeddedSession: null,
+      embeddedSessionCorrelationId: "octty-embedded-session:1:session-old",
     });
 
     const terminalPayload = shellPane.payload as {
       sessionId: string | null;
       sessionState: string;
       restoredBuffer: string;
+      embeddedSession: unknown;
+      embeddedSessionCorrelationId: string | null;
     };
     terminalPayload.sessionId = "session-new";
     terminalPayload.sessionState = "live";
     terminalPayload.restoredBuffer = "";
+    terminalPayload.embeddedSession = null;
+    terminalPayload.embeddedSessionCorrelationId = null;
 
     db.saveSnapshot(snapshot);
 
     expect(db.getSessionStateByPane(shellPane.id)?.buffer).toBe("");
     expect(db.getSessionStateByPane(shellPane.id)?.id).toBe("session-new");
+  });
+
+  test("round-trips embedded external session metadata", () => {
+    db.saveSessionState({
+      id: "session-embedded",
+      workspaceId: "workspace-1",
+      paneId: "pane-shell",
+      kind: "codex",
+      cwd: "/tmp/repo",
+      command: "codex resume embedded-1",
+      buffer: "",
+      state: "stopped",
+      exitCode: 0,
+      embeddedSession: {
+        provider: "codex",
+        id: "embedded-1",
+        label: "Saved Codex session",
+        detectedAt: 123,
+      },
+      embeddedSessionCorrelationId: null,
+    });
+
+    expect(db.getSessionStateByPane("pane-shell")?.embeddedSession).toEqual({
+      provider: "codex",
+      id: "embedded-1",
+      label: "Saved Codex session",
+      detectedAt: 123,
+    });
+  });
+
+  test("round-trips embedded session correlation ids", () => {
+    db.saveSessionState({
+      id: "session-correlation",
+      workspaceId: "workspace-1",
+      paneId: "pane-shell",
+      kind: "codex",
+      cwd: "/tmp/repo",
+      command: "codex",
+      buffer: "",
+      state: "live",
+      exitCode: null,
+      embeddedSession: null,
+      embeddedSessionCorrelationId: "octty-embedded-session:123:session-correlation",
+    });
+
+    expect(db.getSessionStateByPane("pane-shell")?.embeddedSessionCorrelationId).toBe(
+      "octty-embedded-session:123:session-correlation",
+    );
   });
 });

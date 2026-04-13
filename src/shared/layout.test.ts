@@ -199,6 +199,8 @@ describe("layout helpers", () => {
             exitCode: null,
             autoStart: true,
             restoredBuffer: "",
+            embeddedSession: null,
+            embeddedSessionCorrelationId: null,
           },
         },
         "pane-diff": {

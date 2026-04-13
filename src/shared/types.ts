@@ -5,6 +5,13 @@ export type SidebarTarget = "left" | "right";
 export type ColumnPin = SidebarTarget | null;
 export type SessionState = "live" | "stopped" | "missing";
 
+export interface EmbeddedSessionRef {
+  provider: string;
+  id: string;
+  label: string | null;
+  detectedAt: number;
+}
+
 export interface ProjectRootRecord {
   id: string;
   rootPath: string;
@@ -54,6 +61,8 @@ export interface TerminalPanePayload {
   exitCode: number | null;
   autoStart: boolean;
   restoredBuffer: string;
+  embeddedSession: EmbeddedSessionRef | null;
+  embeddedSessionCorrelationId: string | null;
 }
 
 export interface NotePanePayload {
@@ -119,6 +128,8 @@ export interface SessionSnapshot {
   screen?: string;
   state: SessionState;
   exitCode: number | null;
+  embeddedSession: EmbeddedSessionRef | null;
+  embeddedSessionCorrelationId: string | null;
 }
 
 export interface BootstrapPayload {
@@ -182,6 +193,7 @@ export interface WorkspaceEventEnvelope {
     | "nav-updated"
     | "workspace-status"
     | "workspace-detail"
+    | "terminal-session-update"
     | "terminal-output"
     | "terminal-exit";
   payload: unknown;

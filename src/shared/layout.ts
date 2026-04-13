@@ -98,6 +98,8 @@ function makeTerminalPayload(
     exitCode: null,
     autoStart: true,
     restoredBuffer: "",
+    embeddedSession: null,
+    embeddedSessionCorrelationId: null,
   };
 }
 
@@ -839,6 +841,8 @@ export function sanitizeSnapshot(
       payload.exitCode ??= null;
       payload.autoStart ??= false;
       payload.restoredBuffer ||= "";
+      payload.embeddedSession ??= null;
+      payload.embeddedSessionCorrelationId ??= null;
     }
 
     if (pane.type === "browser") {

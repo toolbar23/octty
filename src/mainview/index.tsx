@@ -138,6 +138,32 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   }
 }
 
+async function copyTextToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.top = "0";
+  textarea.style.left = "0";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+
+  try {
+    if (!document.execCommand("copy")) {
+      throw new Error("Copy command was rejected");
+    }
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
 type SessionEvent =
   | { type: "output"; data: string }
   | { type: "exit"; exitCode: number | null };
@@ -1009,6 +1035,56 @@ function App(): React.ReactElement {
         return;
       }
 
+      if (message.type === "terminal-session-update") {
+        const payload = message.payload as {
+          workspaceId: string;
+          paneId: string;
+          sessionId: string;
+          kind: TerminalKind;
+          cwd: string;
+          command: string;
+          sessionState: "live" | "stopped" | "missing";
+          exitCode: number | null;
+          embeddedSession: TerminalPanePayload["embeddedSession"];
+          embeddedSessionCorrelationId: string | null;
+        };
+        setDetails((current) => {
+          const detail = current[payload.workspaceId];
+          if (!detail) {
+            return current;
+          }
+
+          return {
+            ...current,
+            [payload.workspaceId]: {
+              ...detail,
+              snapshot: updatePane(detail.snapshot, payload.paneId, (pane) => {
+                if (pane.type !== "shell" && pane.type !== "agent-shell") {
+                  return pane;
+                }
+
+                return {
+                  ...pane,
+                  payload: {
+                    ...(pane.payload as TerminalPanePayload),
+                    sessionId: payload.sessionId,
+                    sessionState: payload.sessionState,
+                    kind: payload.kind,
+                    command: payload.command,
+                    cwd: payload.cwd,
+                    exitCode: payload.exitCode,
+                    autoStart: false,
+                    embeddedSession: payload.embeddedSession,
+                    embeddedSessionCorrelationId: payload.embeddedSessionCorrelationId,
+                  },
+                };
+              }),
+            },
+          };
+        });
+        return;
+      }
+
       if (message.type === "terminal-exit") {
         const payload = message.payload as { sessionId: string; exitCode: number | null };
         emitSession(payload.sessionId, { type: "exit", exitCode: payload.exitCode });
@@ -1180,6 +1256,8 @@ function App(): React.ReactElement {
           cwd: session.cwd,
           exitCode: session.exitCode,
           autoStart: false,
+          embeddedSession: session.embeddedSession,
+          embeddedSessionCorrelationId: session.embeddedSessionCorrelationId,
         },
       }));
       return session;
@@ -2251,6 +2329,27 @@ function PaneFrame(props: PaneFrameProps): React.ReactElement {
     onSaveNote,
     onMarkNoteRead,
   } = props;
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+  const terminalPayload =
+    pane.type === "shell" ? pane.payload as TerminalPanePayload : null;
+  const resumeCommand =
+    terminalPayload?.embeddedSession
+      ? terminalPayload.command
+      : null;
+
+  useEffect(() => {
+    if (copyState === "idle") {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setCopyState("idle");
+    }, 1_500);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [copyState]);
 
   return (
     <section
@@ -2268,6 +2367,19 @@ function PaneFrame(props: PaneFrameProps): React.ReactElement {
           <div className="pane-title">{pane.title}</div>
         </div>
         <div className="pane-actions">
+          {resumeCommand && (
+            <button
+              className={`copy-resume-button ${copyState === "error" ? "copy-error" : ""}`}
+              title={resumeCommand}
+              onClick={() => {
+                void copyTextToClipboard(resumeCommand)
+                  .then(() => setCopyState("copied"))
+                  .catch(() => setCopyState("error"));
+              }}
+            >
+              {copyState === "copied" ? "Copied" : copyState === "error" ? "Copy failed" : "Copy resume"}
+            </button>
+          )}
           {column.pinned === null ? (
             <>
               <button onClick={onFixLeft}>Fix left</button>

@@ -14,6 +14,8 @@ export function restoreTerminalPanePayload(
       exitCode: liveSession.exitCode,
       cwd: liveSession.cwd,
       command: liveSession.command,
+      embeddedSession: liveSession.embeddedSession,
+      embeddedSessionCorrelationId: liveSession.embeddedSessionCorrelationId,
     };
   }
 
@@ -26,6 +28,8 @@ export function restoreTerminalPanePayload(
       exitCode: savedSession.exitCode,
       cwd: savedSession.cwd,
       command: savedSession.command,
+      embeddedSession: savedSession.embeddedSession,
+      embeddedSessionCorrelationId: savedSession.embeddedSessionCorrelationId,
     };
   }
 
