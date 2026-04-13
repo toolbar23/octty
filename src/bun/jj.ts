@@ -3,8 +3,15 @@ import { createHash } from "node:crypto";
 import {
   encodeMissingWorkspacePath,
   type WorkspaceStatus,
+  type WorkspaceState,
 } from "../shared/types";
+import { summarizeUnifiedDiff } from "../shared/diff-stats";
 import { runCheckedCommand } from "./command";
+
+const EFFECTIVE_WORKSPACE_REVSET = "coalesce(@ ~ empty(), @-)";
+const PUBLISHED_WORKSPACE_REVSET = `${EFFECTIVE_WORKSPACE_REVSET} & ::remote_bookmarks()`;
+const MERGED_LOCAL_WORKSPACE_REVSET = `${EFFECTIVE_WORKSPACE_REVSET} & ::(working_copies() ~ @)`;
+const CONFLICTED_WORKSPACE_REVSET = `${EFFECTIVE_WORKSPACE_REVSET} & conflicts()`;
 
 export interface DiscoveredWorkspace {
   id: string;
@@ -173,6 +180,41 @@ export async function forgetWorkspace(
   await runCheckedCommand(["jj", "workspace", "forget", "-R", rootPath, workspaceName]);
 }
 
+function parseCount(output: string): number {
+  const parsed = Number.parseInt(output.trim(), 10);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function countRevset(workspacePath: string, revset: string): Promise<number> {
+  return parseCount(
+    await runCheckedCommand(
+      ["jj", "log", "-r", revset, "--count"],
+      workspacePath,
+    ),
+  );
+}
+
+export function classifyWorkspaceState({
+  hasConflicts,
+  isPublished,
+  isMergedLocal,
+}: {
+  hasConflicts: boolean;
+  isPublished: boolean;
+  isMergedLocal: boolean;
+}): WorkspaceState {
+  if (hasConflicts) {
+    return "conflicted";
+  }
+  if (isPublished) {
+    return "published";
+  }
+  if (isMergedLocal) {
+    return "merged-local";
+  }
+  return "draft";
+}
+
 export async function readWorkspaceStatus(workspacePath: string): Promise<WorkspaceStatus> {
   const readStatus = () =>
     Promise.all([
@@ -180,7 +222,7 @@ export async function readWorkspaceStatus(workspacePath: string): Promise<Worksp
         "jj",
         "log",
         "-r",
-        "@",
+        EFFECTIVE_WORKSPACE_REVSET,
         "-n",
         "1",
         "--no-graph",
@@ -188,18 +230,46 @@ export async function readWorkspaceStatus(workspacePath: string): Promise<Worksp
         "bookmarks.map(|b| b.name()).join(\",\") ++ \"\\n\"",
       ], workspacePath),
       runCheckedCommand(["jj", "diff", "-r", "@", "--git", "--color=never"], workspacePath),
+      runCheckedCommand([
+        "jj",
+        "diff",
+        "-r",
+        EFFECTIVE_WORKSPACE_REVSET,
+        "--git",
+        "--color=never",
+      ], workspacePath),
+      countRevset(workspacePath, CONFLICTED_WORKSPACE_REVSET),
+      countRevset(workspacePath, PUBLISHED_WORKSPACE_REVSET),
+      countRevset(workspacePath, MERGED_LOCAL_WORKSPACE_REVSET),
     ]);
 
-  const [bookmarkOutput, diffText] = await withStaleWorkspaceRetry(workspacePath, readStatus);
+  const [
+    bookmarkOutput,
+    diffText,
+    effectiveDiffText,
+    conflictedCount,
+    publishedCount,
+    mergedLocalCount,
+  ] = await withStaleWorkspaceRetry(workspacePath, readStatus);
 
   const bookmarks = bookmarkOutput
     .trim()
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
+  const hasWorkingCopyChanges = diffText.trim().length > 0;
+  const workspaceState = classifyWorkspaceState({
+    hasConflicts: conflictedCount > 0,
+    isPublished: publishedCount > 0,
+    isMergedLocal: mergedLocalCount > 0,
+  });
+  const effectiveDiffStats = summarizeUnifiedDiff(effectiveDiffText);
 
   return {
-    dirty: diffText.trim().length > 0,
+    workspaceState,
+    hasWorkingCopyChanges,
+    effectiveAddedLines: effectiveDiffStats.addedLines,
+    effectiveRemovedLines: effectiveDiffStats.removedLines,
     bookmarks,
     unreadNotes: 0,
     activeAgentCount: 0,

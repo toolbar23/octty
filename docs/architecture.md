@@ -215,6 +215,18 @@ Workspace status is updated from a combination of:
 - filesystem watching
 - explicit refresh paths after relevant actions
 
+The primary workspace color is JJ-native rather than Git-style dirty/clean. The
+service classifies each workspace by an effective commit, using the current
+working-copy commit when it has content and otherwise the parent commit:
+
+- `published`: reachable from any remote bookmark
+- `merged-local`: already contained in another local workspace
+- `draft`: still unique to this workspace
+- `conflicted`: unresolved conflicts override the other states
+
+The current working-copy diff is still tracked separately for the diff pane and
+for secondary status detail.
+
 Watch paths intentionally ignore heavy/noisy directories such as:
 
 - `.git`

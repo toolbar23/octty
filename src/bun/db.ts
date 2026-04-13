@@ -39,6 +39,10 @@ export class AppDatabase {
         workspace_name text not null,
         workspace_path text not null unique,
         dirty integer not null default 0,
+        workspace_state text not null default 'unknown',
+        has_working_copy_changes integer not null default 0,
+        effective_added_lines integer not null default 0,
+        effective_removed_lines integer not null default 0,
         bookmarks text not null default '',
         unread_notes integer not null default 0,
         active_agent_count integer not null default 0,
@@ -112,6 +116,28 @@ export class AppDatabase {
     if (!workspaceColumns.some((column) => column.name === "agent_attention_state")) {
       this.db.exec("alter table workspaces add column agent_attention_state text");
     }
+    if (!workspaceColumns.some((column) => column.name === "workspace_state")) {
+      this.db.exec("alter table workspaces add column workspace_state text not null default 'unknown'");
+      this.db.exec(
+        "update workspaces set workspace_state = case when dirty = 1 then 'draft' else 'unknown' end",
+      );
+    }
+    if (!workspaceColumns.some((column) => column.name === "has_working_copy_changes")) {
+      this.db.exec(
+        "alter table workspaces add column has_working_copy_changes integer not null default 0",
+      );
+      this.db.exec("update workspaces set has_working_copy_changes = dirty");
+    }
+    if (!workspaceColumns.some((column) => column.name === "effective_added_lines")) {
+      this.db.exec(
+        "alter table workspaces add column effective_added_lines integer not null default 0",
+      );
+    }
+    if (!workspaceColumns.some((column) => column.name === "effective_removed_lines")) {
+      this.db.exec(
+        "alter table workspaces add column effective_removed_lines integer not null default 0",
+      );
+    }
   }
 
   close(): void {
@@ -161,6 +187,10 @@ export class AppDatabase {
           workspace_name,
           workspace_path,
           dirty,
+          workspace_state,
+          has_working_copy_changes,
+          effective_added_lines,
+          effective_removed_lines,
           bookmarks,
           unread_notes,
           active_agent_count,
@@ -186,6 +216,10 @@ export class AppDatabase {
           ?,
           ?,
           ?,
+          ?,
+          ?,
+          ?,
+          ?,
           ?
         )
         on conflict(id) do update set
@@ -195,6 +229,10 @@ export class AppDatabase {
           workspace_name = excluded.workspace_name,
           workspace_path = excluded.workspace_path,
           dirty = excluded.dirty,
+          workspace_state = excluded.workspace_state,
+          has_working_copy_changes = excluded.has_working_copy_changes,
+          effective_added_lines = excluded.effective_added_lines,
+          effective_removed_lines = excluded.effective_removed_lines,
           bookmarks = excluded.bookmarks,
           unread_notes = excluded.unread_notes,
           active_agent_count = excluded.active_agent_count,
@@ -211,7 +249,11 @@ export class AppDatabase {
         workspace.projectLabel,
         workspace.workspaceName,
         workspace.workspacePath,
-        workspace.dirty ? 1 : 0,
+        workspace.hasWorkingCopyChanges ? 1 : 0,
+        workspace.workspaceState,
+        workspace.hasWorkingCopyChanges ? 1 : 0,
+        workspace.effectiveAddedLines,
+        workspace.effectiveRemovedLines,
         JSON.stringify(workspace.bookmarks),
         workspace.unreadNotes,
         workspace.activeAgentCount,
@@ -234,7 +276,10 @@ export class AppDatabase {
           project_label as projectLabel,
           workspace_name as workspaceName,
           workspace_path as workspacePath,
-          dirty,
+          workspace_state as workspaceState,
+          has_working_copy_changes as hasWorkingCopyChanges,
+          effective_added_lines as effectiveAddedLines,
+          effective_removed_lines as effectiveRemovedLines,
           bookmarks,
           unread_notes as unreadNotes,
           active_agent_count as activeAgentCount,
@@ -256,7 +301,10 @@ export class AppDatabase {
       projectLabel: String(row.projectLabel),
       workspaceName: String(row.workspaceName),
       workspacePath: String(row.workspacePath),
-      dirty: Number(row.dirty) === 1,
+      workspaceState: String(row.workspaceState) as WorkspaceSummary["workspaceState"],
+      hasWorkingCopyChanges: Number(row.hasWorkingCopyChanges) === 1,
+      effectiveAddedLines: Number(row.effectiveAddedLines),
+      effectiveRemovedLines: Number(row.effectiveRemovedLines),
       bookmarks: JSON.parse(String(row.bookmarks)),
       unreadNotes: Number(row.unreadNotes),
       activeAgentCount: Number(row.activeAgentCount),

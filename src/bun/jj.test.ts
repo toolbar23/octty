@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  classifyWorkspaceState,
   fallbackWorkspacePath,
   isStaleWorkingCopyError,
   withStaleWorkspaceRetry,
@@ -68,5 +69,47 @@ describe("fallbackWorkspacePath", () => {
     ).rejects.toThrow("some other jj failure");
 
     expect(updated).toBe(false);
+  });
+});
+
+describe("classifyWorkspaceState", () => {
+  test("lets conflicts override other states", () => {
+    expect(
+      classifyWorkspaceState({
+        hasConflicts: true,
+        isPublished: true,
+        isMergedLocal: true,
+      }),
+    ).toBe("conflicted");
+  });
+
+  test("marks published work before merged-local", () => {
+    expect(
+      classifyWorkspaceState({
+        hasConflicts: false,
+        isPublished: true,
+        isMergedLocal: true,
+      }),
+    ).toBe("published");
+  });
+
+  test("marks merged-local work when another workspace already contains it", () => {
+    expect(
+      classifyWorkspaceState({
+        hasConflicts: false,
+        isPublished: false,
+        isMergedLocal: true,
+      }),
+    ).toBe("merged-local");
+  });
+
+  test("falls back to draft for unique work", () => {
+    expect(
+      classifyWorkspaceState({
+        hasConflicts: false,
+        isPublished: false,
+        isMergedLocal: false,
+      }),
+    ).toBe("draft");
   });
 });

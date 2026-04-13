@@ -93,7 +93,8 @@ A project root is a repository root.
 
 A workspace is one JJ workspace associated with that root. Multiple workspaces can exist under the same project root. The sidebar groups workspaces by project root and shows lightweight status such as:
 
-- dirty/clean
+- workspace state (`published`, `merged-local`, `draft`, or `conflicted`)
+- whether the current working-copy commit has changes
 - bookmark info
 - unread notes
 - active agent count

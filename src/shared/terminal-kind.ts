@@ -45,3 +45,7 @@ export function defaultTerminalCommand(kind: TerminalKind): string {
 export function isAgentTerminalKind(kind: TerminalKind): boolean {
   return kind === "codex" || kind === "pi";
 }
+
+export function supportsTerminalAttention(kind: TerminalKind): boolean {
+  return kind === "shell" || isAgentTerminalKind(kind);
+}

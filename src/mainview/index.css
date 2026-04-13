@@ -446,6 +446,7 @@ textarea {
 .workspace-item-head {
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .agent-attention-dot {
@@ -485,6 +486,10 @@ textarea {
   text-overflow: ellipsis;
 }
 
+.workspace-activity-badge {
+  flex: 0 0 auto;
+}
+
 .workspace-side-actions {
   grid-column: 2;
   display: flex;
@@ -492,10 +497,6 @@ textarea {
   align-items: flex-end;
   gap: 6px;
   padding-top: 1px;
-}
-
-.workspace-side-actions .status-dot {
-  margin-left: 0;
 }
 
 .sidebar-footer {
@@ -935,20 +936,66 @@ textarea {
   outline: none;
 }
 
+.workspace-state-bead {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 3px 9px;
+  border: 1px solid var(--color-badge-border);
+  border-radius: 999px;
+  background: var(--color-badge);
+  font-size: 0.6875rem;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.workspace-state-bead.changed {
+  box-shadow: 0 0 0 1px var(--color-nav-bg), 0 0 0 2px var(--color-border-strong);
+}
+
+.workspace-state-bead.published {
+  background: var(--color-badge-accent);
+  border-color: var(--color-badge-accent-border);
+  color: var(--color-nav-text);
+}
+
+.workspace-state-bead.merged-local {
+  background: var(--color-badge-warning);
+  border-color: var(--color-badge-warning-border);
+  color: var(--color-nav-text);
+}
+
+.workspace-state-bead.draft {
+  background: var(--color-error-bg);
+  border-color: var(--color-error-border);
+  color: var(--color-nav-text);
+}
+
+.workspace-state-bead.conflicted {
+  background: var(--color-error-bg);
+  border-color: var(--color-error-border);
+  color: var(--color-nav-text);
+}
+
+.workspace-state-bead.unknown {
+  background: var(--color-badge);
+  border-color: var(--color-badge-border);
+  color: var(--color-nav-muted);
+}
+
 .status-dot {
   width: 9px;
   height: 9px;
   border-radius: 999px;
   display: inline-block;
   margin-left: auto;
+  background: var(--color-nav-muted);
 }
 
-.status-dot.clean {
-  background: var(--color-success);
-}
-
+.status-dot.draft,
 .status-dot.dirty {
-  background: var(--color-warning);
+  background: var(--color-error-border);
 }
 
 .error-banner {

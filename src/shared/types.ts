@@ -5,6 +5,12 @@ export type SidebarTarget = "left" | "right";
 export type ColumnPin = SidebarTarget | null;
 export type SessionState = "live" | "stopped" | "missing";
 export type AgentAttentionState = "idle-seen" | "thinking" | "idle-unseen";
+export type WorkspaceState =
+  | "published"
+  | "merged-local"
+  | "draft"
+  | "conflicted"
+  | "unknown";
 
 export interface EmbeddedSessionRef {
   provider: string;
@@ -22,7 +28,10 @@ export interface ProjectRootRecord {
 }
 
 export interface WorkspaceStatus {
-  dirty: boolean;
+  workspaceState: WorkspaceState;
+  hasWorkingCopyChanges: boolean;
+  effectiveAddedLines: number;
+  effectiveRemovedLines: number;
   bookmarks: string[];
   unreadNotes: number;
   activeAgentCount: number;

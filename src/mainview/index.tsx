@@ -37,6 +37,7 @@ import type {
   TerminalPanePayload,
   WorkspaceColumn,
   WorkspaceDetail,
+  WorkspaceState,
   WorkspaceSnapshot,
   WorkspaceSummary,
 } from "../shared/types";
@@ -54,7 +55,15 @@ import {
   takeStringChunk,
 } from "../shared/terminal-batching";
 import { shouldRemapShiftEnterToCtrlJ } from "../shared/terminal-shortcuts";
-import { isAgentTerminalKind, terminalKindLabel } from "../shared/terminal-kind";
+import {
+  isAgentTerminalKind,
+  supportsTerminalAttention,
+  terminalKindLabel,
+} from "../shared/terminal-kind";
+import {
+  workspaceStateClassName,
+  workspaceStateLabel,
+} from "../shared/workspace-state";
 
 const apiOrigin =
   document
@@ -669,6 +678,48 @@ function relativeTime(timestamp: number): string {
     return `${Math.max(1, Math.round(diff / 3_600_000))}h`;
   }
   return `${Math.max(1, Math.round(diff / 86_400_000))}d`;
+}
+
+function workspaceStateDescription(state: WorkspaceState): string {
+  switch (state) {
+    case "published":
+      return "effective change is reachable from a remote bookmark";
+    case "merged-local":
+      return "effective change is already contained in another local workspace";
+    case "draft":
+      return "effective change is still unique to this workspace";
+    case "conflicted":
+      return "effective change has unresolved conflicts";
+    case "unknown":
+      return "workspace state is unavailable";
+  }
+}
+
+function workspaceStateTitle(workspace: WorkspaceSummary): string {
+  const lines = [
+    `${workspaceStateLabel(workspace.workspaceState)}: ${workspaceStateDescription(workspace.workspaceState)}`,
+    `effective change: +${workspace.effectiveAddedLines}/-${workspace.effectiveRemovedLines}`,
+    workspace.hasWorkingCopyChanges
+      ? "working copy has changes"
+      : "no working-copy changes",
+  ];
+  return lines.join("\n");
+}
+
+function workspaceStateBeadText(workspace: WorkspaceSummary): string {
+  const label =
+    workspace.workspaceState === "merged-local"
+      ? "Merged"
+      : workspace.workspaceState === "conflicted"
+        ? "Conflict"
+        : workspaceStateLabel(workspace.workspaceState);
+  if (
+    workspace.workspaceState === "draft" ||
+    workspace.workspaceState === "merged-local"
+  ) {
+    return `${label} +${workspace.effectiveAddedLines}/-${workspace.effectiveRemovedLines}`;
+  }
+  return label;
 }
 
 function currentViewportWidth(): number {
@@ -1574,6 +1625,11 @@ function App(): React.ReactElement {
                             />
                           )}
                           <span className="workspace-name">{workspace.workspaceName}</span>
+                          {workspace.recentActivityAt > 0 && (
+                            <span className="badge accent workspace-activity-badge">
+                              {relativeTime(workspace.recentActivityAt)}
+                            </span>
+                          )}
                           {workspace.bookmarks.length > 0 && (
                             <span className="workspace-branch-info">{workspace.bookmarks.join(", ")}</span>
                           )}
@@ -1591,13 +1647,16 @@ function App(): React.ReactElement {
                           {workspace.activeAgentCount > 0 && (
                             <span className="badge">{workspace.activeAgentCount} agent</span>
                           )}
-                          {workspace.recentActivityAt > 0 && (
-                            <span className="badge accent">{relativeTime(workspace.recentActivityAt)}</span>
-                          )}
                         </div>
                       </button>
                       <div className="workspace-side-actions">
-                        <span className={`status-dot ${workspace.dirty ? "dirty" : "clean"}`} />
+                        <span
+                          className={`workspace-state-bead ${workspaceStateClassName(workspace.workspaceState)} ${workspace.hasWorkingCopyChanges ? "changed" : "unchanged"}`}
+                          title={workspaceStateTitle(workspace)}
+                          aria-label={workspaceStateTitle(workspace)}
+                        >
+                          {workspaceStateBeadText(workspace)}
+                        </span>
                         <button
                           className="sidebar-inline-button inline-action"
                           onClick={() => {
@@ -2379,11 +2438,11 @@ function PaneFrame(props: PaneFrameProps): React.ReactElement {
   const terminalPayload =
     pane.type === "shell" ? pane.payload as TerminalPanePayload : null;
   const attentionClassName =
-    terminalPayload && isAgentTerminalKind(terminalPayload.kind)
+    terminalPayload && supportsTerminalAttention(terminalPayload.kind)
       ? agentAttentionClassName(terminalPayload.agentAttentionState)
       : null;
   const attentionLabel =
-    terminalPayload && isAgentTerminalKind(terminalPayload.kind)
+    terminalPayload && supportsTerminalAttention(terminalPayload.kind)
       ? agentAttentionLabel(terminalPayload.agentAttentionState)
       : null;
   const resumeCommand =
@@ -2499,7 +2558,7 @@ function PaneFrame(props: PaneFrameProps): React.ReactElement {
 function DiffPane({ diffText }: { diffText: string }): React.ReactElement {
   return (
     <pre className="diff-pane">
-      {diffText.trim() || "Working copy is clean."}
+      {diffText.trim() || "No working-copy changes."}
     </pre>
   );
 }
@@ -2589,7 +2648,7 @@ function TerminalPane({
   ]);
 
   useEffect(() => {
-    if (!payload.sessionId || !isAgentTerminalKind(payload.kind)) {
+    if (!payload.sessionId || !supportsTerminalAttention(payload.kind)) {
       return;
     }
     const focused = isVisible && isActive;
@@ -3011,7 +3070,7 @@ function NotePane({
             }
           >
             <span>{note.title}</span>
-            {note.unread && <span className="status-dot dirty" />}
+            {note.unread && <span className="status-dot draft" />}
           </button>
         ))}
       </aside>
