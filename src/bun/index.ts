@@ -11,6 +11,7 @@ import type {
   WorkspaceSnapshotPayload,
 } from "../shared/types";
 import { WorkspaceService } from "./service";
+import { createShutdownController } from "./shutdown";
 
 type WebSocketData = {
   removeClient?: () => void;
@@ -243,6 +244,13 @@ const server = Bun.serve<WebSocketData>({
   },
 });
 
+const shutdown = createShutdownController({
+  unregisterShortcuts: () => GlobalShortcut.unregisterAll(),
+  stopServer: () => server.stop(true),
+  disposeService: () => service.dispose(),
+  exit: (code = 0) => process.exit(code),
+});
+
 const apiOrigin = `http://127.0.0.1:${server.port}`;
 const debugTerminal =
   process.env.OCTTY_DEBUG_TERMINAL === "1" || process.env.WORKSPACE_ORBIT_DEBUG_TERMINAL === "1"
@@ -398,17 +406,16 @@ if (headlessApi) {
   };
 
   registerAppShortcuts();
-  Electrobun.events.on(`close-${mainWindow.id}`, unregisterAppShortcuts);
+  Electrobun.events.on(`close-${mainWindow.id}`, () => {
+    unregisterAppShortcuts();
+    shutdown.shutdown();
+  });
 }
 
 process.on("SIGINT", () => {
-  GlobalShortcut.unregisterAll();
-  service.dispose();
-  process.exit(0);
+  shutdown.shutdown();
 });
 
 process.on("SIGTERM", () => {
-  GlobalShortcut.unregisterAll();
-  service.dispose();
-  process.exit(0);
+  shutdown.shutdown();
 });

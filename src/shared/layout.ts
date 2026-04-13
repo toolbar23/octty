@@ -257,14 +257,14 @@ function listColumnOrder(snapshot: WorkspaceSnapshot): string[] {
   ]).filter((columnId) => Boolean(snapshot.columns[columnId]));
 }
 
+function listPaneOrder(snapshot: WorkspaceSnapshot): string[] {
+  return listColumnOrder(snapshot).flatMap((columnId) =>
+    (snapshot.columns[columnId]?.paneIds ?? []).filter((paneId) => Boolean(snapshot.panes[paneId])),
+  );
+}
+
 function firstAvailablePaneId(snapshot: WorkspaceSnapshot): string | null {
-  for (const columnId of listColumnOrder(snapshot)) {
-    const paneId = snapshot.columns[columnId]?.paneIds[0] ?? null;
-    if (paneId && snapshot.panes[paneId]) {
-      return paneId;
-    }
-  }
-  return null;
+  return listPaneOrder(snapshot)[0] ?? null;
 }
 
 export function findPaneColumnId(snapshot: WorkspaceSnapshot, paneId: string): string | null {
@@ -509,6 +509,13 @@ export function removePane(snapshot: WorkspaceSnapshot, paneId: string): Workspa
     return snapshot;
   }
 
+  const orderedPaneIds = listPaneOrder(snapshot);
+  const removedPaneIndex = orderedPaneIds.indexOf(paneId);
+  const nextActivePaneId =
+    removedPaneIndex === -1
+      ? null
+      : orderedPaneIds[removedPaneIndex + 1] ?? orderedPaneIds[removedPaneIndex - 1] ?? null;
+
   const next = cloneSnapshot(snapshot);
   const columnId = findPaneColumnId(next, paneId);
   delete next.panes[paneId];
@@ -523,7 +530,9 @@ export function removePane(snapshot: WorkspaceSnapshot, paneId: string): Workspa
   }
 
   if (next.activePaneId === paneId) {
-    next.activePaneId = firstAvailablePaneId(next);
+    next.activePaneId =
+      (nextActivePaneId && next.panes[nextActivePaneId] ? nextActivePaneId : null) ??
+      firstAvailablePaneId(next);
   }
 
   next.updatedAt = Date.now();

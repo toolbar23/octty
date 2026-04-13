@@ -9,6 +9,7 @@ import {
   movePaneToColumn,
   movePaneToNewColumn,
   pinColumn,
+  removePane,
   resizePaneColumn,
   sanitizeSnapshot,
 } from "./layout";
@@ -141,6 +142,31 @@ describe("layout helpers", () => {
     )!;
     const moved = moveColumn(pinned, shellColumnId, 1);
     expect(moved.centerColumnIds.includes(shellColumnId)).toBe(true);
+  });
+
+  test("closing an active pane focuses the next pane when one exists after it", () => {
+    const initial = createDefaultSnapshot("ws-1", "/tmp/demo");
+    const shellPane = Object.values(initial.panes).find((pane) => pane.type === "shell")!;
+    const orderedPaneIds = initial.centerColumnIds.flatMap(
+      (columnId) => initial.columns[columnId]?.paneIds ?? [],
+    );
+
+    const closed = removePane(initial, shellPane.id);
+
+    expect(closed.activePaneId).toBe(orderedPaneIds[orderedPaneIds.indexOf(shellPane.id) + 1]!);
+  });
+
+  test("closing the last active pane focuses the previous pane", () => {
+    const initial = createDefaultSnapshot("ws-1", "/tmp/demo");
+    const withNote = addPane(initial, "note", "/tmp/demo");
+    const notePane = Object.values(withNote.panes).find((pane) => pane.type === "note")!;
+    const orderedPaneIds = withNote.centerColumnIds.flatMap(
+      (columnId) => withNote.columns[columnId]?.paneIds ?? [],
+    );
+
+    const closed = removePane(withNote, notePane.id);
+
+    expect(closed.activePaneId).toBe(orderedPaneIds[orderedPaneIds.indexOf(notePane.id) - 1]!);
   });
 
   test("migrates old split snapshots into columns", () => {
