@@ -79,6 +79,23 @@ const debugMessageRates =
   document
     .querySelector('meta[name="octty-debug-message-rates"], meta[name="workspace-orbit-debug-message-rates"]')
     ?.getAttribute("content") === "1";
+const ghosttyRenderLoopMode =
+  document
+    .querySelector(
+      'meta[name="octty-ghostty-render-loop-mode"], meta[name="workspace-orbit-ghostty-render-loop-mode"]',
+    )
+    ?.getAttribute("content") ?? "throttled";
+const ghosttyRenderIntervalMs = Math.max(
+  16,
+  Number.parseInt(
+    document
+      .querySelector(
+        'meta[name="octty-ghostty-render-interval-ms"], meta[name="workspace-orbit-ghostty-render-interval-ms"]',
+      )
+      ?.getAttribute("content") ?? "80",
+    10,
+  ) || 80,
+);
 const wsOrigin = apiOrigin.replace("http://", "ws://").replace("https://", "wss://");
 let ghosttyInitPromise: Promise<void> | null = null;
 let forwardTerminalUiDebug:
@@ -102,6 +119,11 @@ type DebugRateBucket = {
 
 const rendererDebugRateBuckets = new Map<string, DebugRateBucket>();
 let rendererDebugRateTimer: number | null = null;
+let ghosttyRenderLoopPatched = false;
+
+type PatchedGhosttyTerminal = Terminal & {
+  __octtyRenderLoopTimer?: number | null;
+};
 
 function trackRendererDebugRate(key: string, sample?: Record<string, unknown>): void {
   if (!debugMessageRates) {
@@ -163,7 +185,63 @@ if (isElectrobunRuntime()) {
   new Electroview({ rpc: null as any });
 }
 
+function patchGhosttyRenderLoop(): void {
+  if (ghosttyRenderLoopPatched || ghosttyRenderLoopMode === "raf") {
+    return;
+  }
+
+  const terminalPrototype = Terminal.prototype as unknown as {
+    startRenderLoop?: (this: PatchedGhosttyTerminal) => void;
+    dispose?: (this: PatchedGhosttyTerminal) => void;
+  };
+  const originalDispose = terminalPrototype.dispose;
+
+  terminalPrototype.startRenderLoop = function patchedStartRenderLoop(
+    this: PatchedGhosttyTerminal,
+  ): void {
+    if (this.__octtyRenderLoopTimer != null) {
+      window.clearTimeout(this.__octtyRenderLoopTimer);
+      this.__octtyRenderLoopTimer = null;
+    }
+
+    const tick = () => {
+      if ((this as any).isDisposed || !(this as any).isOpen) {
+        this.__octtyRenderLoopTimer = null;
+        return;
+      }
+
+      (this as any).renderer.render(
+        (this as any).wasmTerm,
+        false,
+        (this as any).viewportY,
+        this,
+        (this as any).scrollbarOpacity,
+      );
+      const cursor = (this as any).wasmTerm.getCursor();
+      if (cursor.y !== (this as any).lastCursorY) {
+        (this as any).lastCursorY = cursor.y;
+        (this as any).cursorMoveEmitter.fire();
+      }
+
+      this.__octtyRenderLoopTimer = window.setTimeout(tick, ghosttyRenderIntervalMs);
+    };
+
+    tick();
+  };
+
+  terminalPrototype.dispose = function patchedDispose(this: PatchedGhosttyTerminal): void {
+    if (this.__octtyRenderLoopTimer != null) {
+      window.clearTimeout(this.__octtyRenderLoopTimer);
+      this.__octtyRenderLoopTimer = null;
+    }
+    originalDispose?.call(this);
+  };
+
+  ghosttyRenderLoopPatched = true;
+}
+
 async function ensureGhostty(): Promise<void> {
+  patchGhosttyRenderLoop();
   ghosttyInitPromise ||= initGhostty();
   await ghosttyInitPromise;
 }

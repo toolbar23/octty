@@ -370,6 +370,21 @@ const debugTerminal =
     ? "1"
     : "0";
 const debugMessageRates = DEBUG_MESSAGE_RATES ? "1" : "0";
+const ghosttyRenderLoopMode =
+  process.env.OCTTY_GHOSTTY_RENDER_LOOP_MODE ??
+  process.env.WORKSPACE_ORBIT_GHOSTTY_RENDER_LOOP_MODE ??
+  "throttled";
+const ghosttyRenderIntervalMs = String(
+  Math.max(
+    16,
+    Number.parseInt(
+      process.env.OCTTY_GHOSTTY_RENDER_INTERVAL_MS ??
+        process.env.WORKSPACE_ORBIT_GHOSTTY_RENDER_INTERVAL_MS ??
+        "80",
+      10,
+    ) || 80,
+  ),
+);
 const headlessApi =
   process.env.OCTTY_HEADLESS_API === "1" || process.env.WORKSPACE_ORBIT_HEADLESS_API === "1";
 const bootstrapHtml = `<!doctype html>
@@ -380,6 +395,8 @@ const bootstrapHtml = `<!doctype html>
     <meta name="octty-api-origin" content="${apiOrigin}" />
     <meta name="octty-debug-terminal" content="${debugTerminal}" />
     <meta name="octty-debug-message-rates" content="${debugMessageRates}" />
+    <meta name="octty-ghostty-render-loop-mode" content="${ghosttyRenderLoopMode}" />
+    <meta name="octty-ghostty-render-interval-ms" content="${ghosttyRenderIntervalMs}" />
     <title>Octty</title>
     <style>
       :root {
