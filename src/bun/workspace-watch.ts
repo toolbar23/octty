@@ -54,6 +54,12 @@ export function shouldIgnoreWorkspaceWatchPath(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
   const normalizedPath = pathValue.replaceAll("\\", "/");
+  const normalizedPathWithTrailingSlash = normalizedPath.endsWith("/")
+    ? normalizedPath
+    : `${normalizedPath}/`;
   const fragments = parseWorkspaceWatchIgnoreFragments(env);
-  return fragments.some((fragment) => normalizedPath.includes(fragment));
+  return fragments.some(
+    (fragment) =>
+      normalizedPath.includes(fragment) || normalizedPathWithTrailingSlash.includes(fragment),
+  );
 }

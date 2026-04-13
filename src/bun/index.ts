@@ -22,6 +22,52 @@ type WebSocketData = {
 const service = new WorkspaceService();
 await service.init();
 
+const DEBUG_MESSAGE_RATES =
+  process.env.OCTTY_DEBUG_MESSAGE_RATES === "1" ||
+  process.env.WORKSPACE_ORBIT_DEBUG_MESSAGE_RATES === "1";
+
+type DebugRateBucket = {
+  count: number;
+  sample?: Record<string, unknown>;
+};
+
+const mainDebugRateBuckets = new Map<string, DebugRateBucket>();
+let mainDebugRateTimer: Timer | null = null;
+
+function trackMainDebugRate(key: string, sample?: Record<string, unknown>): void {
+  if (!DEBUG_MESSAGE_RATES) {
+    return;
+  }
+
+  const bucket = mainDebugRateBuckets.get(key) ?? { count: 0 };
+  bucket.count += 1;
+  if (sample) {
+    bucket.sample = sample;
+  }
+  mainDebugRateBuckets.set(key, bucket);
+
+  if (mainDebugRateTimer) {
+    return;
+  }
+
+  mainDebugRateTimer = setTimeout(() => {
+    mainDebugRateTimer = null;
+    if (mainDebugRateBuckets.size === 0) {
+      return;
+    }
+
+    const summary = Array.from(mainDebugRateBuckets.entries())
+      .sort((left, right) => right[1].count - left[1].count)
+      .map(([bucketKey, value]) => ({
+        key: bucketKey,
+        count: value.count,
+        sample: value.sample,
+      }));
+    mainDebugRateBuckets.clear();
+    console.log("[debug-rates][main]", summary);
+  }, 1_000);
+}
+
 function withCors(response: Response): Response {
   const headers = new Headers(response.headers);
   headers.set("Access-Control-Allow-Origin", "*");
@@ -66,6 +112,7 @@ const server = Bun.serve<WebSocketData>({
   port: 0,
   fetch(request, instance) {
     const url = new URL(request.url);
+    trackMainDebugRate(`http:${request.method} ${url.pathname}`);
 
     if (request.method === "OPTIONS") {
       return noContent();
@@ -239,6 +286,32 @@ const server = Bun.serve<WebSocketData>({
             payload: { message: string; details?: Record<string, unknown> };
           };
 
+      trackMainDebugRate(`ws-in:${message.type}`, (() => {
+        if (message.type === "terminal-resize") {
+          return {
+            sessionId: message.payload.sessionId,
+            cols: message.payload.cols,
+            rows: message.payload.rows,
+          };
+        }
+        if (
+          message.type === "terminal-focus" ||
+          message.type === "terminal-detach" ||
+          message.type === "terminal-close"
+        ) {
+          return {
+            sessionId: message.payload.sessionId,
+          };
+        }
+        if (message.type === "terminal-input") {
+          return {
+            sessionId: message.payload.sessionId,
+            bytes: message.payload.data.length,
+          };
+        }
+        return undefined;
+      })());
+
       if (message.type === "terminal-input") {
         service.writeToSession(message.payload.sessionId, message.payload.data);
       }
@@ -266,7 +339,8 @@ const server = Bun.serve<WebSocketData>({
       if (
         message.type === "terminal-ui-debug" &&
         (process.env.OCTTY_DEBUG_TERMINAL === "1" ||
-          process.env.WORKSPACE_ORBIT_DEBUG_TERMINAL === "1")
+          process.env.WORKSPACE_ORBIT_DEBUG_TERMINAL === "1" ||
+          DEBUG_MESSAGE_RATES)
       ) {
         console.log("[terminal-ui]", message.payload.message, message.payload.details ?? {});
       }
@@ -292,6 +366,7 @@ const debugTerminal =
   process.env.OCTTY_DEBUG_TERMINAL === "1" || process.env.WORKSPACE_ORBIT_DEBUG_TERMINAL === "1"
     ? "1"
     : "0";
+const debugMessageRates = DEBUG_MESSAGE_RATES ? "1" : "0";
 const headlessApi =
   process.env.OCTTY_HEADLESS_API === "1" || process.env.WORKSPACE_ORBIT_HEADLESS_API === "1";
 const bootstrapHtml = `<!doctype html>
@@ -301,6 +376,7 @@ const bootstrapHtml = `<!doctype html>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="octty-api-origin" content="${apiOrigin}" />
     <meta name="octty-debug-terminal" content="${debugTerminal}" />
+    <meta name="octty-debug-message-rates" content="${debugMessageRates}" />
     <title>Octty</title>
     <style>
       :root {
@@ -420,46 +496,30 @@ if (headlessApi) {
     relayoutTimers.add(timer);
   };
 
-  mainWindow.on("resize", () => {
-    scheduleMainWebviewSync(0);
-  });
-
   for (const delayMs of [0, 80, 220, 500, 1000]) {
     scheduleMainWebviewSync(delayMs);
   }
 
-  // These are registered through Electrobun's native/global shortcut layer on purpose.
-  // The embedded native browser webview can take focus in a way that bypasses the
-  // renderer's DOM key handlers, so renderer-only shortcuts become unreliable whenever
-  // a browser pane is visible or active. Routing the app's navigation/layout shortcuts
-  // through the native bridge keeps pane/workspace control responsive across shell,
-  // note, diff, and browser panes until Electrobun exposes a window-scoped shortcut
-  // path that still fires while the native child webview owns focus.
-  const appShortcuts = [
+  // Keep only the window-close overrides on Electrobun's native/global shortcut layer.
+  // Arrow-based pane/workspace navigation is still handled in the renderer because
+  // the current global shortcut path is unreliable for those chords under Hyprland.
+  // Once Electrobun exposes a dependable window-scoped native key event API, the
+  // browser-pane-only cases can move there without swallowing renderer shortcuts.
+  const nativeAppShortcuts = [
     ["CommandOrControl+W", "block-window-close"],
     ["CommandOrControl+Shift+W", "close-pane"],
-    ["CommandOrControl+Shift+Left", "focus-pane-left"],
-    ["CommandOrControl+Shift+Right", "focus-pane-right"],
-    ["CommandOrControl+Shift+Up", "focus-workspace-up"],
-    ["CommandOrControl+Shift+Down", "focus-workspace-down"],
-    ["CommandOrControl+Alt+Left", "resize-pane-left"],
-    ["CommandOrControl+Alt+Right", "resize-pane-right"],
-    ["CommandOrControl+Alt+Shift+Left", "move-pane-left"],
-    ["CommandOrControl+Alt+Shift+Right", "move-pane-right"],
   ] as const;
 
-  const invokeRendererShortcut = (action: (typeof appShortcuts)[number][1]) => {
+  const invokeRendererShortcut = (action: (typeof nativeAppShortcuts)[number][1]) => {
     mainWindow.webview.executeJavascript(`
-      if (typeof window.__workspaceOrbitInvokeShortcut === "function") {
-        window.__workspaceOrbitInvokeShortcut(${JSON.stringify(action)});
-      } else if (${JSON.stringify(action)} === "close-pane" && typeof window.__workspaceOrbitHandleClosePane === "function") {
-        window.__workspaceOrbitHandleClosePane();
-      }
+      window.dispatchEvent(
+        new CustomEvent("octty-shortcut", { detail: ${JSON.stringify(action)} })
+      );
     `);
   };
 
   const registerAppShortcuts = () => {
-    for (const [accelerator, action] of appShortcuts) {
+    for (const [accelerator, action] of nativeAppShortcuts) {
       if (GlobalShortcut.isRegistered(accelerator)) {
         continue;
       }
@@ -468,7 +528,7 @@ if (headlessApi) {
   };
 
   const unregisterAppShortcuts = () => {
-    for (const [accelerator] of appShortcuts) {
+    for (const [accelerator] of nativeAppShortcuts) {
       if (!GlobalShortcut.isRegistered(accelerator)) {
         continue;
       }

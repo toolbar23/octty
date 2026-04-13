@@ -69,6 +69,9 @@ interface WorkspaceRuntime {
 
 const DEBUG_TERMINAL_IO =
   process.env.OCTTY_DEBUG_TERMINAL === "1" || process.env.WORKSPACE_ORBIT_DEBUG_TERMINAL === "1";
+const DEBUG_MESSAGE_RATES =
+  process.env.OCTTY_DEBUG_MESSAGE_RATES === "1" ||
+  process.env.WORKSPACE_ORBIT_DEBUG_MESSAGE_RATES === "1";
 const DEFAULT_WORKSPACE_DIRECTORY = join(homedir(), "workspaces");
 const WORKSPACE_NAME_ADJECTIVES = [
   "amber",
@@ -148,6 +151,48 @@ function randomWorkspaceSlug(): string {
 function formatTerminalChunk(data: string, limit = 120): string {
   const serialized = JSON.stringify(data);
   return serialized.length > limit ? `${serialized.slice(0, limit)}...` : serialized;
+}
+
+type DebugRateBucket = {
+  count: number;
+  sample?: Record<string, unknown>;
+};
+
+const serviceDebugRateBuckets = new Map<string, DebugRateBucket>();
+let serviceDebugRateTimer: Timer | null = null;
+
+function trackServiceDebugRate(key: string, sample?: Record<string, unknown>): void {
+  if (!DEBUG_MESSAGE_RATES) {
+    return;
+  }
+
+  const bucket = serviceDebugRateBuckets.get(key) ?? { count: 0 };
+  bucket.count += 1;
+  if (sample) {
+    bucket.sample = sample;
+  }
+  serviceDebugRateBuckets.set(key, bucket);
+
+  if (serviceDebugRateTimer) {
+    return;
+  }
+
+  serviceDebugRateTimer = setTimeout(() => {
+    serviceDebugRateTimer = null;
+    if (serviceDebugRateBuckets.size === 0) {
+      return;
+    }
+
+    const summary = Array.from(serviceDebugRateBuckets.entries())
+      .sort((left, right) => right[1].count - left[1].count)
+      .map(([bucketKey, value]) => ({
+        key: bucketKey,
+        count: value.count,
+        sample: value.sample,
+      }));
+    serviceDebugRateBuckets.clear();
+    console.log("[debug-rates][service]", summary);
+  }, 1_000);
 }
 
 function slugifyNote(fileName: string): string {
@@ -308,12 +353,17 @@ export class WorkspaceService {
 
   addClient(client: ClientSink): () => void {
     this.clients.add(client);
+    trackServiceDebugRate("client:add", { clients: this.clients.size });
     return () => {
       this.clients.delete(client);
+      trackServiceDebugRate("client:remove", { clients: this.clients.size });
     };
   }
 
   private broadcast(message: { type: string; payload: unknown }): void {
+    trackServiceDebugRate(`broadcast:${message.type}`, {
+      clients: this.clients.size,
+    });
     for (const client of this.clients) {
       client(message);
     }
@@ -439,18 +489,22 @@ export class WorkspaceService {
       ignored: (pathValue) => shouldIgnoreWorkspaceWatchPath(String(pathValue)),
     });
 
-    const schedule = () => {
+    const schedule = (eventType: string) => {
+      trackServiceDebugRate(`watch:${eventType}`, {
+        workspaceId: workspace.id,
+        workspacePath: workspace.workspacePath,
+      });
       this.scheduleRefresh(workspace.id);
     };
     const eventWatcher = watcher as unknown as {
       on: (event: string, listener: (...args: unknown[]) => void) => unknown;
     };
 
-    eventWatcher.on("add", schedule);
-    eventWatcher.on("change", schedule);
-    eventWatcher.on("unlink", schedule);
-    eventWatcher.on("addDir", schedule);
-    eventWatcher.on("unlinkDir", schedule);
+    eventWatcher.on("add", () => schedule("add"));
+    eventWatcher.on("change", () => schedule("change"));
+    eventWatcher.on("unlink", () => schedule("unlink"));
+    eventWatcher.on("addDir", () => schedule("addDir"));
+    eventWatcher.on("unlinkDir", () => schedule("unlinkDir"));
     eventWatcher.on("error", (error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[workspace-watch] ${workspace.workspaceName}: ${message}`);
@@ -460,6 +514,7 @@ export class WorkspaceService {
   }
 
   private scheduleRefresh(workspaceId: string): void {
+    trackServiceDebugRate("refresh:schedule", { workspaceId });
     const existing = this.refreshTimers.get(workspaceId);
     if (existing) {
       clearTimeout(existing);
@@ -493,7 +548,7 @@ export class WorkspaceService {
   private aggregateWorkspaceAgentAttentionState(workspaceId: string): AgentAttentionState | null {
     const sessions = this.db
       .listSessionStates(workspaceId)
-      .filter((session) => supportsTerminalAttention(session.kind) && session.state === "live");
+      .filter((session) => isAgentTerminalKind(session.kind) && session.state === "live");
     return aggregateAgentAttentionStates(sessions.map((session) => session.agentAttentionState));
   }
 
@@ -711,6 +766,7 @@ export class WorkspaceService {
   }
 
   private async refreshWorkspace(workspaceId: string): Promise<void> {
+    trackServiceDebugRate("refresh:run", { workspaceId });
     const workspace = this.db.listWorkspaces().find((item) => item.id === workspaceId);
     if (!workspace) {
       return;
@@ -785,6 +841,11 @@ export class WorkspaceService {
   }
 
   private updateActiveAgentCounts(workspaceId: string): void {
+    const workspace = this.db.listWorkspaces().find((item) => item.id === workspaceId);
+    if (!workspace) {
+      return;
+    }
+
     const activeAgentCount = new Set(
       this.db
         .listSessionStates(workspaceId)
@@ -792,21 +853,29 @@ export class WorkspaceService {
         .map((session) => session.id),
     ).size;
     const agentAttentionState = this.aggregateWorkspaceAgentAttentionState(workspaceId);
+    if (
+      workspace.activeAgentCount === activeAgentCount &&
+      workspace.agentAttentionState === agentAttentionState
+    ) {
+      return;
+    }
+
     this.db.updateWorkspaceStatus(workspaceId, {
       activeAgentCount,
       agentAttentionState,
-      recentActivityAt: now(),
     });
-    const workspace = this.db.listWorkspaces().find((item) => item.id === workspaceId);
-    if (workspace) {
-      this.broadcast({
-        type: "workspace-status",
-        payload: {
-          workspace,
-          notes: null,
-        },
-      });
+    const nextWorkspace = this.db.listWorkspaces().find((item) => item.id === workspaceId);
+    if (!nextWorkspace) {
+      return;
     }
+
+    this.broadcast({
+      type: "workspace-status",
+      payload: {
+        workspace: nextWorkspace,
+        notes: null,
+      },
+    });
   }
 
   private async closeWorkspaceRuntime(workspaceId: string): Promise<void> {
@@ -1265,6 +1334,11 @@ export class WorkspaceService {
   }
 
   resizeSession(sessionId: string, cols: number, rows: number): void {
+    trackServiceDebugRate("terminal:resize", {
+      sessionId,
+      cols,
+      rows,
+    });
     this.logTerminal("resize", {
       sessionId,
       cols,

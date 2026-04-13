@@ -6,8 +6,11 @@ import {
 
 describe("workspace watch ignores", () => {
   test("ignores common generated directories by default", () => {
+    expect(shouldIgnoreWorkspaceWatchPath("/home/pm/lynx/bear/service/target")).toBe(true);
     expect(shouldIgnoreWorkspaceWatchPath("/home/pm/lynx/bear/service/target/classes")).toBe(true);
+    expect(shouldIgnoreWorkspaceWatchPath("/home/pm/lynx/bear/build")).toBe(true);
     expect(shouldIgnoreWorkspaceWatchPath("/home/pm/lynx/bear/build/tmp")).toBe(true);
+    expect(shouldIgnoreWorkspaceWatchPath("/home/pm/lynx/bear/out")).toBe(true);
     expect(shouldIgnoreWorkspaceWatchPath("/home/pm/lynx/bear/out/production")).toBe(true);
     expect(shouldIgnoreWorkspaceWatchPath("/home/pm/lynx/bear/src/main/java")).toBe(false);
   });

@@ -75,6 +75,10 @@ const apiOrigin =
 const debugTerminal =
   document.querySelector('meta[name="octty-debug-terminal"], meta[name="workspace-orbit-debug-terminal"]')?.getAttribute("content") ===
   "1";
+const debugMessageRates =
+  document
+    .querySelector('meta[name="octty-debug-message-rates"], meta[name="workspace-orbit-debug-message-rates"]')
+    ?.getAttribute("content") === "1";
 const wsOrigin = apiOrigin.replace("http://", "ws://").replace("https://", "wss://");
 let ghosttyInitPromise: Promise<void> | null = null;
 let forwardTerminalUiDebug:
@@ -90,6 +94,49 @@ const TASKSPACE_DRAG_MIME = "application/x-octty-layout";
 const MIN_STACK_PANE_HEIGHT_PX = 96;
 const KEYBOARD_COLUMN_RESIZE_STEP_PX = 80;
 const CTRL_J = "\x0a";
+
+type DebugRateBucket = {
+  count: number;
+  sample?: Record<string, unknown>;
+};
+
+const rendererDebugRateBuckets = new Map<string, DebugRateBucket>();
+let rendererDebugRateTimer: number | null = null;
+
+function trackRendererDebugRate(key: string, sample?: Record<string, unknown>): void {
+  if (!debugMessageRates) {
+    return;
+  }
+
+  const bucket = rendererDebugRateBuckets.get(key) ?? { count: 0 };
+  bucket.count += 1;
+  if (sample) {
+    bucket.sample = sample;
+  }
+  rendererDebugRateBuckets.set(key, bucket);
+
+  if (rendererDebugRateTimer !== null) {
+    return;
+  }
+
+  rendererDebugRateTimer = window.setTimeout(() => {
+    rendererDebugRateTimer = null;
+    if (rendererDebugRateBuckets.size === 0) {
+      return;
+    }
+
+    const summary = Array.from(rendererDebugRateBuckets.entries())
+      .sort((left, right) => right[1].count - left[1].count)
+      .map(([bucketKey, value]) => ({
+        key: bucketKey,
+        count: value.count,
+        sample: value.sample,
+      }));
+    rendererDebugRateBuckets.clear();
+    console.log("[debug-rates][renderer]", summary);
+    forwardTerminalUiDebug?.("debug-rates-renderer", { summary });
+  }, 1_000);
+}
 
 function isElectrobunRuntime(): boolean {
   const electrobunWindow = window as Window & {
@@ -109,6 +156,8 @@ type WorkspaceOrbitWindow = Window & {
   __workspaceOrbitHandleClosePane?: () => void;
   __workspaceOrbitInvokeShortcut?: (action: string) => void;
 };
+
+type ShortcutBridgeEvent = CustomEvent<string>;
 
 if (isElectrobunRuntime()) {
   new Electroview({ rpc: null as any });
@@ -328,7 +377,6 @@ function createTerminalRuntime(paneId: string): TerminalRuntime {
   host.setAttribute("spellcheck", "false");
   scrubTerminalSurface(host);
   fitAddon.fit();
-  fitAddon.observeResize();
 
   const writeQueue: string[] = [];
   let writeDrainScheduled = false;
@@ -429,6 +477,12 @@ function createTerminalRuntime(paneId: string): TerminalRuntime {
   });
 
   term.onResize(({ cols, rows }) => {
+    trackRendererDebugRate("term:onResize", {
+      paneId,
+      sessionId: runtime.sessionId,
+      cols,
+      rows,
+    });
     logTerminalUi("term-on-resize", () => ({
       paneId,
       sessionId: runtime.sessionId,
@@ -460,12 +514,51 @@ function attachTerminalRuntime(runtime: TerminalRuntime, container: HTMLDivEleme
 }
 
 function refitConnectedTerminalRuntimes(): void {
+  trackRendererDebugRate("term:refit-connected", {
+    runtimes: terminalRuntimeRegistry.size,
+  });
   for (const runtime of terminalRuntimeRegistry.values()) {
     if (!runtime.host.isConnected) {
       continue;
     }
     runtime.fitAddon.fit();
   }
+}
+
+function workspaceLayoutFitSignature(snapshot: WorkspaceSnapshot): string {
+  const orderedColumnIds = [
+    snapshot.pinnedLeftColumnId,
+    ...snapshot.centerColumnIds,
+    snapshot.pinnedRightColumnId,
+  ].filter((columnId): columnId is string => columnId !== null);
+  const seenColumnIds = new Set<string>();
+  const parts = [
+    `left:${snapshot.pinnedLeftColumnId ?? ""}`,
+    `center:${snapshot.centerColumnIds.join(",")}`,
+    `right:${snapshot.pinnedRightColumnId ?? ""}`,
+  ];
+
+  for (const columnId of orderedColumnIds) {
+    if (seenColumnIds.has(columnId)) {
+      continue;
+    }
+    seenColumnIds.add(columnId);
+    const column = snapshot.columns[columnId];
+    if (!column) {
+      continue;
+    }
+    parts.push(
+      [
+        column.id,
+        column.pinned ?? "",
+        column.widthPx,
+        column.paneIds.join(","),
+        column.heightFractions.map((value) => value.toFixed(6)).join(","),
+      ].join("|"),
+    );
+  }
+
+  return parts.join("||");
 }
 
 function detachTerminalRuntime(runtime: TerminalRuntime): void {
@@ -1002,6 +1095,7 @@ function App(): React.ReactElement {
     });
     socket.addEventListener("message", (event) => {
       const message = JSON.parse(event.data) as { type: string; payload: unknown };
+      trackRendererDebugRate(`ws:recv:${message.type}`);
 
       if (message.type === "nav-updated") {
         const payload = message.payload as BootstrapPayload;
@@ -1118,9 +1212,11 @@ function App(): React.ReactElement {
       }));
       return;
     }
+    const summary = summarizeSocketMessage(message);
+    trackRendererDebugRate(`ws:send:${String(summary.type ?? "unknown")}`, summary);
     logTerminalUi("socket-send", () => ({
       readyState: socket.readyState,
-      ...summarizeSocketMessage(message),
+      ...summary,
     }));
     socket.send(JSON.stringify(message));
   }, []);
@@ -1566,6 +1662,13 @@ function App(): React.ReactElement {
     const orbitWindow = window as WorkspaceOrbitWindow;
     orbitWindow.__workspaceOrbitHandleClosePane = () => invokeAppShortcut("close-pane");
     orbitWindow.__workspaceOrbitInvokeShortcut = invokeAppShortcut;
+    const handleNativeShortcutEvent = (event: Event) => {
+      const shortcutEvent = event as ShortcutBridgeEvent;
+      if (typeof shortcutEvent.detail !== "string") {
+        return;
+      }
+      invokeAppShortcut(shortcutEvent.detail);
+    };
 
     const handleClosePaneKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing) {
@@ -1585,8 +1688,10 @@ function App(): React.ReactElement {
       }
     };
 
+    window.addEventListener("octty-shortcut", handleNativeShortcutEvent as EventListener);
     window.addEventListener("keydown", handleClosePaneKey, true);
     return () => {
+      window.removeEventListener("octty-shortcut", handleNativeShortcutEvent as EventListener);
       window.removeEventListener("keydown", handleClosePaneKey, true);
       delete orbitWindow.__workspaceOrbitHandleClosePane;
       if (orbitWindow.__workspaceOrbitInvokeShortcut === invokeAppShortcut) {
@@ -2091,6 +2196,7 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
   const activeColumnId = detail.snapshot.activePaneId
     ? findPaneColumnId(detail.snapshot, detail.snapshot.activePaneId)
     : null;
+  const layoutFitSignature = workspaceLayoutFitSignature(detail.snapshot);
 
   useEffect(() => {
     if (!activeColumnId || !centerScrollRef.current) {
@@ -2124,6 +2230,10 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
       return;
     }
 
+    trackRendererDebugRate("taskspace:snapshot-effect", {
+      workspaceId: detail.workspace.id,
+      panes: Object.keys(detail.snapshot.panes).length,
+    });
     const frame = window.requestAnimationFrame(() => {
       refitConnectedTerminalRuntimes();
     });
@@ -2131,7 +2241,7 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
     return () => {
       window.cancelAnimationFrame(frame);
     };
-  }, [detail.snapshot, isVisible]);
+  }, [detail.workspace.id, isVisible, layoutFitSignature]);
 
   useEffect(() => {
     if (!isVisible || !keyboardNavigationRequest) {
@@ -2790,12 +2900,17 @@ function TerminalPane({
   const onUpdatePaneRef = useRef(onUpdatePane);
   const pendingSessionStartRef = useRef<Promise<void> | null>(null);
   const resizeFrameRef = useRef<number | null>(null);
-  const restoreRerenderTimerRef = useRef<number | null>(null);
+  const restoreRerenderTimerRef = useRef<number[]>([]);
+  const lastSyncedSizeRef = useRef<{ sessionId: string; cols: number; rows: number } | null>(null);
+  const lastObservedContainerSizeRef = useRef<{ width: number; height: number } | null>(null);
   const [statusText, setStatusText] = useState<string>(terminalStatusLabel(payload));
 
   useEffect(() => {
     payloadRef.current = payload;
     setStatusText(terminalStatusLabel(payload));
+    if (!payload.sessionId) {
+      lastSyncedSizeRef.current = null;
+    }
   }, [payload.autoStart, payload.exitCode, payload.sessionId, payload.sessionState]);
 
   useEffect(() => {
@@ -2881,13 +2996,15 @@ function TerminalPane({
   }, []);
 
   const cancelRestoreRerender = useCallback(() => {
-    if (restoreRerenderTimerRef.current !== null) {
-      window.clearTimeout(restoreRerenderTimerRef.current);
-      restoreRerenderTimerRef.current = null;
+    if (restoreRerenderTimerRef.current.length > 0) {
+      for (const handle of restoreRerenderTimerRef.current) {
+        window.clearTimeout(handle);
+      }
+      restoreRerenderTimerRef.current = [];
     }
   }, []);
 
-  const scheduleFitAndResizeSync = useCallback(() => {
+  const scheduleFitAndResizeSync = useCallback((options?: { forceReflow?: boolean }) => {
     if (resizeFrameRef.current !== null) {
       window.cancelAnimationFrame(resizeFrameRef.current);
     }
@@ -2900,16 +3017,68 @@ function TerminalPane({
         return;
       }
 
+      const containerWidth = container.clientWidth;
+      const containerHeight = container.clientHeight;
+      const lastObservedContainerSize = lastObservedContainerSizeRef.current;
+      if (
+        !options?.forceReflow &&
+        lastObservedContainerSize &&
+        lastObservedContainerSize.width === containerWidth &&
+        lastObservedContainerSize.height === containerHeight
+      ) {
+        return;
+      }
+      lastObservedContainerSizeRef.current = {
+        width: containerWidth,
+        height: containerHeight,
+      };
+
+      const previousCols = Math.max(20, runtime.term.cols ?? 120);
+      const previousRows = Math.max(5, runtime.term.rows ?? 32);
+      if (options?.forceReflow) {
+        const originalFontSize = runtime.term.options.fontSize;
+        runtime.term.options.fontSize = originalFontSize + 0.01;
+        runtime.term.options.fontSize = originalFontSize;
+      }
+
       runtime.fitAddon.fit();
+
+      let cols = Math.max(20, runtime.term.cols ?? 120);
+      let rows = Math.max(5, runtime.term.rows ?? 32);
+      if (options?.forceReflow && cols === previousCols && rows === previousRows) {
+        const nudgedCols = cols > 20 ? cols - 1 : cols + 1;
+        runtime.term.resize(nudgedCols, rows);
+        runtime.term.resize(cols, rows);
+        cols = Math.max(20, runtime.term.cols ?? cols);
+        rows = Math.max(5, runtime.term.rows ?? rows);
+      }
 
       const activePayload = payloadRef.current;
       if (activePayload.sessionState !== "live" || !activePayload.sessionId) {
         return;
       }
 
-      const active = runtime.term as unknown as { cols?: number; rows?: number };
-      const cols = Math.max(20, active.cols ?? 120);
-      const rows = Math.max(5, active.rows ?? 32);
+      const lastSyncedSize = lastSyncedSizeRef.current;
+      if (
+        lastSyncedSize &&
+        lastSyncedSize.sessionId === activePayload.sessionId &&
+        lastSyncedSize.cols === cols &&
+        lastSyncedSize.rows === rows
+      ) {
+        return;
+      }
+      lastSyncedSizeRef.current = {
+        sessionId: activePayload.sessionId,
+        cols,
+        rows,
+      };
+      trackRendererDebugRate("term:sync-resize", {
+        paneId: pane.id,
+        sessionId: activePayload.sessionId,
+        cols,
+        rows,
+        forceReflow: options?.forceReflow ?? false,
+      });
       onResizeSessionRef.current(activePayload.sessionId, cols, rows);
     });
   }, [pane.id]);
@@ -2921,17 +3090,32 @@ function TerminalPane({
     }
 
     cancelRestoreRerender();
-    restoreRerenderTimerRef.current = window.setTimeout(() => {
-      restoreRerenderTimerRef.current = null;
-      if (rerenderMode === "resize") {
-        scheduleFitAndResizeSync();
-        window.setTimeout(() => {
-          if (payloadRef.current.sessionId === sessionId) {
-            scheduleFitAndResizeSync();
-          }
-        }, 80);
-      }
-    }, 40);
+    const queueRestorePass = (delayMs: number) => {
+      const handle = window.setTimeout(() => {
+        restoreRerenderTimerRef.current = restoreRerenderTimerRef.current.filter(
+          (timerHandle) => timerHandle !== handle,
+        );
+        if (payloadRef.current.sessionId !== sessionId) {
+          return;
+        }
+        if (rerenderMode === "resize") {
+          scheduleFitAndResizeSync({ forceReflow: true });
+        }
+      }, delayMs);
+      restoreRerenderTimerRef.current.push(handle);
+    };
+
+    for (const delayMs of [40, 120, 260, 600, 1200]) {
+      queueRestorePass(delayMs);
+    }
+
+    if (typeof document.fonts?.ready?.then === "function") {
+      void document.fonts.ready.then(() => {
+        if (payloadRef.current.sessionId === sessionId) {
+          scheduleFitAndResizeSync({ forceReflow: true });
+        }
+      });
+    }
   }, [cancelRestoreRerender, scheduleFitAndResizeSync]);
 
   useEffect(() => {
@@ -2958,6 +3142,7 @@ function TerminalPane({
     }
 
     const observer = new ResizeObserver(() => {
+      trackRendererDebugRate("term:container-resize", { paneId: pane.id });
       scheduleFitAndResizeSync();
     });
     observer.observe(container);
@@ -2989,7 +3174,9 @@ function TerminalPane({
       const next = onCreateSessionRef
         .current(workspace.id, pane.id, kind, cols, rows)
         .then((session) => {
+          lastSyncedSizeRef.current = null;
           onResizeSessionRef.current(session.id, cols, rows);
+          lastSyncedSizeRef.current = { sessionId: session.id, cols, rows };
           if (options?.rerenderAfterRestore) {
             scheduleRestoreRerender(session.id, session.kind);
           }
@@ -3035,6 +3222,7 @@ function TerminalPane({
 
       runtime = getOrCreateTerminalRuntime(pane.id);
       runtimeRef.current = runtime;
+      lastObservedContainerSizeRef.current = null;
       cancelRestoreRerender();
       runtime.sendInput = (sessionId, data) => onSendSessionInputRef.current(sessionId, data);
       runtime.resizeSession = (sessionId, cols, rows) =>
@@ -3064,7 +3252,9 @@ function TerminalPane({
           setStatusText(payload.sessionState === "live" ? "live" : terminalStatusLabel(payload));
           if (isVisible) {
             const { cols, rows } = currentTerminalSize();
+            lastSyncedSizeRef.current = null;
             onResizeSessionRef.current(payload.sessionId, cols, rows);
+            lastSyncedSizeRef.current = { sessionId: payload.sessionId, cols, rows };
           }
           return;
         }
@@ -3083,7 +3273,9 @@ function TerminalPane({
           if (session.state === "live") {
             if (isVisible) {
               const { cols, rows } = currentTerminalSize();
+              lastSyncedSizeRef.current = null;
               onResizeSessionRef.current(session.id, cols, rows);
+              lastSyncedSizeRef.current = { sessionId: session.id, cols, rows };
             }
             bindTerminalRuntimeSession(
               runtime,
@@ -3348,6 +3540,12 @@ function BrowserPane({
       if (disposed) {
         return;
       }
+      trackRendererDebugRate("browser:sync-interaction", {
+        paneId: pane.id,
+        isVisible,
+        isActive,
+        webviewId: webview.webviewId ?? null,
+      });
       webview.toggleHidden?.(!isVisible);
       webview.togglePassthrough?.(!isActive);
     };
