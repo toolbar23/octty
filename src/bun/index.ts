@@ -122,6 +122,14 @@ const server = Bun.serve<WebSocketData>({
           return json(await service.updateWorkspaceDisplayName(workspaceId, payload.displayName));
         }
 
+        if (request.method === "POST" && url.pathname.endsWith("/delete-and-forget") && url.pathname.startsWith("/api/workspaces/")) {
+          const workspaceId = decodeURIComponent(
+            url.pathname.replace("/api/workspaces/", "").replace("/delete-and-forget", ""),
+          );
+          await service.deleteAndForgetWorkspace(workspaceId);
+          return noContent();
+        }
+
         if (request.method === "DELETE" && url.pathname.startsWith("/api/workspaces/")) {
           const workspaceId = decodeURIComponent(url.pathname.replace("/api/workspaces/", ""));
           await service.forgetWorkspace(workspaceId);

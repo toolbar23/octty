@@ -1277,6 +1277,31 @@ function App(): React.ReactElement {
     }
   }, [activeWorkspaceId]);
 
+  const deleteAndForgetWorkspace = useCallback(async (workspace: WorkspaceSummary) => {
+    const confirmed = window.confirm(
+      `Delete the workspace directory and forget "${workspace.displayName}" from JJ and the app?\n\n${workspace.workspacePath}`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      await apiFetch(`/api/workspaces/${encodeURIComponent(workspace.id)}/delete-and-forget`, {
+        method: "POST",
+      });
+      setDetails((current) => {
+        const next = { ...current };
+        delete next[workspace.id];
+        return next;
+      });
+      if (activeWorkspaceId === workspace.id) {
+        setActiveWorkspaceId(null);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, [activeWorkspaceId]);
+
   const removeProjectRoot = useCallback(async (rootId: string) => {
     const confirmed = window.confirm("Remove this project root from the app?");
     if (!confirmed) {
@@ -1863,17 +1888,18 @@ function App(): React.ReactElement {
                                 >
                                   ...
                                 </button>
-                                {openWorkspaceMenuId === workspace.id && (
-                                  <div className="inline-menu">
-                                    <button
-                                      className="inline-menu-item"
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        startWorkspaceRename(workspace);
-                                      }}
-                                    >
-                                      Rename
-                                    </button>
+                              {openWorkspaceMenuId === workspace.id && (
+                                <div className="inline-menu">
+                                  <button
+                                    className="inline-menu-item"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      startWorkspaceRename(workspace);
+                                    }}
+                                  >
+                                    Rename
+                                  </button>
+                                  {workspace.workspaceName !== "default" && (
                                     <button
                                       className="inline-menu-item"
                                       onClick={(event) => {
@@ -1884,8 +1910,21 @@ function App(): React.ReactElement {
                                     >
                                       Forget
                                     </button>
-                                  </div>
-                                )}
+                                  )}
+                                  {workspace.workspaceName !== "default" && hasRecordedWorkspacePath(workspace.workspacePath) && (
+                                    <button
+                                      className="inline-menu-item"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        setOpenWorkspaceMenuId(null);
+                                        void deleteAndForgetWorkspace(workspace);
+                                      }}
+                                    >
+                                      Delete and forget
+                                    </button>
+                                  )}
+                                </div>
+                              )}
                               </div>
                             </div>
                           </div>
@@ -1895,17 +1934,14 @@ function App(): React.ReactElement {
                             </div>
                           )}
                           <div className="workspace-badges">
-                            {!hasRecordedWorkspacePath(workspace.workspacePath) && (
-                              <span className="badge warning">missing path</span>
-                            )}
-                            {workspace.unreadNotes > 0 && (
-                              <span className="badge">{workspace.unreadNotes} note</span>
-                            )}
-                            {workspace.activeAgentCount > 0 && (
-                              <span className="badge">{workspace.activeAgentCount} agent</span>
-                            )}
-                          </div>
+                          {!hasRecordedWorkspacePath(workspace.workspacePath) && (
+                            <span className="badge warning">missing path</span>
+                          )}
+                          {workspace.unreadNotes > 0 && (
+                            <span className="badge">{workspace.unreadNotes} note</span>
+                          )}
                         </div>
+                      </div>
                       </div>
                     );
                   })}

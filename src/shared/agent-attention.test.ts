@@ -6,10 +6,10 @@ import {
 } from "./agent-attention";
 
 describe("agent attention helpers", () => {
-  test("aggregates unseen completion ahead of thinking and idle", () => {
+  test("aggregates active thinking ahead of unseen completion and idle", () => {
     expect(
       aggregateAgentAttentionStates(["idle-seen", "thinking", "idle-unseen"]),
-    ).toBe("idle-unseen");
+    ).toBe("thinking");
   });
 
   test("aggregates thinking ahead of seen idle", () => {

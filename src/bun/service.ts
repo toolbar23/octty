@@ -6,6 +6,7 @@ import {
   readFile,
   readdir,
   realpath,
+  rm,
   stat,
   unlink,
   writeFile,
@@ -1027,27 +1028,71 @@ export class WorkspaceService {
     return updated;
   }
 
-  async forgetWorkspace(workspaceId: string): Promise<void> {
+  private async removeWorkspaceRuntimeState(workspaceId: string): Promise<void> {
+    await this.closeWorkspaceRuntime(workspaceId);
+    for (const session of this.db.listSessionStates(workspaceId)) {
+      this.ptySidecar.kill(session.id);
+    }
+    const watcher = this.watchers.get(workspaceId);
+    if (watcher) {
+      await watcher.close();
+      this.watchers.delete(workspaceId);
+    }
+  }
+
+  private async forgetWorkspaceInternal(
+    workspaceId: string,
+    options?: { deleteDirectory?: boolean },
+  ): Promise<void> {
     const workspace = this.db.listWorkspaces().find((item) => item.id === workspaceId);
     if (!workspace) {
       throw new Error("Workspace not found");
     }
 
+    if (workspace.workspaceName === "default") {
+      throw new Error('The "default" workspace can only be kept, not forgotten.');
+    }
+
+    let directoryDeleteError: string | null = null;
     await jjForgetWorkspace(workspace.rootPath, workspace.workspaceName);
-    await this.closeWorkspaceRuntime(workspace.id);
-    for (const session of this.db.listSessionStates(workspace.id)) {
-      this.ptySidecar.kill(session.id);
+    await this.removeWorkspaceRuntimeState(workspace.id);
+
+    if (options?.deleteDirectory) {
+      if (!hasRecordedWorkspacePath(workspace.workspacePath)) {
+        directoryDeleteError = `Workspace "${workspace.workspaceName}" was forgotten, but its directory path is not recorded.`;
+      } else {
+        const resolvedWorkspacePath = await realpath(workspace.workspacePath).catch(() => workspace.workspacePath);
+        const resolvedRootPath = await realpath(workspace.rootPath).catch(() => workspace.rootPath);
+        if (resolvedWorkspacePath === resolvedRootPath) {
+          directoryDeleteError = `Refusing to delete the repo root for workspace "${workspace.workspaceName}".`;
+        } else {
+          try {
+            await rm(resolvedWorkspacePath, { recursive: true, force: true });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            directoryDeleteError = `Workspace "${workspace.workspaceName}" was forgotten, but deleting ${resolvedWorkspacePath} failed: ${message}`;
+          }
+        }
+      }
     }
-    const watcher = this.watchers.get(workspace.id);
-    if (watcher) {
-      await watcher.close();
-      this.watchers.delete(workspace.id);
-    }
+
     this.db.deleteWorkspace(workspace.id);
     this.broadcast({
       type: "nav-updated",
       payload: this.getBootstrap(),
     });
+
+    if (directoryDeleteError) {
+      throw new Error(directoryDeleteError);
+    }
+  }
+
+  async forgetWorkspace(workspaceId: string): Promise<void> {
+    await this.forgetWorkspaceInternal(workspaceId);
+  }
+
+  async deleteAndForgetWorkspace(workspaceId: string): Promise<void> {
+    await this.forgetWorkspaceInternal(workspaceId, { deleteDirectory: true });
   }
 
   async createTerminalSession(request: TerminalCreateRequest): Promise<SessionSnapshot> {

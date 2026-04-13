@@ -308,6 +308,7 @@ textarea {
 
 .project-header-copy {
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .project-title-row,
@@ -316,6 +317,14 @@ textarea {
   align-items: center;
   gap: 6px;
   min-width: 0;
+}
+
+.project-title-row {
+  width: 100%;
+}
+
+.project-title-row .inline-menu-root {
+  margin-left: auto;
 }
 
 .workspace-title-row {
