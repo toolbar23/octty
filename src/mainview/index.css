@@ -872,6 +872,11 @@ textarea {
 .drag-handle {
   padding: 2px 6px;
   min-width: 0;
+  cursor: grab;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
 }
 
 .pane-actions button {

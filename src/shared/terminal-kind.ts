@@ -50,6 +50,10 @@ export function supportsTerminalAttention(kind: TerminalKind): boolean {
   return kind === "shell" || isAgentTerminalKind(kind);
 }
 
+export function shouldCloseTerminalPaneOnExit(kind: TerminalKind): boolean {
+  return kind === "shell";
+}
+
 export function terminalRestoreRerenderMode(kind: TerminalKind): "resize" | null {
   switch (kind) {
     case "shell":

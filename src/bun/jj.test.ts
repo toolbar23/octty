@@ -19,6 +19,30 @@ describe("fallbackWorkspacePath", () => {
     ).toBe("jj-missing://panda-frontend");
   });
 
+  test("uses the repo root when the workspace target matches the current working copy", () => {
+    expect(
+      fallbackWorkspacePath(
+        "/home/pm/lynx/bear",
+        "default",
+        null,
+        "qssvvlqvtosv",
+        "qssvvlqvtosv",
+      ),
+    ).toBe("/home/pm/lynx/bear");
+  });
+
+  test("keeps missing workspaces marked as missing when the target does not match", () => {
+    expect(
+      fallbackWorkspacePath(
+        "/home/pm/lynx/bear",
+        "default",
+        null,
+        "qssvvlqvtosv",
+        "anotherchange",
+      ),
+    ).toBe("jj-missing://default");
+  });
+
   test("detects stale working copy errors", () => {
     expect(
       isStaleWorkingCopyError(

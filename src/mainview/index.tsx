@@ -56,6 +56,7 @@ import { appShortcutActionForKeyEvent } from "../shared/app-shortcuts";
 import { shouldRemapShiftEnterToCtrlJ } from "../shared/terminal-shortcuts";
 import {
   isAgentTerminalKind,
+  shouldCloseTerminalPaneOnExit,
   supportsTerminalAttention,
   terminalRestoreRerenderMode,
   terminalKindLabel,
@@ -2720,7 +2721,17 @@ function PaneFrame(props: PaneFrameProps): React.ReactElement {
     >
       <header className="pane-header">
         <div className="pane-title-row">
-          <button className="drag-handle" draggable onDragStart={onDragStartPane}>
+          <button
+            type="button"
+            className="drag-handle"
+            draggable
+            aria-label={`Drag ${pane.title}`}
+            title={`Drag ${pane.title}`}
+            onMouseDown={(event) => {
+              event.stopPropagation();
+            }}
+            onDragStart={onDragStartPane}
+          >
             ::
           </button>
           {attentionClassName && (
@@ -2775,6 +2786,7 @@ function PaneFrame(props: PaneFrameProps): React.ReactElement {
             onSendSessionInput={onSendSessionInput}
             onResizeSession={onResizeSession}
             onSetSessionFocus={onSetSessionFocus}
+            onClosePane={onClose}
             onUpdatePane={onUpdatePane}
           />
         )}
@@ -2840,6 +2852,7 @@ function TerminalPane({
   onSendSessionInput,
   onResizeSession,
   onSetSessionFocus,
+  onClosePane,
   onUpdatePane,
 }: {
   pane: PaneState;
@@ -2852,6 +2865,7 @@ function TerminalPane({
   onSendSessionInput: WorkspaceTaskspaceProps["onSendSessionInput"];
   onResizeSession: WorkspaceTaskspaceProps["onResizeSession"];
   onSetSessionFocus: WorkspaceTaskspaceProps["onSetSessionFocus"];
+  onClosePane: () => void;
   onUpdatePane: (updater: (pane: PaneState) => PaneState) => void;
 }): React.ReactElement {
   const payload = pane.payload as TerminalPanePayload;
@@ -2865,6 +2879,7 @@ function TerminalPane({
   const onSendSessionInputRef = useRef(onSendSessionInput);
   const onResizeSessionRef = useRef(onResizeSession);
   const onSetSessionFocusRef = useRef(onSetSessionFocus);
+  const onClosePaneRef = useRef(onClosePane);
   const onUpdatePaneRef = useRef(onUpdatePane);
   const pendingSessionStartRef = useRef<Promise<void> | null>(null);
   const resizeFrameRef = useRef<number | null>(null);
@@ -2883,9 +2898,11 @@ function TerminalPane({
     onSendSessionInputRef.current = onSendSessionInput;
     onResizeSessionRef.current = onResizeSession;
     onSetSessionFocusRef.current = onSetSessionFocus;
+    onClosePaneRef.current = onClosePane;
     onUpdatePaneRef.current = onUpdatePane;
   }, [
     onCreateSession,
+    onClosePane,
     onFetchSession,
     onResizeSession,
     onSetSessionFocus,
@@ -3116,6 +3133,10 @@ function TerminalPane({
       runtime.resizeSession = (sessionId, cols, rows) =>
         onResizeSessionRef.current(sessionId, cols, rows);
       runtime.onExit = (exitCode) => {
+        if (shouldCloseTerminalPaneOnExit(payloadRef.current.kind)) {
+          onClosePaneRef.current();
+          return;
+        }
         setStatusText(`exit ${exitCode ?? 0}`);
         onUpdatePaneRef.current((current) => ({
           ...current,

@@ -21,6 +21,13 @@ export interface DiscoveredWorkspace {
   workspacePath: string;
 }
 
+interface WorkspaceListEntry {
+  workspaceName: string;
+  targetChangeId: string | null;
+}
+
+const WORKSPACE_LIST_SEPARATOR = "\t";
+
 export function isStaleWorkingCopyError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return (
@@ -82,12 +89,54 @@ async function readCurrentWorkspaceName(rootPath: string): Promise<string | null
   }
 }
 
+async function readCurrentWorkspaceChangeId(rootPath: string): Promise<string | null> {
+  try {
+    const output = await runCheckedCommand([
+      "jj",
+      "log",
+      "-R",
+      rootPath,
+      "-r",
+      "@",
+      "-n",
+      "1",
+      "--no-graph",
+      "-T",
+      'change_id.short() ++ "\n"',
+    ]);
+    const changeId = output.trim();
+    return changeId || null;
+  } catch {
+    return null;
+  }
+}
+
+function parseWorkspaceListOutput(output: string): WorkspaceListEntry[] {
+  return output
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [workspaceName, targetChangeId] = line.split(WORKSPACE_LIST_SEPARATOR);
+      return {
+        workspaceName: workspaceName?.trim() || "",
+        targetChangeId: targetChangeId?.trim() || null,
+      };
+    })
+    .filter((entry) => entry.workspaceName.length > 0);
+}
+
 export function fallbackWorkspacePath(
   rootPath: string,
   workspaceName: string,
   currentWorkspaceName: string | null,
+  currentWorkspaceChangeId: string | null = null,
+  workspaceTargetChangeId: string | null = null,
 ): string {
-  if (currentWorkspaceName && workspaceName === currentWorkspaceName) {
+  if (
+    (currentWorkspaceName && workspaceName === currentWorkspaceName) ||
+    (currentWorkspaceChangeId && workspaceTargetChangeId === currentWorkspaceChangeId)
+  ) {
     return rootPath;
   }
   return encodeMissingWorkspacePath(workspaceName);
@@ -104,29 +153,27 @@ export async function resolveRepoRoot(inputPath: string): Promise<string> {
 
 export async function discoverWorkspaces(rootPath: string): Promise<DiscoveredWorkspace[]> {
   const resolvedRootPath = await realpath(rootPath);
-  const { currentWorkspaceName, namesOutput } = await withStaleWorkspaceRetry(
+  const { currentWorkspaceName, currentWorkspaceChangeId, listOutput } = await withStaleWorkspaceRetry(
     resolvedRootPath,
     async () => ({
       currentWorkspaceName: await readCurrentWorkspaceName(resolvedRootPath),
-      namesOutput: await runCheckedCommand([
+      currentWorkspaceChangeId: await readCurrentWorkspaceChangeId(resolvedRootPath),
+      listOutput: await runCheckedCommand([
         "jj",
         "workspace",
         "list",
         "-R",
         resolvedRootPath,
         "-T",
-        "name ++ \"\\n\"",
+        'name ++ "\t" ++ target.change_id().short() ++ "\n"',
       ]),
     }),
   );
 
-  const names = namesOutput
-    .split("\n")
-    .map((name) => name.trim())
-    .filter(Boolean);
+  const workspaceEntries = parseWorkspaceListOutput(listOutput);
 
   const workspaces = await Promise.all(
-    names.map(async (workspaceName) => {
+    workspaceEntries.map(async ({ workspaceName, targetChangeId }) => {
       try {
         const workspacePath = (
           await runCheckedCommand([
@@ -153,6 +200,8 @@ export async function discoverWorkspaces(rootPath: string): Promise<DiscoveredWo
             resolvedRootPath,
             workspaceName,
             currentWorkspaceName,
+            currentWorkspaceChangeId,
+            targetChangeId,
           ),
         };
       }
