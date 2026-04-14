@@ -108,6 +108,8 @@ function makeBrowserPayload(): BrowserPanePayload {
   return {
     url: DEFAULT_BROWSER_URL,
     title: "Docs",
+    zoomFactor: 1,
+    pendingPopupId: null,
   };
 }
 
@@ -851,6 +853,11 @@ export function sanitizeSnapshot(
       const payload = pane.payload as BrowserPanePayload;
       payload.url ||= DEFAULT_BROWSER_URL;
       payload.title ||= "Docs";
+      payload.zoomFactor =
+        Number.isFinite(payload.zoomFactor) && payload.zoomFactor > 0
+          ? Math.max(0.5, Math.min(3, payload.zoomFactor))
+          : 1;
+      payload.pendingPopupId ??= null;
     }
 
     if (pane.type === "note") {

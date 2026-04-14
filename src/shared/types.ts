@@ -87,7 +87,71 @@ export interface NotePanePayload {
 export interface BrowserPanePayload {
   url: string;
   title: string;
+  zoomFactor: number;
+  pendingPopupId: string | null;
 }
+
+export interface BrowserViewBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  contentBounds?: BrowserViewBounds;
+}
+
+export interface BrowserViewState {
+  workspaceId: string;
+  paneId: string;
+  url: string;
+  title: string;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  zoomFactor: number;
+  errorText: string | null;
+}
+
+export interface BrowserFindResult {
+  requestId: number;
+  activeMatchOrdinal: number;
+  matches: number;
+  finalUpdate: boolean;
+}
+
+export interface BrowserDownloadState {
+  id: string;
+  paneId: string;
+  fileName: string;
+  receivedBytes: number;
+  totalBytes: number;
+  state: "progressing" | "interrupted" | "completed" | "cancelled";
+  savePath: string | null;
+}
+
+export type BrowserEventEnvelope =
+  | { type: "state"; payload: BrowserViewState }
+  | { type: "focus"; payload: { workspaceId: string; paneId: string } }
+  | { type: "close"; payload: { workspaceId: string; paneId: string } }
+  | {
+      type: "popup";
+      payload: {
+        workspaceId: string;
+        paneId: string;
+        popupId: string;
+        url: string;
+        title: string | null;
+      };
+    }
+  | {
+      type: "shortcut";
+      payload: {
+        workspaceId: string;
+        paneId: string;
+        action: "focus-location" | "focus-find" | "reload" | "zoom-in" | "zoom-out" | "zoom-reset";
+      };
+    }
+  | { type: "find-result"; payload: { workspaceId: string; paneId: string; result: BrowserFindResult } }
+  | { type: "download"; payload: { workspaceId: string; download: BrowserDownloadState } };
 
 export interface DiffPanePayload {
   pinned: boolean;

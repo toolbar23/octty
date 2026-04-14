@@ -1,9 +1,14 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
+  OCTTY_BROWSER_EVENT_CHANNEL,
   OCTTY_EVENT_CHANNEL,
   type OcttyDesktopBridge,
 } from "../shared/desktop-bridge";
 import type {
+  BrowserEventEnvelope,
+  BrowserFindResult,
+  BrowserViewBounds,
+  BrowserViewState,
   CreateWorkspacePayload,
   SessionSnapshot,
   TerminalCreateRequest,
@@ -55,6 +60,62 @@ const bridge: OcttyDesktopBridge = {
   readTerminalClipboardPaste: () =>
     ipcRenderer.invoke("octty:read-terminal-clipboard-paste"),
   openExternal: (url: string) => ipcRenderer.invoke("octty:open-external", url),
+  ensureBrowserPane: (
+    workspaceId: string,
+    paneId: string,
+    url: string,
+    zoomFactor?: number,
+    pendingPopupId?: string | null,
+  ): Promise<BrowserViewState> =>
+    ipcRenderer.invoke("octty:browser-ensure", {
+      workspaceId,
+      paneId,
+      url,
+      zoomFactor,
+      pendingPopupId,
+    }),
+  setBrowserBounds: (paneId: string, bounds: BrowserViewBounds) =>
+    ipcRenderer.send("octty:browser-bounds", { paneId, bounds }),
+  hideBrowserPane: (paneId: string) =>
+    ipcRenderer.send("octty:browser-hide", { paneId }),
+  destroyBrowserPane: (paneId: string) =>
+    ipcRenderer.send("octty:browser-destroy", { paneId }),
+  focusBrowserPane: (paneId: string): Promise<void> =>
+    ipcRenderer.invoke("octty:browser-focus", { paneId }),
+  navigateBrowserPane: (paneId: string, url: string): Promise<BrowserViewState> =>
+    ipcRenderer.invoke("octty:browser-navigate", { paneId, url }),
+  goBackBrowserPane: (paneId: string): Promise<BrowserViewState> =>
+    ipcRenderer.invoke("octty:browser-back", { paneId }),
+  goForwardBrowserPane: (paneId: string): Promise<BrowserViewState> =>
+    ipcRenderer.invoke("octty:browser-forward", { paneId }),
+  reloadBrowserPane: (paneId: string): Promise<BrowserViewState> =>
+    ipcRenderer.invoke("octty:browser-reload", { paneId }),
+  stopBrowserPane: (paneId: string): Promise<BrowserViewState> =>
+    ipcRenderer.invoke("octty:browser-stop", { paneId }),
+  setBrowserZoom: (paneId: string, zoomFactor: number): Promise<BrowserViewState> =>
+    ipcRenderer.invoke("octty:browser-zoom", { paneId, zoomFactor }),
+  findInBrowserPane: (
+    paneId: string,
+    text: string,
+    options?: { forward?: boolean; findNext?: boolean },
+  ): Promise<BrowserFindResult | null> =>
+    ipcRenderer.invoke("octty:browser-find", { paneId, text, options }),
+  stopFindInBrowserPane: (
+    paneId: string,
+    action?: "clearSelection" | "keepSelection" | "activateSelection",
+  ): Promise<void> =>
+    ipcRenderer.invoke("octty:browser-stop-find", { paneId, action }),
+  openBrowserDevTools: (paneId: string): Promise<void> =>
+    ipcRenderer.invoke("octty:browser-devtools", { paneId }),
+  onBrowserEvent: (listener: (event: BrowserEventEnvelope) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: BrowserEventEnvelope) => {
+      listener(payload);
+    };
+    ipcRenderer.on(OCTTY_BROWSER_EVENT_CHANNEL, wrapped);
+    return () => {
+      ipcRenderer.removeListener(OCTTY_BROWSER_EVENT_CHANNEL, wrapped);
+    };
+  },
   onWorkspaceEvent: (listener: (event: WorkspaceEventEnvelope) => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: WorkspaceEventEnvelope) => {
       listener(payload);

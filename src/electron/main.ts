@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { assertRuntimeDependencies } from "../backend/requirements";
 import { OCTTY_EVENT_CHANNEL } from "../shared/desktop-bridge";
 import { OcttyBackend } from "./backend";
+import { BrowserPaneManager } from "./browser-manager";
 import { readTerminalClipboardPaste } from "./terminal-clipboard";
 
 const currentFile = fileURLToPath(import.meta.url);
@@ -12,6 +13,7 @@ const appRoot = resolve(currentDir, "..", "..");
 const rendererHtmlPath = join(currentDir, "index.html");
 const preloadPath = join(currentDir, "preload.cjs");
 let backend: OcttyBackend | null = null;
+const browserPaneManager = new BrowserPaneManager();
 const windows = new Set<BrowserWindow>();
 const DEBUG_ELECTRON_DIAGNOSTICS = process.env.OCTTY_DEBUG_ELECTRON === "1";
 
@@ -31,6 +33,7 @@ function broadcastEvent(event: unknown): void {
 }
 
 function registerIpcHandlers(): void {
+  browserPaneManager.registerIpcHandlers();
   ipcMain.handle("octty:get-bootstrap", () => getBackend().getBootstrap());
   ipcMain.handle("octty:pick-directory", async (_event, startingFolder?: string) => {
     const result = await dialog.showOpenDialog({
@@ -125,7 +128,9 @@ function createMainWindow(): BrowserWindow {
   });
 
   windows.add(window);
+  const ownerWebContentsId = window.webContents.id;
   window.on("closed", () => {
+    browserPaneManager.destroyForOwnerId(ownerWebContentsId);
     windows.delete(window);
   });
 
@@ -241,6 +246,7 @@ async function main(): Promise<void> {
 }
 
 app.on("window-all-closed", () => {
+  browserPaneManager.dispose();
   backend?.dispose();
   app.quit();
 });
@@ -250,6 +256,7 @@ void main().catch((error) => {
   if (app.isReady()) {
     dialog.showErrorBox("Octty failed to start", error instanceof Error ? error.message : String(error));
   }
+  browserPaneManager.dispose();
   backend?.dispose();
   app.exit(1);
 });

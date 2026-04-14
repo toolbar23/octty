@@ -8,6 +8,8 @@ import "./index.css";
 import React, {
   useCallback,
   useEffect,
+  useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -17,6 +19,7 @@ import {
   findPaneColumnId,
   moveColumnToCenter,
   movePaneHorizontally,
+  movePaneToColumn,
   movePaneToNewColumn,
   pinColumn,
   removePane,
@@ -29,7 +32,12 @@ import {
 import type {
   AgentAttentionState,
   BootstrapPayload,
+  BrowserDownloadState,
+  BrowserEventEnvelope,
+  BrowserFindResult,
   BrowserPanePayload,
+  BrowserViewBounds,
+  BrowserViewState,
   NoteRecord,
   NotePanePayload,
   PaneState,
@@ -76,6 +84,12 @@ import {
   workspaceStateClassName,
   workspaceStateLabel,
 } from "../shared/workspace-state";
+import {
+  clampBrowserZoom,
+  normalizeBrowserNavigationInput,
+  visibleRectIntersection,
+  type BrowserSurfaceRect,
+} from "../shared/browser-utils";
 import { desktopClient } from "./desktop-client";
 const debugTerminal =
   document.querySelector('meta[name="octty-debug-terminal"], meta[name="workspace-orbit-debug-terminal"]')?.getAttribute("content") ===
@@ -1668,6 +1682,9 @@ function App(): React.ReactElement {
             }
             destroyTerminalRuntime(activePane.id);
           }
+          if (activePane.type === "browser") {
+            desktop().destroyBrowserPane(activePane.id);
+          }
 
           mutateWorkspace(detail.workspace.id, (currentDetail) => ({
             ...currentDetail,
@@ -2210,6 +2227,7 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
   } = props;
   const centerScrollRef = useRef<HTMLDivElement | null>(null);
   const handledNavigationRequestNonceRef = useRef<number | null>(null);
+  const lastCenteredColumnIdRef = useRef<string | null>(null);
   const horizontalWheelFocusRef = useRef({ accumulatedPx: 0, resetTimer: 0 });
   const wheelNavigationNonceRef = useRef(Date.now());
   const [wheelNavigationRequest, setWheelNavigationRequest] =
@@ -2231,9 +2249,13 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
     if (!activeColumnId || !centerScrollRef.current) {
       return;
     }
+    if (lastCenteredColumnIdRef.current === activeColumnId) {
+      return;
+    }
     if (!detail.snapshot.centerColumnIds.includes(activeColumnId)) {
       return;
     }
+    lastCenteredColumnIdRef.current = activeColumnId;
 
     const scrollContainer = centerScrollRef.current;
     const columnElement = scrollContainer.querySelector<HTMLElement>(
@@ -2271,6 +2293,66 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
       window.cancelAnimationFrame(frame);
     };
   }, [detail.workspace.id, isVisible, layoutFitSignature]);
+
+  useEffect(() => {
+    const unsubscribe = desktop().onBrowserEvent((event) => {
+      if (event.type === "close" && event.payload.workspaceId === detail.workspace.id) {
+        mutateSnapshot((snapshot) => {
+          const pane = snapshot.panes[event.payload.paneId];
+          if (!pane || pane.type !== "browser") {
+            return snapshot;
+          }
+          return removePane(snapshot, pane.id);
+        });
+        return;
+      }
+
+      if (event.type !== "popup" || event.payload.workspaceId !== detail.workspace.id) {
+        return;
+      }
+
+      mutateSnapshot((snapshot) => {
+        const openerPane = snapshot.panes[event.payload.paneId];
+        if (!openerPane || openerPane.type !== "browser") {
+          return snapshot;
+        }
+
+        const openerColumnId = findPaneColumnId(snapshot, openerPane.id);
+        if (!openerColumnId) {
+          return snapshot;
+        }
+
+        const previousPaneIds = new Set(Object.keys(snapshot.panes));
+        let next = addPane(
+          snapshot,
+          "browser",
+          detail.workspace.workspacePath,
+          "new-column",
+          "shell",
+          currentViewportWidth(),
+        );
+        const popupPane = Object.values(next.panes).find((candidate) => !previousPaneIds.has(candidate.id));
+        if (!popupPane) {
+          return snapshot;
+        }
+
+        next = updatePane(next, popupPane.id, (pane) => ({
+          ...pane,
+          title: event.payload.title || "Browser",
+          payload: {
+            ...(pane.payload as BrowserPanePayload),
+            url: event.payload.url,
+            title: event.payload.title || "Browser",
+            zoomFactor: 1,
+            pendingPopupId: event.payload.popupId,
+          },
+        }));
+        return movePaneToColumn(next, popupPane.id, openerColumnId);
+      });
+    });
+
+    return unsubscribe;
+  }, [detail.workspace.id, detail.workspace.workspacePath, mutateSnapshot]);
 
   useEffect(() => {
     if (!isVisible || !navigationRequest) {
@@ -2411,6 +2493,9 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
           onCloseSession(payload.sessionId);
         }
         destroyTerminalRuntime(pane.id);
+      }
+      if (pane.type === "browser") {
+        desktop().destroyBrowserPane(pane.id);
       }
       mutateSnapshot((snapshot) => removePane(snapshot, pane.id));
     },
@@ -2808,8 +2893,10 @@ function PaneFrame(props: PaneFrameProps): React.ReactElement {
         {pane.type === "browser" && (
           <BrowserPane
             pane={pane}
+            workspace={workspace}
             isActive={isActive}
             isVisible={isVisible}
+            onFocus={onFocus}
             onUpdatePane={onUpdatePane}
           />
         )}
@@ -3492,77 +3579,670 @@ function NotePane({
 
 function BrowserPane({
   pane,
+  workspace,
+  isVisible,
+  onFocus,
   onUpdatePane,
 }: {
   pane: PaneState;
+  workspace: WorkspaceSummary;
   isActive: boolean;
   isVisible: boolean;
+  onFocus: () => void;
   onUpdatePane: (updater: (pane: PaneState) => PaneState) => void;
 }): React.ReactElement {
   const payload = pane.payload as BrowserPanePayload;
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const findInputRef = useRef<HTMLInputElement | null>(null);
+  const surfaceRef = useRef<HTMLDivElement | null>(null);
+  const initialBrowserUrlRef = useRef(payload.url);
+  const initialBrowserZoomRef = useRef(payload.zoomFactor);
+  const onFocusRef = useRef(onFocus);
+  const onUpdatePaneRef = useRef(onUpdatePane);
+  const lastBoundsRef = useRef<BrowserViewBounds | null>(null);
+  const syncFrameRef = useRef<number | null>(null);
+  const urlFocusedRef = useRef(false);
+  const [browserState, setBrowserState] = useState<BrowserViewState | null>(null);
   const [urlValue, setUrlValue] = useState(payload.url);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findValue, setFindValue] = useState("");
+  const [findResult, setFindResult] = useState<BrowserFindResult | null>(null);
+  const [download, setDownload] = useState<BrowserDownloadState | null>(null);
+  const [statusText, setStatusText] = useState<string | null>(null);
+  const zoomFactor = browserState?.zoomFactor ?? payload.zoomFactor ?? 1;
+  const zoomLabel = useMemo(() => `${Math.round(zoomFactor * 100)}%`, [zoomFactor]);
 
   useEffect(() => {
-    setUrlValue(payload.url);
+    onFocusRef.current = onFocus;
+    onUpdatePaneRef.current = onUpdatePane;
+  }, [onFocus, onUpdatePane]);
+
+  useEffect(() => {
+    if (!urlFocusedRef.current) {
+      setUrlValue(payload.url);
+    }
   }, [payload.url]);
 
-  const normalizedUrl = urlValue.match(/^https?:\/\//) ? urlValue : `https://${urlValue}`;
+  const applyBrowserState = useCallback(
+    (nextState: BrowserViewState) => {
+      setBrowserState(nextState);
+      setStatusText(nextState.errorText);
+      if (!urlFocusedRef.current) {
+        setUrlValue(nextState.url);
+      }
+      onUpdatePaneRef.current((current) => {
+        const currentPayload = current.payload as BrowserPanePayload;
+        const nextTitle = nextState.title || "Browser";
+        if (
+          current.title === nextTitle &&
+          currentPayload.url === nextState.url &&
+          currentPayload.title === nextState.title &&
+          currentPayload.zoomFactor === nextState.zoomFactor &&
+          currentPayload.pendingPopupId === null
+        ) {
+          return current;
+        }
+        return {
+          ...current,
+          title: nextTitle,
+          payload: {
+            ...currentPayload,
+            url: nextState.url,
+            title: nextState.title,
+            zoomFactor: nextState.zoomFactor,
+            pendingPopupId: null,
+          },
+        };
+      });
+    },
+    [],
+  );
+
+  const hideNativeBrowser = useCallback(() => {
+    lastBoundsRef.current = null;
+    desktop().hideBrowserPane(pane.id);
+  }, [pane.id]);
+
+  const browserSurfaceGeometry = useCallback((): BrowserViewBounds | null => {
+    const surface = surfaceRef.current;
+    if (!surface || !isVisible || document.querySelector(".modal-backdrop")) {
+      return null;
+    }
+
+    const rect = surface.getBoundingClientRect();
+    const next = {
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+    };
+    if (next.width < 40 || next.height < 40) {
+      return null;
+    }
+
+    const clips: BrowserSurfaceRect[] = [{
+      x: 0,
+      y: 0,
+      width: window.innerWidth,
+      height: window.innerHeight,
+    }];
+
+    const scrollContainer = surface.closest(".center-column-scroll");
+    if (scrollContainer) {
+      const clip = scrollContainer.getBoundingClientRect();
+      clips.push({
+        x: clip.x,
+        y: clip.y,
+        width: clip.width,
+        height: clip.height,
+      });
+    }
+
+    const visible = visibleRectIntersection(next, clips);
+    if (!visible || visible.width < 40 || visible.height < 40) {
+      return null;
+    }
+    return {
+      x: visible.x,
+      y: visible.y,
+      width: visible.width,
+      height: visible.height,
+      contentBounds: next,
+    };
+  }, [isVisible]);
+
+  const syncBrowserBounds = useCallback(() => {
+    syncFrameRef.current = null;
+    const geometry = browserSurfaceGeometry();
+    if (!geometry) {
+      hideNativeBrowser();
+      return;
+    }
+
+    const bounds = {
+      x: Math.round(geometry.x),
+      y: Math.round(geometry.y),
+      width: Math.round(geometry.width),
+      height: Math.round(geometry.height),
+      contentBounds: geometry.contentBounds
+        ? {
+            x: Math.round(geometry.contentBounds.x),
+            y: Math.round(geometry.contentBounds.y),
+            width: Math.round(geometry.contentBounds.width),
+            height: Math.round(geometry.contentBounds.height),
+          }
+        : undefined,
+    };
+    const previous = lastBoundsRef.current;
+    if (
+      previous &&
+      previous.x === bounds.x &&
+      previous.y === bounds.y &&
+      previous.width === bounds.width &&
+      previous.height === bounds.height &&
+      previous.contentBounds?.x === bounds.contentBounds?.x &&
+      previous.contentBounds?.y === bounds.contentBounds?.y &&
+      previous.contentBounds?.width === bounds.contentBounds?.width &&
+      previous.contentBounds?.height === bounds.contentBounds?.height
+    ) {
+      return;
+    }
+    lastBoundsRef.current = bounds;
+    desktop().setBrowserBounds(pane.id, bounds);
+  }, [browserSurfaceGeometry, hideNativeBrowser, pane.id]);
+
+  const scheduleBoundsSync = useCallback(() => {
+    if (syncFrameRef.current !== null) {
+      return;
+    }
+    syncFrameRef.current = window.requestAnimationFrame(syncBrowserBounds);
+  }, [syncBrowserBounds]);
+
+  useEffect(() => {
+    let disposed = false;
+    void desktop()
+      .ensureBrowserPane(
+        workspace.id,
+        pane.id,
+        initialBrowserUrlRef.current,
+        initialBrowserZoomRef.current,
+        payload.pendingPopupId,
+      )
+      .then((state) => {
+        if (!disposed) {
+          applyBrowserState(state);
+          scheduleBoundsSync();
+        }
+      })
+      .catch((error) => {
+        if (!disposed) {
+          setStatusText(error instanceof Error ? error.message : String(error));
+        }
+      });
+
+    return () => {
+      disposed = true;
+      hideNativeBrowser();
+    };
+  }, [
+    applyBrowserState,
+    hideNativeBrowser,
+    pane.id,
+    scheduleBoundsSync,
+    workspace.id,
+  ]);
+
+  useEffect(() => {
+    const unsubscribe = desktop().onBrowserEvent((event: BrowserEventEnvelope) => {
+      if (
+        "payload" in event &&
+        event.payload &&
+        "paneId" in event.payload &&
+        event.payload.paneId !== pane.id
+      ) {
+        return;
+      }
+
+      if (event.type === "state" && event.payload.workspaceId === workspace.id) {
+        applyBrowserState(event.payload);
+        return;
+      }
+
+      if (event.type === "focus" && event.payload.workspaceId === workspace.id) {
+        onFocusRef.current();
+        return;
+      }
+
+      if (event.type === "shortcut" && event.payload.workspaceId === workspace.id) {
+        if (event.payload.action === "focus-location") {
+          inputRef.current?.focus();
+          inputRef.current?.select();
+          return;
+        }
+        if (event.payload.action === "focus-find") {
+          setFindOpen(true);
+          window.requestAnimationFrame(() => {
+            findInputRef.current?.focus();
+            findInputRef.current?.select();
+          });
+          return;
+        }
+        if (event.payload.action === "zoom-in") {
+          void setZoom(clampBrowserZoom(zoomFactor + 0.1));
+          return;
+        }
+        if (event.payload.action === "zoom-out") {
+          void setZoom(clampBrowserZoom(zoomFactor - 0.1));
+          return;
+        }
+        if (event.payload.action === "zoom-reset") {
+          void setZoom(1);
+        }
+        return;
+      }
+
+      if (event.type === "find-result" && event.payload.workspaceId === workspace.id) {
+        setFindResult(event.payload.result);
+        return;
+      }
+
+      if (
+        event.type === "download" &&
+        event.payload.workspaceId === workspace.id &&
+        event.payload.download.paneId === pane.id
+      ) {
+        setDownload(event.payload.download);
+        window.setTimeout(() => {
+          setDownload((current) => (current?.id === event.payload.download.id ? null : current));
+        }, 4_000);
+      }
+    });
+    return unsubscribe;
+  }, [applyBrowserState, pane.id, workspace.id, zoomFactor]);
+
+  const setZoom = useCallback(
+    async (nextZoom: number) => {
+      const state = await desktop().setBrowserZoom(pane.id, clampBrowserZoom(nextZoom));
+      applyBrowserState(state);
+    },
+    [applyBrowserState, pane.id],
+  );
+
+  useEffect(() => {
+    paneFocusRegistry.set(pane.id, () => {
+      void desktop().focusBrowserPane(pane.id);
+      return true;
+    });
+    return () => {
+      if (paneFocusRegistry.has(pane.id)) {
+        paneFocusRegistry.delete(pane.id);
+      }
+    };
+  }, [pane.id]);
+
+  useEffect(() => {
+    if (!isVisible) {
+      hideNativeBrowser();
+      return;
+    }
+
+    const surface = surfaceRef.current;
+    const observer =
+      surface && typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(scheduleBoundsSync)
+        : null;
+    observer?.observe(surface!);
+
+    const scrollContainer = surface?.closest(".center-column-scroll");
+    window.addEventListener("resize", scheduleBoundsSync);
+    window.addEventListener("scroll", scheduleBoundsSync, true);
+    scrollContainer?.addEventListener("scroll", scheduleBoundsSync);
+    scheduleBoundsSync();
+
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", scheduleBoundsSync);
+      window.removeEventListener("scroll", scheduleBoundsSync, true);
+      scrollContainer?.removeEventListener("scroll", scheduleBoundsSync);
+      if (syncFrameRef.current !== null) {
+        window.cancelAnimationFrame(syncFrameRef.current);
+        syncFrameRef.current = null;
+      }
+      hideNativeBrowser();
+    };
+  }, [hideNativeBrowser, isVisible, scheduleBoundsSync]);
+
+  useLayoutEffect(() => {
+    if (isVisible) {
+      scheduleBoundsSync();
+    }
+  });
+
+  useEffect(() => {
+    if (!findOpen) {
+      setFindResult(null);
+      void desktop().stopFindInBrowserPane(pane.id, "clearSelection");
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      findInputRef.current?.focus();
+      findInputRef.current?.select();
+    });
+  }, [findOpen, pane.id]);
+
+  useEffect(() => {
+    if (!findOpen) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void desktop().findInBrowserPane(pane.id, findValue, { forward: true, findNext: false });
+    }, 120);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [findOpen, findValue, pane.id]);
+
+  const navigateToInput = async (): Promise<void> => {
+    const target = normalizeBrowserNavigationInput(urlValue);
+    if (target.kind === "external") {
+      await desktop().openExternal(target.url);
+      return;
+    }
+    const state = await desktop().navigateBrowserPane(pane.id, target.url);
+    applyBrowserState(state);
+  };
+
   const openExternalBrowser = async (): Promise<void> => {
-    await desktop().openExternal(normalizedUrl);
-    onUpdatePane((current) => ({
-      ...current,
-      payload: {
-        ...(current.payload as BrowserPanePayload),
-        url: normalizedUrl,
-      },
-    }));
+    const url = browserState?.url || payload.url;
+    const target = normalizeBrowserNavigationInput(url);
+    await desktop().openExternal(target.url);
+  };
+
+  const navigateRelativeFind = (forward: boolean): void => {
+    if (!findValue.trim()) {
+      return;
+    }
+    void desktop().findInBrowserPane(pane.id, findValue, { forward, findNext: true });
   };
 
   return (
-    <div className="browser-pane">
+    <div
+      className="browser-pane"
+      onKeyDownCapture={(event) => {
+        const ctrlOrMeta = event.ctrlKey || event.metaKey;
+        if (!ctrlOrMeta || event.altKey) {
+          return;
+        }
+        const key = event.key.toLowerCase();
+        if (key === "l") {
+          event.preventDefault();
+          inputRef.current?.focus();
+          inputRef.current?.select();
+          return;
+        }
+        if (key === "f") {
+          event.preventDefault();
+          setFindOpen(true);
+          window.requestAnimationFrame(() => {
+            findInputRef.current?.focus();
+            findInputRef.current?.select();
+          });
+          return;
+        }
+        if (key === "r") {
+          event.preventDefault();
+          void desktop().reloadBrowserPane(pane.id).then(applyBrowserState);
+          return;
+        }
+        if (key === "+" || key === "=") {
+          event.preventDefault();
+          void setZoom(zoomFactor + 0.1);
+          return;
+        }
+        if (key === "-") {
+          event.preventDefault();
+          void setZoom(zoomFactor - 0.1);
+          return;
+        }
+        if (key === "0") {
+          event.preventDefault();
+          void setZoom(1);
+        }
+      }}
+    >
       <div className="browser-toolbar browser-toolbar-compact">
-        <button
-          className="browser-nav-button"
-          title="Open in browser"
-          aria-label="Open in browser"
+        <BrowserIconButton
+          icon="back"
+          label="Back"
+          disabled={!browserState?.canGoBack}
           onClick={() => {
-            void openExternalBrowser();
+            void desktop().goBackBrowserPane(pane.id).then(applyBrowserState);
           }}
-        >
-          ↗
-        </button>
+        />
+        <BrowserIconButton
+          icon="forward"
+          label="Forward"
+          disabled={!browserState?.canGoForward}
+          onClick={() => {
+            void desktop().goForwardBrowserPane(pane.id).then(applyBrowserState);
+          }}
+        />
+        <BrowserIconButton
+          icon={browserState?.loading ? "stop" : "reload"}
+          label={browserState?.loading ? "Stop" : "Reload"}
+          onClick={() => {
+            void (browserState?.loading
+              ? desktop().stopBrowserPane(pane.id)
+              : desktop().reloadBrowserPane(pane.id)
+            ).then(applyBrowserState);
+          }}
+        />
         <form
           className="browser-form browser-omnibox"
           onSubmit={(event) => {
             event.preventDefault();
-            void openExternalBrowser();
+            void navigateToInput().catch((error) => {
+              setStatusText(error instanceof Error ? error.message : String(error));
+            });
           }}
         >
-          <span className="browser-omnibox-prefix" aria-hidden="true">
-            //
+          <span className={`browser-omnibox-status ${browserState?.loading ? "loading" : ""}`} aria-hidden="true">
+            <BrowserIcon icon={browserState?.errorText ? "warning" : "globe"} />
           </span>
           <input
             ref={inputRef}
             className="browser-omnibox-input"
             value={urlValue}
-            placeholder="Enter URL"
-            onFocus={(event) => event.currentTarget.select()}
+            placeholder="Search or enter address"
+            onFocus={(event) => {
+              urlFocusedRef.current = true;
+              event.currentTarget.select();
+            }}
+            onBlur={() => {
+              urlFocusedRef.current = false;
+            }}
             onChange={(event) => setUrlValue(event.target.value)}
           />
         </form>
-      </div>
-      <div className="empty-stage compact">
-        <p>{normalizedUrl}</p>
-        <button
+        <div className="browser-zoom-controls" aria-label="Zoom controls">
+          <BrowserIconButton
+            icon="minus"
+            label="Zoom out"
+            onClick={() => {
+              void setZoom(zoomFactor - 0.1);
+            }}
+          />
+          <button
+            className="browser-zoom-value"
+            title="Reset zoom"
+            onClick={() => {
+              void setZoom(1);
+            }}
+          >
+            {zoomLabel}
+          </button>
+          <BrowserIconButton
+            icon="plus"
+            label="Zoom in"
+            onClick={() => {
+              void setZoom(zoomFactor + 0.1);
+            }}
+          />
+        </div>
+        <BrowserIconButton
+          icon="find"
+          label="Find"
+          active={findOpen}
+          onClick={() => setFindOpen((current) => !current)}
+        />
+        <BrowserIconButton
+          icon="external"
+          label="Open externally"
           onClick={() => {
             void openExternalBrowser();
           }}
+        />
+        <BrowserIconButton
+          icon="devtools"
+          label="Open DevTools"
+          onClick={() => {
+            void desktop().openBrowserDevTools(pane.id);
+          }}
+        />
+      </div>
+      {findOpen && (
+        <form
+          className="browser-findbar"
+          onSubmit={(event) => {
+            event.preventDefault();
+            navigateRelativeFind(true);
+          }}
         >
-          Open in browser
-        </button>
+          <BrowserIcon icon="find" />
+          <input
+            ref={findInputRef}
+            value={findValue}
+            placeholder="Find in page"
+            onChange={(event) => setFindValue(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setFindOpen(false);
+              }
+            }}
+          />
+          <span className="browser-find-count">
+            {findResult?.matches
+              ? `${findResult.activeMatchOrdinal}/${findResult.matches}`
+              : findValue
+                ? "0/0"
+                : ""}
+          </span>
+          <BrowserIconButton icon="up" label="Previous match" onClick={() => navigateRelativeFind(false)} />
+          <BrowserIconButton icon="down" label="Next match" onClick={() => navigateRelativeFind(true)} />
+          <BrowserIconButton icon="close" label="Close find" onClick={() => setFindOpen(false)} />
+        </form>
+      )}
+      {(statusText || download) && (
+        <div className="browser-status-strip">
+          {statusText && <span className="browser-status-chip error">{statusText}</span>}
+          {download && (
+            <span className={`browser-status-chip ${download.state}`}>
+              {download.state === "completed"
+                ? `Downloaded ${download.fileName}`
+                : download.state === "cancelled"
+                  ? `Cancelled ${download.fileName}`
+                  : `Downloading ${download.fileName}`}
+            </span>
+          )}
+        </div>
+      )}
+      <div
+        ref={surfaceRef}
+        className="browser-surface"
+        onMouseDown={onFocus}
+        aria-label="Browser content"
+      >
+        {!browserState && <div className="browser-surface-loading">Loading browser...</div>}
       </div>
     </div>
+  );
+}
+
+type BrowserIconName =
+  | "back"
+  | "forward"
+  | "reload"
+  | "stop"
+  | "globe"
+  | "warning"
+  | "find"
+  | "external"
+  | "devtools"
+  | "plus"
+  | "minus"
+  | "up"
+  | "down"
+  | "close";
+
+function BrowserIconButton({
+  icon,
+  label,
+  active = false,
+  disabled = false,
+  onClick,
+}: {
+  icon: BrowserIconName;
+  label: string;
+  active?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}): React.ReactElement {
+  return (
+    <button
+      type="button"
+      className={`browser-icon-button ${active ? "active" : ""}`}
+      title={label}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <BrowserIcon icon={icon} />
+    </button>
+  );
+}
+
+function BrowserIcon({ icon }: { icon: BrowserIconName }): React.ReactElement {
+  const paths: Record<BrowserIconName, React.ReactNode> = {
+    back: <path d="M15 5 8 12l7 7M9 12h12" />,
+    forward: <path d="m9 5 7 7-7 7M15 12H3" />,
+    reload: <path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v6h-6" />,
+    stop: <path d="M7 7h10v10H7z" />,
+    globe: <><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3c2.4 2.6 3.6 5.6 3.6 9s-1.2 6.4-3.6 9c-2.4-2.6-3.6-5.6-3.6-9S9.6 5.6 12 3z" /></>,
+    warning: <><path d="m12 4 9 16H3z" /><path d="M12 9v5M12 17h.01" /></>,
+    find: <><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></>,
+    external: <><path d="M14 4h6v6M20 4l-9 9" /><path d="M20 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h5" /></>,
+    devtools: <><path d="m8 9-4 3 4 3M16 9l4 3-4 3M13 5l-2 14" /></>,
+    plus: <path d="M12 5v14M5 12h14" />,
+    minus: <path d="M5 12h14" />,
+    up: <path d="m7 14 5-5 5 5" />,
+    down: <path d="m7 10 5 5 5-5" />,
+    close: <path d="M6 6l12 12M18 6 6 18" />,
+  };
+
+  return (
+    <svg
+      className="browser-icon"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {paths[icon]}
+    </svg>
   );
 }
 

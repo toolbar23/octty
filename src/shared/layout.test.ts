@@ -53,6 +53,37 @@ describe("layout helpers", () => {
     expect(defaultColumnWidthForPane("note", 1500)).toBe(225);
   });
 
+  test("sanitizes browser panes with a default zoom factor", () => {
+    const snapshot = addPane(createDefaultSnapshot("ws-1", "/tmp/demo"), "browser", "/tmp/demo");
+    const browserPane = Object.values(snapshot.panes).find((pane) => pane.type === "browser")!;
+    const dirty = {
+      ...snapshot,
+      panes: {
+        ...snapshot.panes,
+        [browserPane.id]: {
+          ...browserPane,
+          payload: {
+            url: "",
+            title: "",
+          },
+        },
+      },
+    };
+
+    const sanitized = sanitizeSnapshot(dirty as never, "/tmp/demo");
+    const payload = sanitized.panes[browserPane.id]!.payload as {
+      url: string;
+      title: string;
+      zoomFactor: number;
+      pendingPopupId: string | null;
+    };
+
+    expect(payload.url).toBe("https://jj-vcs.github.io/jj/latest/");
+    expect(payload.title).toBe("Docs");
+    expect(payload.zoomFactor).toBe(1);
+    expect(payload.pendingPopupId).toBeNull();
+  });
+
   test("stacks a pane into another column and keeps target width", () => {
     const initial = createDefaultSnapshot("ws-1", "/tmp/demo");
     const next = addPane(initial, "note", "/tmp/demo");

@@ -1,5 +1,9 @@
 import type {
   BootstrapPayload,
+  BrowserEventEnvelope,
+  BrowserFindResult,
+  BrowserViewBounds,
+  BrowserViewState,
   CreateWorkspacePayload,
   NoteRecord,
   ProjectRootRecord,
@@ -13,6 +17,7 @@ import type {
 import type { TerminalClipboardPaste } from "./terminal-clipboard";
 
 export const OCTTY_EVENT_CHANNEL = "octty:event";
+export const OCTTY_BROWSER_EVENT_CHANNEL = "octty:browser-event";
 
 export interface OcttyDesktopBridge {
   readonly platform: NodeJS.Platform;
@@ -39,5 +44,33 @@ export interface OcttyDesktopBridge {
   closeTerminal(sessionId: string): void;
   readTerminalClipboardPaste(): Promise<TerminalClipboardPaste>;
   openExternal(url: string): Promise<void>;
+  ensureBrowserPane(
+    workspaceId: string,
+    paneId: string,
+    url: string,
+    zoomFactor?: number,
+    pendingPopupId?: string | null,
+  ): Promise<BrowserViewState>;
+  setBrowserBounds(paneId: string, bounds: BrowserViewBounds): void;
+  hideBrowserPane(paneId: string): void;
+  destroyBrowserPane(paneId: string): void;
+  focusBrowserPane(paneId: string): Promise<void>;
+  navigateBrowserPane(paneId: string, url: string): Promise<BrowserViewState>;
+  goBackBrowserPane(paneId: string): Promise<BrowserViewState>;
+  goForwardBrowserPane(paneId: string): Promise<BrowserViewState>;
+  reloadBrowserPane(paneId: string): Promise<BrowserViewState>;
+  stopBrowserPane(paneId: string): Promise<BrowserViewState>;
+  setBrowserZoom(paneId: string, zoomFactor: number): Promise<BrowserViewState>;
+  findInBrowserPane(
+    paneId: string,
+    text: string,
+    options?: { forward?: boolean; findNext?: boolean },
+  ): Promise<BrowserFindResult | null>;
+  stopFindInBrowserPane(
+    paneId: string,
+    action?: "clearSelection" | "keepSelection" | "activateSelection",
+  ): Promise<void>;
+  openBrowserDevTools(paneId: string): Promise<void>;
+  onBrowserEvent(listener: (event: BrowserEventEnvelope) => void): () => void;
   onWorkspaceEvent(listener: (event: WorkspaceEventEnvelope) => void): () => void;
 }
