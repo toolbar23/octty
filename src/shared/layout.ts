@@ -462,28 +462,16 @@ export function updatePane(
 
 export function createDefaultSnapshot(
   workspaceId: string,
-  workspacePath: string,
-  viewportWidth = DEFAULT_LAYOUT_VIEWPORT_WIDTH_PX,
+  _workspacePath: string,
+  _viewportWidth = DEFAULT_LAYOUT_VIEWPORT_WIDTH_PX,
 ): WorkspaceSnapshot {
-  const shellPane = createPaneState("shell", workspacePath);
-  const diffPane = createPaneState("diff", workspacePath);
-  const shellColumn = createColumnForPane(shellPane, null, viewportWidth);
-  const diffColumn = createColumnForPane(diffPane, null, viewportWidth);
-  diffColumn.widthPx = defaultColumnWidthForPane(diffPane, viewportWidth);
-
   return {
     layoutVersion: SNAPSHOT_LAYOUT_VERSION,
     workspaceId,
-    activePaneId: shellPane.id,
-    panes: {
-      [shellPane.id]: shellPane,
-      [diffPane.id]: diffPane,
-    },
-    columns: {
-      [shellColumn.id]: shellColumn,
-      [diffColumn.id]: diffColumn,
-    },
-    centerColumnIds: [shellColumn.id, diffColumn.id],
+    activePaneId: null,
+    panes: {},
+    columns: {},
+    centerColumnIds: [],
     pinnedLeftColumnId: null,
     pinnedRightColumnId: null,
     updatedAt: Date.now(),

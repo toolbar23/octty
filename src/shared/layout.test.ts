@@ -12,23 +12,29 @@ import {
   removePane,
   resizePaneColumn,
   sanitizeSnapshot,
+  setActivePane,
 } from "./layout";
 
-describe("layout helpers", () => {
-  test("creates a default shell and diff column layout", () => {
-    const snapshot = createDefaultSnapshot("ws-1", "/tmp/demo", 1500);
-    const paneTypes = Object.values(snapshot.panes).map((pane) => pane.type).sort();
-    const shellPane = Object.values(snapshot.panes).find((pane) => pane.type === "shell")!;
-    const diffPane = Object.values(snapshot.panes).find((pane) => pane.type === "diff")!;
-    const shellColumn = snapshot.columns[findPaneColumnId(snapshot, shellPane.id)!]!;
-    const diffColumn = snapshot.columns[findPaneColumnId(snapshot, diffPane.id)!]!;
+function createSnapshotWithPanes(
+  paneTypes: Array<Parameters<typeof addPane>[1]>,
+  viewportWidth = 1800,
+) {
+  return paneTypes.reduce(
+    (snapshot, paneType) =>
+      addPane(snapshot, paneType, "/tmp/demo", "new-column", "shell", viewportWidth),
+    createDefaultSnapshot("ws-1", "/tmp/demo", viewportWidth),
+  );
+}
 
-    expect(paneTypes).toEqual(["diff", "shell"]);
-    expect(snapshot.centerColumnIds).toHaveLength(2);
-    expect(snapshot.activePaneId).not.toBeNull();
+describe("layout helpers", () => {
+  test("creates an empty default layout", () => {
+    const snapshot = createDefaultSnapshot("ws-1", "/tmp/demo", 1500);
+
     expect(snapshot.layoutVersion).toBe(2);
-    expect(shellColumn.widthPx).toBe(defaultColumnWidthForPane("shell", 1500));
-    expect(diffColumn.widthPx).toBe(defaultColumnWidthForPane("diff", 1500));
+    expect(snapshot.activePaneId).toBeNull();
+    expect(snapshot.panes).toEqual({});
+    expect(snapshot.columns).toEqual({});
+    expect(snapshot.centerColumnIds).toEqual([]);
   });
 
   test("adds panes as new columns with pane-type default widths", () => {
@@ -85,7 +91,7 @@ describe("layout helpers", () => {
   });
 
   test("stacks a pane into another column and keeps target width", () => {
-    const initial = createDefaultSnapshot("ws-1", "/tmp/demo");
+    const initial = createSnapshotWithPanes(["shell"]);
     const next = addPane(initial, "note", "/tmp/demo");
     const shellPane = Object.values(next.panes).find((pane) => pane.type === "shell")!;
     const notePane = Object.values(next.panes).find((pane) => pane.type === "note")!;
@@ -99,7 +105,7 @@ describe("layout helpers", () => {
   });
 
   test("moves a stacked pane into a new column with the pane default width", () => {
-    const initial = createDefaultSnapshot("ws-1", "/tmp/demo");
+    const initial = createSnapshotWithPanes(["shell"]);
     const next = addPane(initial, "note", "/tmp/demo");
     const shellPane = Object.values(next.panes).find((pane) => pane.type === "shell")!;
     const notePane = Object.values(next.panes).find((pane) => pane.type === "note")!;
@@ -114,7 +120,7 @@ describe("layout helpers", () => {
   });
 
   test("resizes a pane column by delta and clamps the result", () => {
-    const initial = createDefaultSnapshot("ws-1", "/tmp/demo", 1500);
+    const initial = createSnapshotWithPanes(["shell"], 1500);
     const shellPane = Object.values(initial.panes).find((pane) => pane.type === "shell")!;
     const shellColumnId = findPaneColumnId(initial, shellPane.id)!;
     const shellWidth = initial.columns[shellColumnId]!.widthPx;
@@ -127,22 +133,26 @@ describe("layout helpers", () => {
   });
 
   test("moves a single-pane column left by one slot", () => {
-    const initial = createDefaultSnapshot("ws-1", "/tmp/demo");
+    const initial = createSnapshotWithPanes(["shell", "diff"]);
     const withNote = addPane(initial, "note", "/tmp/demo");
     const notePane = Object.values(withNote.panes).find((pane) => pane.type === "note")!;
     const noteColumnId = findPaneColumnId(withNote, notePane.id)!;
+    const shellColumnId = findPaneColumnId(
+      withNote,
+      Object.values(withNote.panes).find((pane) => pane.type === "shell")!.id,
+    )!;
+    const diffColumnId = findPaneColumnId(
+      withNote,
+      Object.values(withNote.panes).find((pane) => pane.type === "diff")!.id,
+    )!;
 
     const moved = movePaneHorizontally(withNote, notePane.id, -1);
 
-    expect(moved.centerColumnIds).toEqual([
-      withNote.centerColumnIds[0]!,
-      noteColumnId,
-      withNote.centerColumnIds[1]!,
-    ]);
+    expect(moved.centerColumnIds).toEqual([shellColumnId, noteColumnId, diffColumnId]);
   });
 
   test("splits a stacked pane into a new column when moved horizontally", () => {
-    const initial = createDefaultSnapshot("ws-1", "/tmp/demo", 1600);
+    const initial = createSnapshotWithPanes(["shell", "diff"], 1600);
     const withNote = addPane(initial, "note", "/tmp/demo", "new-column", "shell", 1600);
     const shellPane = Object.values(withNote.panes).find((pane) => pane.type === "shell")!;
     const notePane = Object.values(withNote.panes).find((pane) => pane.type === "note")!;
@@ -158,7 +168,7 @@ describe("layout helpers", () => {
   });
 
   test("pins and reorders columns", () => {
-    const initial = createDefaultSnapshot("ws-1", "/tmp/demo");
+    const initial = createSnapshotWithPanes(["shell"]);
     const next = addPane(initial, "note", "/tmp/demo");
     const notePane = Object.values(next.panes).find((pane) => pane.type === "note")!;
     const noteColumnId = findPaneColumnId(next, notePane.id)!;
@@ -176,19 +186,20 @@ describe("layout helpers", () => {
   });
 
   test("closing an active pane focuses the next pane when one exists after it", () => {
-    const initial = createDefaultSnapshot("ws-1", "/tmp/demo");
+    const initial = createSnapshotWithPanes(["shell", "diff"]);
     const shellPane = Object.values(initial.panes).find((pane) => pane.type === "shell")!;
+    const withActiveShell = setActivePane(initial, shellPane.id);
     const orderedPaneIds = initial.centerColumnIds.flatMap(
       (columnId) => initial.columns[columnId]?.paneIds ?? [],
     );
 
-    const closed = removePane(initial, shellPane.id);
+    const closed = removePane(withActiveShell, shellPane.id);
 
     expect(closed.activePaneId).toBe(orderedPaneIds[orderedPaneIds.indexOf(shellPane.id) + 1]!);
   });
 
   test("closing the last active pane focuses the previous pane", () => {
-    const initial = createDefaultSnapshot("ws-1", "/tmp/demo");
+    const initial = createSnapshotWithPanes(["shell"]);
     const withNote = addPane(initial, "note", "/tmp/demo");
     const notePane = Object.values(withNote.panes).find((pane) => pane.type === "note")!;
     const orderedPaneIds = withNote.centerColumnIds.flatMap(

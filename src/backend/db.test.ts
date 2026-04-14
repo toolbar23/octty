@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AppDatabase } from "./db";
-import { createDefaultSnapshot } from "../shared/layout";
+import { addPane, createDefaultSnapshot } from "../shared/layout";
 import type { WorkspaceSummary } from "../shared/types";
 
 function makeWorkspaceSummary(): WorkspaceSummary {
@@ -95,10 +95,10 @@ describe("AppDatabase session state", () => {
   });
 
   test("preserves stable terminal session ids when saving a snapshot without a live attachment id", () => {
-    const snapshot = createDefaultSnapshot("workspace-1", "/tmp/repo");
+    const snapshot = addPane(createDefaultSnapshot("workspace-1", "/tmp/repo"), "shell", "/tmp/repo");
     const shellPane = Object.values(snapshot.panes).find((pane) => pane.type === "shell");
     if (!shellPane) {
-      throw new Error("Expected default shell pane");
+      throw new Error("Expected shell pane");
     }
 
     db.saveSessionState({
@@ -137,10 +137,10 @@ describe("AppDatabase session state", () => {
   });
 
   test("does not carry an old transcript into a newly started session snapshot", () => {
-    const snapshot = createDefaultSnapshot("workspace-1", "/tmp/repo");
+    const snapshot = addPane(createDefaultSnapshot("workspace-1", "/tmp/repo"), "shell", "/tmp/repo");
     const shellPane = Object.values(snapshot.panes).find((pane) => pane.type === "shell");
     if (!shellPane) {
-      throw new Error("Expected default shell pane");
+      throw new Error("Expected shell pane");
     }
 
     db.saveSessionState({
