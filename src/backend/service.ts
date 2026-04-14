@@ -223,7 +223,7 @@ export class WorkspaceService {
   private readonly sessionPersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly embeddedSessionDetectTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly attentionTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private readonly agentPendingSessions = new Set<string>();
+  private readonly agentAttentionScreens = new Map<string, string>();
   private readonly focusedAttentionSessions = new Set<string>();
 
   private logTerminal(
@@ -251,10 +251,7 @@ export class WorkspaceService {
         }));
         this.ptySidecar.appendOutput(sessionId, data);
         const session = this.ptySidecar.getSession(sessionId);
-        if (session && isAgentTerminalKind(session.kind) && this.agentPendingSessions.has(sessionId)) {
-          if (session.agentAttentionState !== "thinking") {
-            this.setAgentAttentionState(session, "thinking");
-          }
+        if (session && isAgentTerminalKind(session.kind) && session.state === "live") {
           this.scheduleAgentAttentionSettle(sessionId);
         } else if (
           session &&
@@ -287,7 +284,6 @@ export class WorkspaceService {
           this.sessionPersistTimers.delete(message.sessionId);
         }
         this.cancelAttentionSettle(message.sessionId);
-        this.agentPendingSessions.delete(message.sessionId);
         this.focusedAttentionSessions.delete(message.sessionId);
         const session = this.ptySidecar.getSession(message.sessionId);
         if (session) {
@@ -344,7 +340,7 @@ export class WorkspaceService {
     this.watchers.clear();
     this.embeddedSessionDetectTimers.clear();
     this.attentionTimers.clear();
-    this.agentPendingSessions.clear();
+    this.agentAttentionScreens.clear();
     this.focusedAttentionSessions.clear();
     this.ptySidecar.dispose();
     this.db.close();
@@ -580,25 +576,40 @@ export class WorkspaceService {
   }
 
   private scheduleAgentAttentionSettle(sessionId: string): void {
-    this.cancelAttentionSettle(sessionId);
+    if (this.attentionTimers.has(sessionId)) {
+      return;
+    }
+    if (!this.agentAttentionScreens.has(sessionId)) {
+      this.agentAttentionScreens.set(sessionId, this.ptySidecar.captureScreen(sessionId));
+    }
     const timer = setTimeout(() => {
+      this.attentionTimers.delete(sessionId);
       const session = this.ptySidecar.getSession(sessionId);
       if (!session || session.state !== "live" || !isAgentTerminalKind(session.kind)) {
-        this.cancelAttentionSettle(sessionId);
+        this.agentAttentionScreens.delete(sessionId);
         return;
       }
 
-      if (!this.agentPendingSessions.has(sessionId)) {
-        this.cancelAttentionSettle(sessionId);
+      const previousScreen = this.agentAttentionScreens.get(sessionId) ?? "";
+      const currentScreen = this.ptySidecar.captureScreen(sessionId);
+      this.agentAttentionScreens.set(sessionId, currentScreen);
+
+      // Codex can repaint an unchanged waiting prompt continuously, so settle on
+      // stable captured screen content rather than raw PTY byte silence.
+      if (currentScreen === previousScreen) {
+        if (session.agentAttentionState === "thinking") {
+          this.setAgentAttentionState(
+            session,
+            settledAgentAttentionState(this.focusedAttentionSessions.has(sessionId)),
+          );
+        }
         return;
       }
 
-      this.agentPendingSessions.delete(sessionId);
-      this.setAgentAttentionState(
-        session,
-        settledAgentAttentionState(this.focusedAttentionSessions.has(sessionId)),
-      );
-      this.cancelAttentionSettle(sessionId);
+      if (session.agentAttentionState !== "thinking") {
+        this.setAgentAttentionState(session, "thinking");
+      }
+      this.scheduleAgentAttentionSettle(sessionId);
     }, 1_200);
     this.attentionTimers.set(sessionId, timer);
   }
@@ -635,6 +646,7 @@ export class WorkspaceService {
       clearTimeout(timer);
       this.attentionTimers.delete(sessionId);
     }
+    this.agentAttentionScreens.delete(sessionId);
   }
 
   private scheduleEmbeddedSessionDetection(
@@ -884,7 +896,6 @@ export class WorkspaceService {
 
     for (const sessionId of runtime.sessionIds) {
       this.cancelAttentionSettle(sessionId);
-      this.agentPendingSessions.delete(sessionId);
       this.focusedAttentionSessions.delete(sessionId);
       this.cancelEmbeddedSessionDetection(sessionId);
       this.ptySidecar.kill(sessionId);
@@ -1208,7 +1219,6 @@ export class WorkspaceService {
       this.updateActiveAgentCounts(workspace.id);
       this.scheduleEmbeddedSessionDetection(reusedSession, launchedAt);
       if (reusedSession.agentAttentionState === "thinking" && isAgentTerminalKind(reusedSession.kind)) {
-        this.agentPendingSessions.add(reusedSession.id);
         this.scheduleAgentAttentionSettle(reusedSession.id);
       } else if (reusedSession.agentAttentionState === "thinking" && reusedSession.kind === "shell") {
         this.scheduleShellAttentionSettle(reusedSession.id);
@@ -1271,7 +1281,6 @@ export class WorkspaceService {
     this.updateActiveAgentCounts(workspace.id);
     this.scheduleEmbeddedSessionDetection(session, launchedAt);
     if (session.agentAttentionState === "thinking" && isAgentTerminalKind(session.kind)) {
-      this.agentPendingSessions.add(session.id);
       this.scheduleAgentAttentionSettle(session.id);
     } else if (session.agentAttentionState === "thinking" && session.kind === "shell") {
       this.scheduleShellAttentionSettle(session.id);
@@ -1302,7 +1311,6 @@ export class WorkspaceService {
       isAgentTerminalKind(session.kind) &&
       /[\r\n]/.test(data)
     ) {
-      this.agentPendingSessions.add(sessionId);
       this.setAgentAttentionState(session, "thinking");
       this.scheduleAgentAttentionSettle(sessionId);
     }
@@ -1326,6 +1334,8 @@ export class WorkspaceService {
         }
       } else if (session.agentAttentionState === "idle-unseen") {
         this.setAgentAttentionState(session, "idle-seen");
+      } else if (session.agentAttentionState === "thinking") {
+        this.scheduleAgentAttentionSettle(sessionId);
       }
       return;
     }
@@ -1355,7 +1365,6 @@ export class WorkspaceService {
       runtime.sessionIds.delete(sessionId);
     }
     this.cancelAttentionSettle(sessionId);
-    this.agentPendingSessions.delete(sessionId);
     this.focusedAttentionSessions.delete(sessionId);
     this.cancelEmbeddedSessionDetection(sessionId);
     this.ptySidecar.detach(sessionId);
@@ -1369,7 +1378,6 @@ export class WorkspaceService {
       runtime.sessionIds.delete(sessionId);
     }
     this.cancelAttentionSettle(sessionId);
-    this.agentPendingSessions.delete(sessionId);
     this.focusedAttentionSessions.delete(sessionId);
     this.cancelEmbeddedSessionDetection(sessionId);
     this.ptySidecar.kill(sessionId);

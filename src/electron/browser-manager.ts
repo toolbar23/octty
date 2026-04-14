@@ -474,6 +474,7 @@ export class BrowserPaneManager {
       }
       const appShortcut = appShortcutActionForKeyEvent({
         key: input.key,
+        code: input.code,
         ctrlKey: input.control,
         shiftKey: input.shift,
         altKey: input.alt,

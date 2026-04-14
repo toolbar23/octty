@@ -10,7 +10,13 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertRuntimeDependencies } from "../backend/requirements";
-import type { AppShortcutAction } from "../shared/app-shortcuts";
+import {
+  workspaceShortcutAccelerator,
+  workspaceShortcutActionForIndex,
+  workspaceShortcutTargets,
+  type AppShortcutAction,
+} from "../shared/app-shortcuts";
+import type { WorkspaceSummary } from "../shared/types";
 import { OCTTY_EVENT_CHANNEL } from "../shared/desktop-bridge";
 import { OcttyBackend } from "./backend";
 import { BrowserPaneManager } from "./browser-manager";
@@ -83,6 +89,43 @@ function openExternalUrl(url: string): void {
   void shell.openExternal(url);
 }
 
+function workspaceMenuLabel(workspace: WorkspaceSummary): string {
+  if (workspace.projectDisplayName) {
+    return `${workspace.displayName} (${workspace.projectDisplayName})`;
+  }
+  return workspace.displayName;
+}
+
+function buildWorkspaceMenuItems(): MenuItemConstructorOptions[] {
+  let targets: ReturnType<typeof workspaceShortcutTargets> = [];
+  try {
+    const payload = getBackend().getBootstrap();
+    targets = workspaceShortcutTargets(payload.projectRoots, payload.workspaces);
+  } catch {
+    targets = [];
+  }
+
+  if (targets.length === 0) {
+    return [
+      {
+        label: "No Workspaces",
+        enabled: false,
+      },
+    ];
+  }
+
+  return targets.map(({ workspace, index }) => ({
+    label: workspaceMenuLabel(workspace),
+    accelerator: workspaceShortcutAccelerator(index),
+    click: () => {
+      const action = workspaceShortcutActionForIndex(index);
+      if (action) {
+        sendAppShortcut(action);
+      }
+    },
+  }));
+}
+
 function installApplicationMenu(): void {
   const paneMenuItems: MenuItemConstructorOptions[] = [
     {
@@ -123,6 +166,10 @@ function installApplicationMenu(): void {
   ];
   const template: MenuItemConstructorOptions[] = [
     {
+      label: "Workspaces",
+      submenu: buildWorkspaceMenuItems(),
+    },
+    {
       label: "Pane",
       submenu: paneMenuItems,
     },
@@ -154,6 +201,13 @@ function installApplicationMenu(): void {
   ];
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+function refreshApplicationMenuForWorkspaceEvent(event: unknown): void {
+  const type = (event as { type?: unknown }).type;
+  if (type === "nav-updated") {
+    installApplicationMenu();
+  }
 }
 
 function registerIpcHandlers(): void {
@@ -358,6 +412,7 @@ async function main(): Promise<void> {
   await backend.init();
   backend.onEvent((event) => {
     broadcastEvent(event);
+    refreshApplicationMenuForWorkspaceEvent(event);
   });
   registerIpcHandlers();
   installApplicationMenu();

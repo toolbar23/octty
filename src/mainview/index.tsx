@@ -62,7 +62,12 @@ import {
   shouldFlushTerminalInputImmediately,
   takeStringChunk,
 } from "../shared/terminal-batching";
-import { appShortcutActionForKeyEvent } from "../shared/app-shortcuts";
+import {
+  appShortcutActionForKeyEvent,
+  workspaceShortcutIndexForAction,
+  workspaceShortcutLabel,
+  workspaceShortcutTargets,
+} from "../shared/app-shortcuts";
 import {
   shouldRemapShiftEnterToCtrlJ,
   terminalClipboardShortcutActionForKeyEvent,
@@ -529,6 +534,28 @@ function formatTerminalChunk(data: string, limit = 120): string {
   return `${encoded.slice(0, limit)}...`;
 }
 
+function clampTerminalViewportY(term: Terminal, viewportY: number): number {
+  return Math.max(0, Math.min(term.getScrollbackLength(), viewportY));
+}
+
+function writeTerminalChunk(term: Terminal, chunk: string): void {
+  const previousViewportY = term.getViewportY();
+  if (previousViewportY <= 0) {
+    term.write(chunk);
+    return;
+  }
+
+  const previousScrollbackLength = term.getScrollbackLength();
+  term.write(chunk);
+
+  const nextScrollbackLength = term.getScrollbackLength();
+  const nextViewportY = clampTerminalViewportY(
+    term,
+    previousViewportY + nextScrollbackLength - previousScrollbackLength,
+  );
+  term.scrollToLine(nextViewportY);
+}
+
 function createTerminalRuntime(paneId: string): TerminalRuntime {
   const host = document.createElement("div");
   host.className = "terminal-runtime-host";
@@ -603,7 +630,7 @@ function createTerminalRuntime(paneId: string): TerminalRuntime {
       if (!chunk) {
         return;
       }
-      term.write(chunk);
+      writeTerminalChunk(term, chunk);
       processedChunks += 1;
     }
 
@@ -1087,6 +1114,16 @@ function App(): React.ReactElement {
   const snapshotTimersRef = useRef<Map<string, number>>(new Map());
   const activeWorkspaceIdRef = useRef<string | null>(null);
   const activeDetail = activeWorkspaceId ? details[activeWorkspaceId] ?? null : null;
+  const workspaceShortcutLabels = useMemo(() => {
+    const labels = new Map<string, string>();
+    for (const target of workspaceShortcutTargets(bootstrap.projectRoots, bootstrap.workspaces)) {
+      const label = workspaceShortcutLabel(target.index);
+      if (label) {
+        labels.set(target.workspace.id, label);
+      }
+    }
+    return labels;
+  }, [bootstrap.projectRoots, bootstrap.workspaces]);
 
   useEffect(() => {
     detailsRef.current = details;
@@ -1572,6 +1609,23 @@ function App(): React.ReactElement {
 
   const invokeAppShortcut = useCallback(
     (action: string) => {
+      const workspaceShortcutIndex = workspaceShortcutIndexForAction(action);
+      if (workspaceShortcutIndex !== null) {
+        const target = workspaceShortcutTargets(bootstrap.projectRoots, bootstrap.workspaces)
+          .find((item) => item.index === workspaceShortcutIndex)?.workspace ?? null;
+        if (!target || target.id === activeWorkspaceId) {
+          return;
+        }
+
+        setKeyboardNavigationRequest({
+          workspaceId: target.id,
+          paneId: null,
+          nonce: Date.now(),
+        });
+        void loadWorkspace(target.id);
+        return;
+      }
+
       const detail = activeWorkspaceId ? detailsRef.current[activeWorkspaceId] ?? null : null;
       const activePaneId = detail?.snapshot.activePaneId ?? null;
 
@@ -1726,6 +1780,7 @@ function App(): React.ReactElement {
     [
       activeWorkspaceId,
       addPaneToWorkspace,
+      bootstrap.projectRoots,
       bootstrap.workspaces,
       loadWorkspace,
       mutateWorkspace,
@@ -1912,6 +1967,7 @@ function App(): React.ReactElement {
                     const attentionClassName = agentAttentionClassName(workspace.agentAttentionState);
                     const attentionLabel = agentAttentionLabel(workspace.agentAttentionState);
                     const statusBadges = workspaceStatusBadges(workspace);
+                    const shortcutLabel = workspaceShortcutLabels.get(workspace.id) ?? null;
 
                     return (
                       <div
@@ -2061,9 +2117,14 @@ function App(): React.ReactElement {
                               </div>
                             </div>
                           </div>
-                          {workspace.bookmarks.length > 0 && (
+                          {(workspace.bookmarks.length > 0 || shortcutLabel) && (
                             <div className="workspace-item-row workspace-bookmark-row">
-                              <span className="workspace-branch-info">{workspaceBookmarkLabel(workspace)}</span>
+                              {workspace.bookmarks.length > 0 && (
+                                <span className="workspace-branch-info">{workspaceBookmarkLabel(workspace)}</span>
+                              )}
+                              {shortcutLabel && (
+                                <span className="workspace-shortcut-label">{`<${shortcutLabel}>`}</span>
+                              )}
                             </div>
                           )}
                           <div className="workspace-badges">

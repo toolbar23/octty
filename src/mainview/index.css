@@ -565,11 +565,24 @@ textarea {
 }
 
 .workspace-branch-info {
+  min-width: 0;
   color: var(--color-nav-muted);
   font-size: 0.75rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.workspace-bookmark-row {
+  align-items: center;
+  min-width: 0;
+}
+
+.workspace-shortcut-label {
+  flex: 0 0 auto;
+  color: var(--color-nav-muted);
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .sidebar-footer {
