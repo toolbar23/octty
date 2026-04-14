@@ -1,0 +1,20 @@
+[package]
+name = "octty-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "octty-rs"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+octty-core.workspace = true
+octty-jj.workspace = true
+octty-store.workspace = true
+octty-term.workspace = true
+tokio.workspace = true

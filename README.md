@@ -34,6 +34,34 @@ npm run typecheck
 npm test
 ```
 
+## Rust Rewrite Scaffold
+
+The greenfield Rust app lives under `crates/` and is built as a Cargo workspace.
+It starts with empty state rather than importing the Electron SQLite database.
+
+```bash
+cargo test --workspace --all-targets
+cargo run -p octty-app --bin octty-rs
+cargo run -p octty-app --bin octty-rs -- --headless-check
+```
+
+Rust scaffold pieces:
+
+- `octty-core`: domain types, layout state, workspace shortcut assignment
+- `octty-store`: local Turso database and migrations at `~/.local/share/octty-rs/state.turso`
+- `octty-jj`: JJ workspace discovery/status helpers
+- `octty-term`: tmux launch/session plumbing
+- `octty-app`: GPUI + gpui-component application shell
+
+The Ghostty terminal adapter is behind an optional feature because
+`libghostty-rs` builds vendored Ghostty sources with Zig:
+
+```bash
+cargo check -p octty-term --features ghostty-vt
+```
+
+That command requires `zig` on `PATH`.
+
 Per-tool launch arguments can be configured with environment variables:
 
 ```bash
