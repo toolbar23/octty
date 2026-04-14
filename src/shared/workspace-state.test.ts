@@ -71,10 +71,10 @@ describe("workspaceStatusBadges", () => {
           notInDefaultAddedLines: 40,
           notInDefaultRemovedLines: 4,
         }),
-      ).map((badge) => badge.label),
+    ).map((badge) => badge.label),
     ).toEqual([
-      "Unpublished +120/-8",
-      "Not in default +40/-4",
+      "+120/-8",
+      "+40/-4",
     ]);
   });
 
@@ -100,10 +100,10 @@ describe("workspaceStatusBadges", () => {
           unpublishedAddedLines: 9,
           unpublishedRemovedLines: 1,
         }),
-      ).map((badge) => badge.label),
+    ).map((badge) => badge.label),
     ).toEqual([
       "Conflict",
-      "Unpublished +9/-1",
+      "+9/-1",
     ]);
   });
 

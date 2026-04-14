@@ -68,10 +68,7 @@ export function workspaceStatusBadges(workspace: WorkspaceSummary): WorkspaceSta
     });
   } else {
     badges.push({
-      label: `Unpublished ${formatDiffStat(
-        workspace.unpublishedAddedLines,
-        workspace.unpublishedRemovedLines,
-      )}`,
+      label: formatDiffStat(workspace.unpublishedAddedLines, workspace.unpublishedRemovedLines),
       className: "unpublished",
       title: [
         `Unpublished: ${formatChangeCount(workspace.unpublishedChangeCount)} not reachable from remote bookmarks.`,
@@ -83,10 +80,7 @@ export function workspaceStatusBadges(workspace: WorkspaceSummary): WorkspaceSta
 
   if (workspace.notInDefaultAvailable && workspace.notInDefaultChangeCount > 0) {
     badges.push({
-      label: `Not in default ${formatDiffStat(
-        workspace.notInDefaultAddedLines,
-        workspace.notInDefaultRemovedLines,
-      )}`,
+      label: formatDiffStat(workspace.notInDefaultAddedLines, workspace.notInDefaultRemovedLines),
       className: "not-in-default",
       title: [
         `Not in default: ${formatChangeCount(workspace.notInDefaultChangeCount)} not contained in default@.`,

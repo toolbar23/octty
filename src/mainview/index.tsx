@@ -99,12 +99,6 @@ const debugMessageRates =
   document
     .querySelector('meta[name="octty-debug-message-rates"], meta[name="workspace-orbit-debug-message-rates"]')
     ?.getAttribute("content") === "1";
-const ghosttyRenderLoopMode =
-  document
-    .querySelector(
-      'meta[name="octty-ghostty-render-loop-mode"], meta[name="workspace-orbit-ghostty-render-loop-mode"]',
-    )
-    ?.getAttribute("content") ?? "throttled";
 const ghosttyRenderIntervalMs = Math.max(
   16,
   Number.parseInt(
@@ -112,9 +106,9 @@ const ghosttyRenderIntervalMs = Math.max(
       .querySelector(
         'meta[name="octty-ghostty-render-interval-ms"], meta[name="workspace-orbit-ghostty-render-interval-ms"]',
       )
-      ?.getAttribute("content") ?? "80",
+      ?.getAttribute("content") ?? "100",
     10,
-  ) || 80,
+  ) || 100,
 );
 let ghosttyInitPromise: Promise<void> | null = null;
 let forwardTerminalUiDebug:
@@ -142,37 +136,79 @@ let rendererDebugRateTimer: number | null = null;
 let ghosttyRenderLoopPatched = false;
 
 type PatchedGhosttyTerminal = Terminal & {
-  __octtyRenderLoopActive?: boolean;
-  __octtyRenderLoopTimer?: number | null;
+  __octtyRenderLoopMode?: TerminalRenderLoopMode;
+  __octtyRenderLoopHandle?: number | null;
+  __octtyRenderLoopSchedule?: "raf" | "timeout" | null;
 };
 
-function clearTerminalRenderLoopTimer(term: PatchedGhosttyTerminal): void {
-  if (term.__octtyRenderLoopTimer != null) {
-    window.clearTimeout(term.__octtyRenderLoopTimer);
-    term.__octtyRenderLoopTimer = null;
+type TerminalRenderLoopMode = "stopped" | "focused" | "visible";
+
+function clearTerminalRenderLoopHandle(term: PatchedGhosttyTerminal): void {
+  if (term.__octtyRenderLoopHandle == null) {
+    return;
+  }
+  if (term.__octtyRenderLoopSchedule === "raf") {
+    window.cancelAnimationFrame(term.__octtyRenderLoopHandle);
+  } else {
+    window.clearTimeout(term.__octtyRenderLoopHandle);
+  }
+  term.__octtyRenderLoopHandle = null;
+  term.__octtyRenderLoopSchedule = null;
+}
+
+function renderTerminalFrame(term: PatchedGhosttyTerminal): void {
+  (term as any).renderer.render(
+    (term as any).wasmTerm,
+    false,
+    (term as any).viewportY,
+    term,
+    (term as any).scrollbarOpacity,
+  );
+  const cursor = (term as any).wasmTerm.getCursor();
+  if (cursor.y !== (term as any).lastCursorY) {
+    (term as any).lastCursorY = cursor.y;
+    (term as any).cursorMoveEmitter.fire();
   }
 }
 
-function setTerminalRenderLoopActive(term: Terminal, active: boolean): void {
-  if (ghosttyRenderLoopMode === "raf") {
-    return;
-  }
-
-  const patchedTerm = term as PatchedGhosttyTerminal;
+function scheduleTerminalRenderLoop(term: PatchedGhosttyTerminal): void {
+  clearTerminalRenderLoopHandle(term);
   if (
-    patchedTerm.__octtyRenderLoopActive === active &&
-    (!active || patchedTerm.__octtyRenderLoopTimer != null)
+    term.__octtyRenderLoopMode === "stopped" ||
+    (term as any).isDisposed ||
+    !(term as any).isOpen
   ) {
     return;
   }
 
-  patchedTerm.__octtyRenderLoopActive = active;
-  if (!active) {
-    clearTerminalRenderLoopTimer(patchedTerm);
+  if (term.__octtyRenderLoopMode === "focused") {
+    term.__octtyRenderLoopSchedule = "raf";
+    term.__octtyRenderLoopHandle = window.requestAnimationFrame(() => {
+      renderTerminalFrame(term);
+      scheduleTerminalRenderLoop(term);
+    });
     return;
   }
 
-  (patchedTerm as unknown as { startRenderLoop?: () => void }).startRenderLoop?.();
+  term.__octtyRenderLoopSchedule = "timeout";
+  term.__octtyRenderLoopHandle = window.setTimeout(() => {
+    renderTerminalFrame(term);
+    scheduleTerminalRenderLoop(term);
+  }, ghosttyRenderIntervalMs);
+}
+
+function setTerminalRenderLoopMode(term: Terminal, mode: TerminalRenderLoopMode): void {
+  const patchedTerm = term as PatchedGhosttyTerminal;
+  if (patchedTerm.__octtyRenderLoopMode === mode && patchedTerm.__octtyRenderLoopHandle != null) {
+    return;
+  }
+
+  patchedTerm.__octtyRenderLoopMode = mode;
+  scheduleTerminalRenderLoop(patchedTerm);
+}
+
+function setTerminalRenderLoopActive(term: Terminal, active: boolean): void {
+  setTerminalRenderLoopMode(term, active ? "visible" : "stopped");
 }
 
 function trackRendererDebugRate(key: string, sample?: Record<string, unknown>): void {
@@ -224,7 +260,7 @@ type ShortcutBridgeEvent = CustomEvent<string>;
 const desktopPlatform = window.octtyDesktop?.platform ?? null;
 
 function patchGhosttyRenderLoop(): void {
-  if (ghosttyRenderLoopPatched || ghosttyRenderLoopMode === "raf") {
+  if (ghosttyRenderLoopPatched) {
     return;
   }
 
@@ -237,43 +273,13 @@ function patchGhosttyRenderLoop(): void {
   terminalPrototype.startRenderLoop = function patchedStartRenderLoop(
     this: PatchedGhosttyTerminal,
   ): void {
-    clearTerminalRenderLoopTimer(this);
-    if (this.__octtyRenderLoopActive === false) {
-      return;
-    }
-
-    const tick = () => {
-      if (
-        this.__octtyRenderLoopActive === false ||
-        (this as any).isDisposed ||
-        !(this as any).isOpen
-      ) {
-        this.__octtyRenderLoopTimer = null;
-        return;
-      }
-
-      (this as any).renderer.render(
-        (this as any).wasmTerm,
-        false,
-        (this as any).viewportY,
-        this,
-        (this as any).scrollbarOpacity,
-      );
-      const cursor = (this as any).wasmTerm.getCursor();
-      if (cursor.y !== (this as any).lastCursorY) {
-        (this as any).lastCursorY = cursor.y;
-        (this as any).cursorMoveEmitter.fire();
-      }
-
-      this.__octtyRenderLoopTimer = window.setTimeout(tick, ghosttyRenderIntervalMs);
-    };
-
-    tick();
+    this.__octtyRenderLoopMode ??= "visible";
+    scheduleTerminalRenderLoop(this);
   };
 
   terminalPrototype.dispose = function patchedDispose(this: PatchedGhosttyTerminal): void {
-    this.__octtyRenderLoopActive = false;
-    clearTerminalRenderLoopTimer(this);
+    this.__octtyRenderLoopMode = "stopped";
+    clearTerminalRenderLoopHandle(this);
     originalDispose?.call(this);
   };
 
@@ -3130,6 +3136,14 @@ function TerminalPane({
   }, [isActive, isVisible, payload.kind, payload.sessionId]);
 
   useEffect(() => {
+    const runtime = runtimeRef.current;
+    if (!runtime) {
+      return;
+    }
+    setTerminalRenderLoopMode(runtime.term, isVisible ? (isActive ? "focused" : "visible") : "stopped");
+  }, [isActive, isVisible, pane.id]);
+
+  useEffect(() => {
     if (
       payload.sessionState !== "live" &&
       !payload.autoStart &&
@@ -3440,6 +3454,7 @@ function TerminalPane({
         }));
       };
       attachTerminalRuntime(runtime, containerRef.current);
+      setTerminalRenderLoopMode(runtime.term, isActive ? "focused" : "visible");
       terminalRef.current = runtime.term;
 
       if (payload.sessionId) {
