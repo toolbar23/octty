@@ -11,6 +11,7 @@ ghostty-vt = ["dep:libghostty-vt"]
 
 [dependencies]
 octty-core.workspace = true
+portable-pty.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "f27655ad18a6ef04d7d9cec2779e57dab11b3405", package = "libghostty-vt", optional = true }

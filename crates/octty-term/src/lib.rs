@@ -6,6 +6,8 @@ use tokio::process::Command;
 
 #[cfg(feature = "ghostty-vt")]
 pub mod ghostty_vt;
+#[cfg(feature = "ghostty-vt")]
+pub mod live;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalSessionSpec {
@@ -31,6 +33,10 @@ pub enum TerminalError {
     Io(#[from] std::io::Error),
     #[error("tmux command failed: {0}")]
     Tmux(String),
+    #[error("pty error: {0}")]
+    Pty(String),
+    #[error("terminal renderer error: {0}")]
+    Renderer(String),
 }
 
 pub fn build_tmux_launch(spec: &TerminalSessionSpec) -> TmuxLaunch {
@@ -48,6 +54,36 @@ pub fn build_tmux_launch(spec: &TerminalSessionSpec) -> TmuxLaunch {
         spec.cols.to_string(),
         "-y".to_owned(),
         spec.rows.to_string(),
+        "-c".to_owned(),
+        spec.cwd.clone(),
+    ];
+    if !command.is_empty() {
+        args.push(command.to_owned());
+    }
+
+    let mut clean_env = BTreeMap::new();
+    clean_env.insert("TMUX".to_owned(), String::new());
+    clean_env.insert("TMUX_PANE".to_owned(), String::new());
+
+    TmuxLaunch {
+        socket_name,
+        session_name,
+        args,
+        clean_env,
+    }
+}
+
+pub fn build_tmux_pty_launch(spec: &TerminalSessionSpec) -> TmuxLaunch {
+    let socket_name = tmux_socket_name();
+    let session_name = stable_tmux_session_name(spec);
+    let command = terminal_command(&spec.kind);
+    let mut args = vec![
+        "-L".to_owned(),
+        socket_name.clone(),
+        "new-session".to_owned(),
+        "-A".to_owned(),
+        "-s".to_owned(),
+        session_name.clone(),
         "-c".to_owned(),
         spec.cwd.clone(),
     ];
@@ -92,12 +128,19 @@ pub async fn capture_tmux_pane(spec: &TerminalSessionSpec) -> Result<String, Ter
 
 pub async fn send_tmux_text(spec: &TerminalSessionSpec, text: &str) -> Result<(), TerminalError> {
     let session_name = ensure_tmux_session(spec).await?;
+    send_tmux_text_to_session(&session_name, text).await
+}
+
+pub async fn send_tmux_text_to_session(
+    session_name: &str,
+    text: &str,
+) -> Result<(), TerminalError> {
     let args = vec![
         "-L".to_owned(),
         tmux_socket_name(),
         "send-keys".to_owned(),
         "-t".to_owned(),
-        session_name,
+        session_name.to_owned(),
         "-l".to_owned(),
         text.to_owned(),
     ];
@@ -113,12 +156,19 @@ pub async fn send_tmux_keys(
     keys: &[&str],
 ) -> Result<(), TerminalError> {
     let session_name = ensure_tmux_session(spec).await?;
+    send_tmux_keys_to_session(&session_name, keys).await
+}
+
+pub async fn send_tmux_keys_to_session(
+    session_name: &str,
+    keys: &[&str],
+) -> Result<(), TerminalError> {
     let mut args = vec![
         "-L".to_owned(),
         tmux_socket_name(),
         "send-keys".to_owned(),
         "-t".to_owned(),
-        session_name,
+        session_name.to_owned(),
     ];
     args.extend(keys.iter().map(|key| (*key).to_owned()));
     run_tmux(&args).await

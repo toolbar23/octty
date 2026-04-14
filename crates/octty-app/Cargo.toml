@@ -16,5 +16,5 @@ gpui-component.workspace = true
 octty-core.workspace = true
 octty-jj.workspace = true
 octty-store.workspace = true
-octty-term.workspace = true
+octty-term = { workspace = true, features = ["ghostty-vt"] }
 tokio.workspace = true
