@@ -64,7 +64,7 @@ export function appShortcutActionForKeyEvent(
   switch (event.key.toLowerCase()) {
     case "s":
       return "open-shell-pane";
-    case "c":
+    case "a":
       return "open-codex-pane";
     case "p":
       return "open-pi-pane";

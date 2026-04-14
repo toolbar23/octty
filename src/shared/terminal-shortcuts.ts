@@ -22,6 +22,10 @@ export function terminalClipboardShortcutActionForKeyEvent(
     return "paste";
   }
 
+  if (isCtrlInsertCopy(event)) {
+    return "copy";
+  }
+
   const usesSuperPrefix =
     event.metaKey || event.getModifierState?.("Super") || event.getModifierState?.("OS");
   const usesCtrlShiftPrefix = event.ctrlKey && event.shiftKey && !usesSuperPrefix;
@@ -46,6 +50,17 @@ function isShiftInsertPaste(event: TerminalKeyboardShortcutEvent): boolean {
   return (
     event.shiftKey &&
     !event.ctrlKey &&
+    !event.metaKey &&
+    !event.getModifierState?.("Super") &&
+    !event.getModifierState?.("OS") &&
+    (event.key === "Insert" || event.code === "Insert" || event.code === "NumpadInsert")
+  );
+}
+
+function isCtrlInsertCopy(event: TerminalKeyboardShortcutEvent): boolean {
+  return (
+    event.ctrlKey &&
+    !event.shiftKey &&
     !event.metaKey &&
     !event.getModifierState?.("Super") &&
     !event.getModifierState?.("OS") &&

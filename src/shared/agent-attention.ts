@@ -1,4 +1,5 @@
-import type { AgentAttentionState } from "./types";
+import type { AgentAttentionState, SessionSnapshot } from "./types";
+import { supportsTerminalAttention } from "./terminal-kind";
 
 export function aggregateAgentAttentionStates(
   states: Array<AgentAttentionState | null | undefined>,
@@ -13,6 +14,16 @@ export function aggregateAgentAttentionStates(
     return "idle-seen";
   }
   return null;
+}
+
+export function aggregateWorkspaceAttentionState(
+  sessions: Array<Pick<SessionSnapshot, "agentAttentionState" | "kind" | "state">>,
+): AgentAttentionState | null {
+  return aggregateAgentAttentionStates(
+    sessions
+      .filter((session) => session.state === "live" && supportsTerminalAttention(session.kind))
+      .map((session) => session.agentAttentionState),
+  );
 }
 
 export function agentAttentionLabel(state: AgentAttentionState | null | undefined): string | null {

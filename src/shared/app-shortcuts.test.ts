@@ -14,7 +14,7 @@ describe("appShortcutActionForKeyEvent", () => {
     ).toBe("open-shell-pane");
     expect(
       appShortcutActionForKeyEvent({
-        key: "c",
+        key: "a",
         ctrlKey: true,
         shiftKey: true,
         altKey: false,
@@ -106,6 +106,15 @@ describe("appShortcutActionForKeyEvent", () => {
         shiftKey: true,
         altKey: false,
         metaKey: true,
+      }),
+    ).toBeNull();
+    expect(
+      appShortcutActionForKeyEvent({
+        key: "c",
+        ctrlKey: true,
+        shiftKey: true,
+        altKey: false,
+        metaKey: false,
       }),
     ).toBeNull();
     expect(

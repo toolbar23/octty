@@ -211,6 +211,31 @@ describe("terminalClipboardShortcutActionForKeyEvent", () => {
     ).toBe("paste");
   });
 
+  test("uses ctrl-insert as terminal copy", () => {
+    expect(
+      terminalClipboardShortcutActionForKeyEvent({
+        key: "Insert",
+        code: "Insert",
+        shiftKey: false,
+        ctrlKey: true,
+        altKey: false,
+        metaKey: false,
+        isComposing: false,
+      }),
+    ).toBe("copy");
+    expect(
+      terminalClipboardShortcutActionForKeyEvent({
+        key: "Insert",
+        code: "NumpadInsert",
+        shiftKey: false,
+        ctrlKey: true,
+        altKey: false,
+        metaKey: false,
+        isComposing: false,
+      }),
+    ).toBe("copy");
+  });
+
   test("ignores terminal clipboard shortcuts with unsupported modifiers", () => {
     expect(
       terminalClipboardShortcutActionForKeyEvent({

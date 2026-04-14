@@ -33,7 +33,7 @@ import type {
   WorkspaceSummary,
 } from "../shared/types";
 import { hasRecordedWorkspacePath } from "../shared/types";
-import { aggregateAgentAttentionStates } from "../shared/agent-attention";
+import { aggregateWorkspaceAttentionState } from "../shared/agent-attention";
 import { AppDatabase } from "./db";
 import { resolveStateDbPath } from "./app-paths";
 import { readTerminalAppearanceConfig } from "./terminal-config";
@@ -532,10 +532,7 @@ export class WorkspaceService {
   }
 
   private aggregateWorkspaceAgentAttentionState(workspaceId: string): AgentAttentionState | null {
-    const sessions = this.db
-      .listSessionStates(workspaceId)
-      .filter((session) => isAgentTerminalKind(session.kind) && session.state === "live");
-    return aggregateAgentAttentionStates(sessions.map((session) => session.agentAttentionState));
+    return aggregateWorkspaceAttentionState(this.db.listSessionStates(workspaceId));
   }
 
   private setAgentAttentionState(

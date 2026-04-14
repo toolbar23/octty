@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=Octty
-Exec=AppRun --no-sandbox %U
-Terminal=false
-Type=Application
-Icon=octty
-StartupWMClass=Octty
-X-AppImage-Version=0.1.0
-Categories=Development;

@@ -724,17 +724,6 @@ textarea {
   background: var(--color-stage-bg);
 }
 
-.center-drop-zone {
-  width: 18px;
-  flex: 0 0 18px;
-  border-radius: 4px;
-}
-
-.center-drop-zone:hover,
-.center-drop-zone:active {
-  background: var(--color-accent-soft);
-}
-
 .task-column-wrap {
   position: relative;
   flex: 0 0 auto;
@@ -852,14 +841,12 @@ textarea {
   justify-content: flex-end;
 }
 
-.pane-header .drag-handle,
 .pane-header .pane-actions button {
   background: transparent;
   border-color: #34384d;
   color: inherit;
 }
 
-.pane-header .drag-handle:hover,
 .pane-header .pane-actions button:hover {
   background: rgb(255 255 255 / 0.06);
 }
@@ -867,16 +854,6 @@ textarea {
 .pane-header .pane-actions .copy-resume-button.copy-error {
   border-color: #8a4351;
   color: #ffb3bf;
-}
-
-.drag-handle {
-  padding: 2px 6px;
-  min-width: 0;
-  cursor: grab;
-}
-
-.drag-handle:active {
-  cursor: grabbing;
 }
 
 .pane-actions button {

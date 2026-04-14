@@ -15,10 +15,8 @@ import { createRoot } from "react-dom/client";
 import {
   addPane,
   findPaneColumnId,
-  moveColumn,
   moveColumnToCenter,
   movePaneHorizontally,
-  movePaneToColumn,
   movePaneToNewColumn,
   pinColumn,
   removePane,
@@ -113,9 +111,11 @@ const TERMINAL_INPUT_BATCH_DELAY_MS = 4;
 const TERMINAL_INPUT_BATCH_SIZE = 256;
 const TERMINAL_REQUEST_TIMEOUT_MS = 8_000;
 const TERMINAL_TOOLBAR_KINDS: TerminalKind[] = ["shell", "codex", "pi", "nvim", "jjui"];
-const TASKSPACE_DRAG_MIME = "application/x-octty-layout";
 const MIN_STACK_PANE_HEIGHT_PX = 96;
 const KEYBOARD_COLUMN_RESIZE_STEP_PX = 80;
+const HORIZONTAL_WHEEL_FOCUS_THRESHOLD_PX = 80;
+const HORIZONTAL_WHEEL_FOCUS_RESET_MS = 240;
+const WHEEL_LINE_DELTA_PX = 40;
 const CTRL_J = "\x0a";
 
 type DebugRateBucket = {
@@ -844,42 +844,6 @@ function logTerminalUi(
   }
 }
 
-type LayoutDragPayload =
-  | { type: "column"; columnId: string }
-  | { type: "pane"; paneId: string };
-
-function setLayoutDragPayload(
-  event: React.DragEvent<HTMLElement>,
-  payload: LayoutDragPayload,
-): void {
-  event.dataTransfer.effectAllowed = "move";
-  event.dataTransfer.setData(TASKSPACE_DRAG_MIME, JSON.stringify(payload));
-  event.dataTransfer.setData("text/plain", JSON.stringify(payload));
-}
-
-function getLayoutDragPayload(
-  event: React.DragEvent<HTMLElement>,
-): LayoutDragPayload | null {
-  const raw = event.dataTransfer.getData(TASKSPACE_DRAG_MIME) || event.dataTransfer.getData("text/plain");
-  if (!raw) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as Partial<LayoutDragPayload>;
-    if (parsed.type === "column" && typeof parsed.columnId === "string") {
-      return { type: "column", columnId: parsed.columnId };
-    }
-    if (parsed.type === "pane" && typeof parsed.paneId === "string") {
-      return { type: "pane", paneId: parsed.paneId };
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
-}
-
 function terminalStatusLabel(payload: TerminalPanePayload): string {
   if (payload.sessionState === "live") {
     return "live";
@@ -975,6 +939,34 @@ function cycleShortcutTarget(ids: string[], currentId: string | null, step: -1 |
 
   const nextIndex = Math.max(0, Math.min(ids.length - 1, currentIndex + step));
   return ids[nextIndex]!;
+}
+
+function wheelDeltaPixels(delta: number, deltaMode: number, pageSizePx: number): number {
+  if (deltaMode === WheelEvent.DOM_DELTA_LINE) {
+    return delta * WHEEL_LINE_DELTA_PX;
+  }
+  if (deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+    return delta * pageSizePx;
+  }
+  return delta;
+}
+
+function horizontalWheelFocusDelta(
+  event: React.WheelEvent<HTMLElement>,
+  pageSizePx: number,
+): number {
+  const horizontalDelta = event.deltaX || (event.shiftKey ? event.deltaY : 0);
+  const verticalDelta = event.shiftKey ? 0 : event.deltaY;
+  const horizontalPx = wheelDeltaPixels(horizontalDelta, event.deltaMode, pageSizePx);
+  const verticalPx = wheelDeltaPixels(verticalDelta, event.deltaMode, pageSizePx);
+
+  if (Math.abs(horizontalPx) < 12) {
+    return 0;
+  }
+  if (Math.abs(horizontalPx) <= Math.abs(verticalPx) * 1.2) {
+    return 0;
+  }
+  return horizontalPx;
 }
 
 function focusPaneTarget(
@@ -2217,10 +2209,23 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
     keyboardNavigationRequest,
   } = props;
   const centerScrollRef = useRef<HTMLDivElement | null>(null);
+  const handledNavigationRequestNonceRef = useRef<number | null>(null);
+  const horizontalWheelFocusRef = useRef({ accumulatedPx: 0, resetTimer: 0 });
+  const wheelNavigationNonceRef = useRef(Date.now());
+  const [wheelNavigationRequest, setWheelNavigationRequest] =
+    useState<KeyboardNavigationRequest | null>(null);
   const activeColumnId = detail.snapshot.activePaneId
     ? findPaneColumnId(detail.snapshot, detail.snapshot.activePaneId)
     : null;
   const layoutFitSignature = workspaceLayoutFitSignature(detail.snapshot);
+  const navigationRequest =
+    !keyboardNavigationRequest
+      ? wheelNavigationRequest
+      : !wheelNavigationRequest
+        ? keyboardNavigationRequest
+        : keyboardNavigationRequest.nonce >= wheelNavigationRequest.nonce
+          ? keyboardNavigationRequest
+          : wheelNavigationRequest;
 
   useEffect(() => {
     if (!activeColumnId || !centerScrollRef.current) {
@@ -2268,14 +2273,17 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
   }, [detail.workspace.id, isVisible, layoutFitSignature]);
 
   useEffect(() => {
-    if (!isVisible || !keyboardNavigationRequest) {
+    if (!isVisible || !navigationRequest) {
       return;
     }
-    if (keyboardNavigationRequest.workspaceId !== detail.workspace.id) {
+    if (handledNavigationRequestNonceRef.current === navigationRequest.nonce) {
+      return;
+    }
+    if (navigationRequest.workspaceId !== detail.workspace.id) {
       return;
     }
 
-    const paneId = keyboardNavigationRequest.paneId ?? detail.snapshot.activePaneId;
+    const paneId = navigationRequest.paneId ?? detail.snapshot.activePaneId;
     if (!paneId) {
       return;
     }
@@ -2284,6 +2292,8 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
     if (!pane) {
       return;
     }
+
+    handledNavigationRequestNonceRef.current = navigationRequest.nonce;
 
     let cancelled = false;
     let attemptsLeft = 8;
@@ -2314,7 +2324,84 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
         window.cancelAnimationFrame(frame);
       }
     };
-  }, [detail.snapshot.activePaneId, detail.snapshot.panes, detail.workspace.id, isVisible, keyboardNavigationRequest]);
+  }, [detail.snapshot.activePaneId, detail.snapshot.panes, detail.workspace.id, isVisible, navigationRequest]);
+
+  useEffect(() => {
+    return () => {
+      const resetTimer = horizontalWheelFocusRef.current.resetTimer;
+      if (resetTimer) {
+        window.clearTimeout(resetTimer);
+      }
+    };
+  }, []);
+
+  const focusPaneByHorizontalWheel = useCallback(
+    (direction: -1 | 1): boolean => {
+      const nextPaneId = cycleShortcutTarget(
+        listPaneShortcutIds(detail.snapshot),
+        detail.snapshot.activePaneId,
+        direction,
+      );
+      if (!nextPaneId || nextPaneId === detail.snapshot.activePaneId) {
+        return false;
+      }
+
+      activatePane(nextPaneId);
+      wheelNavigationNonceRef.current = Math.max(Date.now(), wheelNavigationNonceRef.current + 1);
+      setWheelNavigationRequest({
+        workspaceId: detail.workspace.id,
+        paneId: nextPaneId,
+        nonce: wheelNavigationNonceRef.current,
+      });
+      return true;
+    },
+    [activatePane, detail.snapshot, detail.workspace.id],
+  );
+
+  const handleTaskspaceWheelCapture = useCallback(
+    (event: React.WheelEvent<HTMLDivElement>) => {
+      const focusDelta = horizontalWheelFocusDelta(
+        event,
+        Math.max(event.currentTarget.clientWidth, 1),
+      );
+      if (focusDelta === 0) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const state = horizontalWheelFocusRef.current;
+      if (state.resetTimer) {
+        window.clearTimeout(state.resetTimer);
+      }
+      state.resetTimer = window.setTimeout(() => {
+        state.accumulatedPx = 0;
+        state.resetTimer = 0;
+      }, HORIZONTAL_WHEEL_FOCUS_RESET_MS);
+
+      const direction = focusDelta > 0 ? 1 : -1;
+      if (state.accumulatedPx !== 0 && Math.sign(state.accumulatedPx) !== direction) {
+        state.accumulatedPx = 0;
+      }
+
+      state.accumulatedPx += focusDelta;
+      if (Math.abs(state.accumulatedPx) < HORIZONTAL_WHEEL_FOCUS_THRESHOLD_PX) {
+        return;
+      }
+
+      if (focusPaneByHorizontalWheel(direction)) {
+        state.accumulatedPx -= direction * HORIZONTAL_WHEEL_FOCUS_THRESHOLD_PX;
+        if (state.accumulatedPx !== 0 && Math.sign(state.accumulatedPx) !== direction) {
+          state.accumulatedPx = 0;
+        }
+        return;
+      }
+
+      state.accumulatedPx = 0;
+    },
+    [focusPaneByHorizontalWheel],
+  );
 
   const closePane = useCallback(
     (pane: PaneState) => {
@@ -2395,71 +2482,6 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
     [mutateSnapshot],
   );
 
-  const handleCenterDrop = useCallback(
-    (event: React.DragEvent<HTMLElement>, targetIndex: number) => {
-      const payload = getLayoutDragPayload(event);
-      if (!payload) {
-        return;
-      }
-      event.preventDefault();
-
-      mutateSnapshot((snapshot) => {
-        if (payload.type === "column") {
-          return moveColumn(snapshot, payload.columnId, targetIndex);
-        }
-        return movePaneToNewColumn(snapshot, payload.paneId, targetIndex, currentViewportWidth());
-      });
-    },
-    [mutateSnapshot],
-  );
-
-  const handlePinDrop = useCallback(
-    (event: React.DragEvent<HTMLElement>, target: "left" | "right") => {
-      const payload = getLayoutDragPayload(event);
-      if (!payload) {
-        return;
-      }
-      event.preventDefault();
-
-      mutateSnapshot((snapshot) => {
-        if (payload.type === "column") {
-          return pinColumn(snapshot, payload.columnId, target);
-        }
-        const moved = movePaneToNewColumn(
-          snapshot,
-          payload.paneId,
-          target === "left" ? 0 : snapshot.centerColumnIds.length,
-          currentViewportWidth(),
-        );
-        const columnId = findPaneColumnId(moved, payload.paneId);
-        return columnId ? pinColumn(moved, columnId, target) : moved;
-      });
-    },
-    [mutateSnapshot],
-  );
-
-  const handleColumnStackDrop = useCallback(
-    (event: React.DragEvent<HTMLElement>, targetColumnId: string) => {
-      const payload = getLayoutDragPayload(event);
-      if (!payload) {
-        return;
-      }
-      event.preventDefault();
-
-      mutateSnapshot((snapshot) => {
-        if (payload.type === "pane") {
-          return movePaneToColumn(snapshot, payload.paneId, targetColumnId);
-        }
-        const sourceColumn = snapshot.columns[payload.columnId];
-        if (!sourceColumn || sourceColumn.paneIds.length !== 1) {
-          return snapshot;
-        }
-        return movePaneToColumn(snapshot, sourceColumn.paneIds[0]!, targetColumnId);
-      });
-    },
-    [mutateSnapshot],
-  );
-
   const renderPane = useCallback(
     (pane: PaneState, column: WorkspaceColumn): React.ReactNode => {
       const isActive = detail.snapshot.activePaneId === pane.id;
@@ -2485,7 +2507,6 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
               movePaneToNewColumn(snapshot, pane.id, undefined, currentViewportWidth()))
           }
           onClose={() => closePane(pane)}
-          onDragStartPane={(event) => setLayoutDragPayload(event, { type: "pane", paneId: pane.id })}
           onUpdatePane={(updater) => patchPane(pane.id, updater)}
           subscribeSession={subscribeSession}
           onCreateSession={onCreateSession}
@@ -2537,12 +2558,6 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
             className={`task-column ${isActiveColumn ? "active" : ""} ${column.pinned ? `pinned-${column.pinned}` : ""}`}
             data-column-id={column.id}
             style={{ width: `${column.widthPx}px` }}
-            onDragOver={(event) => {
-              if (getLayoutDragPayload(event)) {
-                event.preventDefault();
-              }
-            }}
-            onDrop={(event) => handleColumnStackDrop(event, column.id)}
           >
             <div className="task-column-stack">
               {column.paneIds.map((paneId, index) => {
@@ -2579,7 +2594,6 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
       detail.snapshot.activePaneId,
       detail.snapshot.columns,
       detail.snapshot.panes,
-      handleColumnStackDrop,
       renderPane,
       startColumnResize,
       startStackResize,
@@ -2597,15 +2611,9 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
   }
 
   return (
-    <div className="taskspace">
+    <div className="taskspace" onWheelCapture={handleTaskspaceWheelCapture}>
       <aside
         className={`pinned-slot left ${detail.snapshot.pinnedLeftColumnId ? "" : "empty"}`}
-        onDragOver={(event) => {
-          if (getLayoutDragPayload(event)) {
-            event.preventDefault();
-          }
-        }}
-        onDrop={(event) => handlePinDrop(event, "left")}
       >
         {detail.snapshot.pinnedLeftColumnId
           ? renderColumn(detail.snapshot.pinnedLeftColumnId)
@@ -2621,42 +2629,13 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
               </div>
             )}
 
-            {detail.snapshot.centerColumnIds.map((columnId, index) => (
-              <React.Fragment key={`drop-${columnId}`}>
-                <div
-                  className="center-drop-zone"
-                  onDragOver={(event) => {
-                    if (getLayoutDragPayload(event)) {
-                      event.preventDefault();
-                    }
-                  }}
-                  onDrop={(event) => handleCenterDrop(event, index)}
-                />
-                {renderColumn(columnId)}
-              </React.Fragment>
-            ))}
-
-            <div
-              className="center-drop-zone tail"
-              onDragOver={(event) => {
-                if (getLayoutDragPayload(event)) {
-                  event.preventDefault();
-                }
-              }}
-              onDrop={(event) => handleCenterDrop(event, detail.snapshot.centerColumnIds.length)}
-            />
+            {detail.snapshot.centerColumnIds.map((columnId) => renderColumn(columnId))}
           </div>
         </div>
       </section>
 
       <aside
         className={`pinned-slot right ${detail.snapshot.pinnedRightColumnId ? "" : "empty"}`}
-        onDragOver={(event) => {
-          if (getLayoutDragPayload(event)) {
-            event.preventDefault();
-          }
-        }}
-        onDrop={(event) => handlePinDrop(event, "right")}
       >
         {detail.snapshot.pinnedRightColumnId
           ? renderColumn(detail.snapshot.pinnedRightColumnId)
@@ -2681,7 +2660,6 @@ type PaneFrameProps = {
   onMoveToCenter: () => void;
   onMoveToNewColumn: () => void;
   onClose: () => void;
-  onDragStartPane: (event: React.DragEvent<HTMLElement>) => void;
   onUpdatePane: (updater: (pane: PaneState) => PaneState) => void;
   subscribeSession: WorkspaceTaskspaceProps["subscribeSession"];
   onCreateSession: WorkspaceTaskspaceProps["onCreateSession"];
@@ -2710,7 +2688,6 @@ function PaneFrame(props: PaneFrameProps): React.ReactElement {
     onMoveToCenter,
     onMoveToNewColumn,
     onClose,
-    onDragStartPane,
     onUpdatePane,
     subscribeSession,
     onCreateSession,
@@ -2762,19 +2739,6 @@ function PaneFrame(props: PaneFrameProps): React.ReactElement {
     >
       <header className="pane-header">
         <div className="pane-title-row">
-          <button
-            type="button"
-            className="drag-handle"
-            draggable
-            aria-label={`Drag ${pane.title}`}
-            title={`Drag ${pane.title}`}
-            onMouseDown={(event) => {
-              event.stopPropagation();
-            }}
-            onDragStart={onDragStartPane}
-          >
-            ::
-          </button>
           {attentionClassName && (
             <span
               className={`agent-attention-dot ${attentionClassName}`}

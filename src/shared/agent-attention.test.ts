@@ -3,6 +3,7 @@ import {
   agentAttentionClassName,
   agentAttentionLabel,
   aggregateAgentAttentionStates,
+  aggregateWorkspaceAttentionState,
 } from "./agent-attention";
 
 describe("agent attention helpers", () => {
@@ -14,6 +15,24 @@ describe("agent attention helpers", () => {
 
   test("aggregates thinking ahead of seen idle", () => {
     expect(aggregateAgentAttentionStates([null, "idle-seen", "thinking"])).toBe("thinking");
+  });
+
+  test("aggregates live shell attention for workspace markers", () => {
+    expect(
+      aggregateWorkspaceAttentionState([
+        { kind: "shell", state: "live", agentAttentionState: "thinking" },
+        { kind: "codex", state: "live", agentAttentionState: null },
+      ]),
+    ).toBe("thinking");
+  });
+
+  test("ignores stopped and unsupported sessions for workspace markers", () => {
+    expect(
+      aggregateWorkspaceAttentionState([
+        { kind: "shell", state: "stopped", agentAttentionState: "thinking" },
+        { kind: "nvim", state: "live", agentAttentionState: "idle-unseen" },
+      ]),
+    ).toBeNull();
   });
 
   test("maps state labels and CSS classes", () => {
