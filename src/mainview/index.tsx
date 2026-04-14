@@ -119,6 +119,7 @@ const MAX_TERMINAL_WRITE_CHUNKS_PER_TICK = 4;
 const TERMINAL_INPUT_BATCH_DELAY_MS = 4;
 const TERMINAL_INPUT_BATCH_SIZE = 256;
 const TERMINAL_REQUEST_TIMEOUT_MS = 8_000;
+const FOCUSED_TERMINAL_RENDER_BURST_MS = 160;
 const MIN_STACK_PANE_HEIGHT_PX = 96;
 const KEYBOARD_COLUMN_RESIZE_STEP_PX = 80;
 const HORIZONTAL_WHEEL_FOCUS_THRESHOLD_PX = 80;
@@ -139,6 +140,7 @@ type PatchedGhosttyTerminal = Terminal & {
   __octtyRenderLoopMode?: TerminalRenderLoopMode;
   __octtyRenderLoopHandle?: number | null;
   __octtyRenderLoopSchedule?: "raf" | "timeout" | null;
+  __octtyRenderLoopBurstUntil?: number;
 };
 
 type TerminalRenderLoopMode = "stopped" | "focused" | "visible";
@@ -181,7 +183,8 @@ function scheduleTerminalRenderLoop(term: PatchedGhosttyTerminal): void {
     return;
   }
 
-  if (term.__octtyRenderLoopMode === "focused") {
+  const burstUntil = term.__octtyRenderLoopBurstUntil ?? 0;
+  if (term.__octtyRenderLoopMode === "focused" && window.performance.now() < burstUntil) {
     term.__octtyRenderLoopSchedule = "raf";
     term.__octtyRenderLoopHandle = window.requestAnimationFrame(() => {
       renderTerminalFrame(term);
@@ -197,6 +200,21 @@ function scheduleTerminalRenderLoop(term: PatchedGhosttyTerminal): void {
   }, ghosttyRenderIntervalMs);
 }
 
+function boostTerminalRenderLoop(term: Terminal, durationMs = FOCUSED_TERMINAL_RENDER_BURST_MS): void {
+  const patchedTerm = term as PatchedGhosttyTerminal;
+  if (patchedTerm.__octtyRenderLoopMode !== "focused") {
+    return;
+  }
+  patchedTerm.__octtyRenderLoopBurstUntil = Math.max(
+    patchedTerm.__octtyRenderLoopBurstUntil ?? 0,
+    window.performance.now() + durationMs,
+  );
+  if (patchedTerm.__octtyRenderLoopSchedule === "raf" && patchedTerm.__octtyRenderLoopHandle != null) {
+    return;
+  }
+  scheduleTerminalRenderLoop(patchedTerm);
+}
+
 function setTerminalRenderLoopMode(term: Terminal, mode: TerminalRenderLoopMode): void {
   const patchedTerm = term as PatchedGhosttyTerminal;
   if (patchedTerm.__octtyRenderLoopMode === mode && patchedTerm.__octtyRenderLoopHandle != null) {
@@ -204,6 +222,12 @@ function setTerminalRenderLoopMode(term: Terminal, mode: TerminalRenderLoopMode)
   }
 
   patchedTerm.__octtyRenderLoopMode = mode;
+  if (mode === "focused") {
+    patchedTerm.__octtyRenderLoopBurstUntil = Math.max(
+      patchedTerm.__octtyRenderLoopBurstUntil ?? 0,
+      window.performance.now() + FOCUSED_TERMINAL_RENDER_BURST_MS,
+    );
+  }
   scheduleTerminalRenderLoop(patchedTerm);
 }
 
@@ -545,6 +569,7 @@ function clampTerminalViewportY(term: Terminal, viewportY: number): number {
 }
 
 function writeTerminalChunk(term: Terminal, chunk: string): void {
+  boostTerminalRenderLoop(term);
   const previousViewportY = term.getViewportY();
   if (previousViewportY <= 0) {
     term.write(chunk);
@@ -621,6 +646,13 @@ function createTerminalRuntime(paneId: string): TerminalRuntime {
 
     return false;
   });
+  host.addEventListener(
+    "wheel",
+    () => {
+      boostTerminalRenderLoop(term, 300);
+    },
+    true,
+  );
   host.tabIndex = 0;
   host.setAttribute("spellcheck", "false");
   applyTerminalAppearanceToHost(host, term);
@@ -665,6 +697,7 @@ function createTerminalRuntime(paneId: string): TerminalRuntime {
     onExit: () => {},
     sendInput: () => {},
     enqueueInput(data: string) {
+      boostTerminalRenderLoop(term);
       if (!runtime.sessionId) {
         logTerminalUi("term-drop-data", () => ({
           paneId,
