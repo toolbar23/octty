@@ -225,10 +225,11 @@ state:
 The current working-copy diff is still tracked separately for the diff pane and
 for secondary status detail.
 
-Watch paths intentionally ignore heavy/noisy directories such as:
+Watch paths intentionally ignore heavy/noisy generated directories, but include
+`.jj` so JJ operations can refresh published/unpublished workspace markers.
+Ignored paths include:
 
 - `.git`
-- `.jj`
 - `node_modules`
 - `dist`
 - `.cache`

@@ -36,6 +36,7 @@ import { hasRecordedWorkspacePath } from "../shared/types";
 import {
   aggregateWorkspaceAttentionState,
   focusedShellAttentionState,
+  settledAgentAttentionState,
   settledShellAttentionState,
 } from "../shared/agent-attention";
 import { AppDatabase } from "./db";
@@ -44,7 +45,6 @@ import { readTerminalAppearanceConfig } from "./terminal-config";
 import {
   buildTerminalLaunch,
   createEmbeddedSessionCorrelationId,
-  detectAgentPrompt,
   detectEmbeddedSession,
   getEmbeddedSessionProvider,
 } from "./embedded-sessions";
@@ -588,26 +588,17 @@ export class WorkspaceService {
         return;
       }
 
-      if (!this.agentPendingSessions.has(sessionId) && session.agentAttentionState !== "thinking") {
+      if (!this.agentPendingSessions.has(sessionId)) {
         this.cancelAttentionSettle(sessionId);
         return;
       }
 
-      const promptVisible = detectAgentPrompt(
-        session.kind,
-        this.ptySidecar.captureScreen(sessionId),
+      this.agentPendingSessions.delete(sessionId);
+      this.setAgentAttentionState(
+        session,
+        settledAgentAttentionState(this.focusedAttentionSessions.has(sessionId)),
       );
-      if (promptVisible) {
-        this.agentPendingSessions.delete(sessionId);
-        this.setAgentAttentionState(
-          session,
-          this.focusedAttentionSessions.has(sessionId) ? "idle-seen" : "idle-unseen",
-        );
-        this.cancelAttentionSettle(sessionId);
-        return;
-      }
-
-      this.scheduleAgentAttentionSettle(sessionId);
+      this.cancelAttentionSettle(sessionId);
     }, 1_200);
     this.attentionTimers.set(sessionId, timer);
   }

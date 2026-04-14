@@ -12,6 +12,7 @@ describe("workspace watch ignores", () => {
     expect(shouldIgnoreWorkspaceWatchPath("/home/pm/lynx/bear/build/tmp")).toBe(true);
     expect(shouldIgnoreWorkspaceWatchPath("/home/pm/lynx/bear/out")).toBe(true);
     expect(shouldIgnoreWorkspaceWatchPath("/home/pm/lynx/bear/out/production")).toBe(true);
+    expect(shouldIgnoreWorkspaceWatchPath("/home/pm/lynx/bear/.jj/repo/op_heads")).toBe(false);
     expect(shouldIgnoreWorkspaceWatchPath("/home/pm/lynx/bear/src/main/java")).toBe(false);
   });
 
@@ -23,7 +24,6 @@ describe("workspace watch ignores", () => {
     ).toEqual([
       "/node_modules/",
       "/.git/",
-      "/.jj/",
       "/dist/",
       "/artifacts/",
       "/.cache/",

@@ -7,7 +7,6 @@ import {
   __testOnly,
   buildTerminalLaunch,
   createEmbeddedSessionCorrelationId,
-  detectAgentPrompt,
 } from "./embedded-sessions";
 
 describe("embedded session providers", () => {
@@ -180,14 +179,4 @@ describe("embedded session providers", () => {
       id: "019d869d-d5ca-74a3-a1ba-b8a23a3b09d6",
     });
   });
-
-  test("detects the codex prompt on an idle screen", () => {
-    expect(
-      detectAgentPrompt(
-        "codex",
-        "\u001b[2mTip\u001b[0m\n\n› Run /review on my current changes\n",
-      ),
-    ).toBe(true);
-  });
-
 });

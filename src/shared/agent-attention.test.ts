@@ -5,6 +5,7 @@ import {
   aggregateAgentAttentionStates,
   aggregateWorkspaceAttentionState,
   focusedShellAttentionState,
+  settledAgentAttentionState,
   settledShellAttentionState,
 } from "./agent-attention";
 
@@ -47,6 +48,11 @@ describe("agent attention helpers", () => {
   test("settles focused shells to no marker and unfocused shells to unseen", () => {
     expect(settledShellAttentionState(true)).toBeNull();
     expect(settledShellAttentionState(false)).toBe("idle-unseen");
+  });
+
+  test("settles focused agents to seen idle and unfocused agents to unseen", () => {
+    expect(settledAgentAttentionState(true)).toBe("idle-seen");
+    expect(settledAgentAttentionState(false)).toBe("idle-unseen");
   });
 
   test("maps state labels and CSS classes", () => {

@@ -36,6 +36,10 @@ export function settledShellAttentionState(focused: boolean): AgentAttentionStat
   return focused ? null : "idle-unseen";
 }
 
+export function settledAgentAttentionState(focused: boolean): AgentAttentionState {
+  return focused ? "idle-seen" : "idle-unseen";
+}
+
 export function agentAttentionLabel(state: AgentAttentionState | null | undefined): string | null {
   switch (state) {
     case "idle-seen":

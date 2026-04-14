@@ -1,7 +1,6 @@
 const DEFAULT_IGNORED_WORKSPACE_PATH_FRAGMENTS = [
   "/node_modules/",
   "/.git/",
-  "/.jj/",
   "/dist/",
   "/artifacts/",
   "/.cache/",
