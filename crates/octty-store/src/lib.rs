@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use octty_core::{ProjectRootRecord, WorkspaceSnapshot};
+use octty_core::{
+    AgentAttentionState, ProjectRootRecord, WorkspaceBookmarkRelation, WorkspaceSnapshot,
+    WorkspaceState, WorkspaceStatus, WorkspaceSummary,
+};
 use thiserror::Error;
 use turso::{Builder, Connection, Database, Value, params};
 
@@ -86,6 +89,114 @@ impl TursoStore {
             });
         }
         Ok(roots)
+    }
+
+    pub async fn upsert_workspace(&self, workspace: &WorkspaceSummary) -> Result<(), StoreError> {
+        let conn = self.connection().await?;
+        let bookmarks_json = serde_json::to_string(&workspace.status.bookmarks)?;
+        conn.execute(
+            "insert into workspaces (
+               id, root_id, root_path, project_label, workspace_name, display_name,
+               workspace_path, workspace_state, has_working_copy_changes, bookmarks,
+               bookmark_relation, unread_notes, active_agent_count, agent_attention_state,
+               recent_activity_at, diff_text, created_at, updated_at, last_opened_at
+             )
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+             on conflict(id) do update set
+               root_id = excluded.root_id,
+               root_path = excluded.root_path,
+               project_label = excluded.project_label,
+               workspace_name = excluded.workspace_name,
+               display_name = excluded.display_name,
+               workspace_path = excluded.workspace_path,
+               workspace_state = excluded.workspace_state,
+               has_working_copy_changes = excluded.has_working_copy_changes,
+               bookmarks = excluded.bookmarks,
+               bookmark_relation = excluded.bookmark_relation,
+               unread_notes = excluded.unread_notes,
+               active_agent_count = excluded.active_agent_count,
+               agent_attention_state = excluded.agent_attention_state,
+               recent_activity_at = excluded.recent_activity_at,
+               diff_text = excluded.diff_text,
+               updated_at = excluded.updated_at,
+               last_opened_at = excluded.last_opened_at",
+            params![
+                workspace.id.as_str(),
+                workspace.root_id.as_str(),
+                workspace.root_path.as_str(),
+                workspace.project_display_name.as_str(),
+                workspace.workspace_name.as_str(),
+                workspace.display_name.as_str(),
+                workspace.workspace_path.as_str(),
+                workspace_state_to_str(&workspace.status.workspace_state),
+                bool_to_int(workspace.status.has_working_copy_changes),
+                bookmarks_json.as_str(),
+                bookmark_relation_to_str(&workspace.status.bookmark_relation),
+                workspace.status.unread_notes,
+                workspace.status.active_agent_count,
+                optional_agent_attention_to_value(&workspace.status.agent_attention_state),
+                workspace.status.recent_activity_at,
+                workspace.status.diff_text.as_str(),
+                workspace.created_at,
+                workspace.updated_at,
+                workspace.last_opened_at
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_workspaces(&self) -> Result<Vec<WorkspaceSummary>, StoreError> {
+        let conn = self.connection().await?;
+        let mut rows = conn
+            .query(
+                "select id, root_id, root_path, project_label, workspace_name, display_name,
+                        workspace_path, workspace_state, has_working_copy_changes, bookmarks,
+                        bookmark_relation, unread_notes, active_agent_count, agent_attention_state,
+                        recent_activity_at, diff_text, created_at, updated_at, last_opened_at
+                 from workspaces
+                 order by project_label, workspace_name",
+                (),
+            )
+            .await?;
+        let mut workspaces = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let bookmarks = text(row.get_value(9)?, "bookmarks")?;
+            workspaces.push(WorkspaceSummary {
+                id: text(row.get_value(0)?, "id")?,
+                root_id: text(row.get_value(1)?, "root_id")?,
+                root_path: text(row.get_value(2)?, "root_path")?,
+                project_display_name: text(row.get_value(3)?, "project_label")?,
+                workspace_name: text(row.get_value(4)?, "workspace_name")?,
+                display_name: text(row.get_value(5)?, "display_name")?,
+                workspace_path: text(row.get_value(6)?, "workspace_path")?,
+                status: WorkspaceStatus {
+                    workspace_state: parse_workspace_state(&text(
+                        row.get_value(7)?,
+                        "workspace_state",
+                    )?),
+                    has_working_copy_changes: integer(
+                        row.get_value(8)?,
+                        "has_working_copy_changes",
+                    )? != 0,
+                    bookmarks: serde_json::from_str(&bookmarks).unwrap_or_default(),
+                    bookmark_relation: parse_bookmark_relation(&text(
+                        row.get_value(10)?,
+                        "bookmark_relation",
+                    )?),
+                    unread_notes: integer(row.get_value(11)?, "unread_notes")?,
+                    active_agent_count: integer(row.get_value(12)?, "active_agent_count")?,
+                    agent_attention_state: parse_optional_agent_attention(row.get_value(13)?)?,
+                    recent_activity_at: integer(row.get_value(14)?, "recent_activity_at")?,
+                    diff_text: text(row.get_value(15)?, "diff_text")?,
+                    ..WorkspaceStatus::default()
+                },
+                created_at: integer(row.get_value(16)?, "created_at")?,
+                updated_at: integer(row.get_value(17)?, "updated_at")?,
+                last_opened_at: integer(row.get_value(18)?, "last_opened_at")?,
+            });
+        }
+        Ok(workspaces)
     }
 
     pub async fn save_snapshot(&self, snapshot: &WorkspaceSnapshot) -> Result<(), StoreError> {
@@ -202,6 +313,9 @@ impl TursoStore {
 }
 
 pub fn default_store_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("OCTTY_RS_STATE_PATH") {
+        return PathBuf::from(path);
+    }
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
@@ -222,6 +336,73 @@ fn integer(value: Value, column: &'static str) -> Result<i64, StoreError> {
     match value {
         Value::Integer(value) => Ok(value),
         value => Err(StoreError::UnexpectedValue { column, value }),
+    }
+}
+
+fn bool_to_int(value: bool) -> i64 {
+    i64::from(value)
+}
+
+fn workspace_state_to_str(value: &WorkspaceState) -> &'static str {
+    match value {
+        WorkspaceState::Published => "published",
+        WorkspaceState::MergedLocal => "merged-local",
+        WorkspaceState::Draft => "draft",
+        WorkspaceState::Conflicted => "conflicted",
+        WorkspaceState::Unknown => "unknown",
+    }
+}
+
+fn parse_workspace_state(value: &str) -> WorkspaceState {
+    match value {
+        "published" => WorkspaceState::Published,
+        "merged-local" => WorkspaceState::MergedLocal,
+        "draft" => WorkspaceState::Draft,
+        "conflicted" => WorkspaceState::Conflicted,
+        _ => WorkspaceState::Unknown,
+    }
+}
+
+fn bookmark_relation_to_str(value: &WorkspaceBookmarkRelation) -> &'static str {
+    match value {
+        WorkspaceBookmarkRelation::None => "none",
+        WorkspaceBookmarkRelation::Exact => "exact",
+        WorkspaceBookmarkRelation::Above => "above",
+    }
+}
+
+fn parse_bookmark_relation(value: &str) -> WorkspaceBookmarkRelation {
+    match value {
+        "exact" => WorkspaceBookmarkRelation::Exact,
+        "above" => WorkspaceBookmarkRelation::Above,
+        _ => WorkspaceBookmarkRelation::None,
+    }
+}
+
+fn optional_agent_attention_to_value(
+    value: &Option<AgentAttentionState>,
+) -> Result<Value, turso::Error> {
+    Ok(match value {
+        Some(AgentAttentionState::IdleSeen) => Value::Text("idle-seen".to_owned()),
+        Some(AgentAttentionState::Thinking) => Value::Text("thinking".to_owned()),
+        Some(AgentAttentionState::IdleUnseen) => Value::Text("idle-unseen".to_owned()),
+        None => Value::Null,
+    })
+}
+
+fn parse_optional_agent_attention(value: Value) -> Result<Option<AgentAttentionState>, StoreError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Text(value) => Ok(match value.as_str() {
+            "idle-seen" => Some(AgentAttentionState::IdleSeen),
+            "thinking" => Some(AgentAttentionState::Thinking),
+            "idle-unseen" => Some(AgentAttentionState::IdleUnseen),
+            _ => None,
+        }),
+        value => Err(StoreError::UnexpectedValue {
+            column: "agent_attention_state",
+            value,
+        }),
     }
 }
 
@@ -261,6 +442,42 @@ mod tests {
             store.get_snapshot("workspace-1").await.unwrap(),
             Some(snapshot)
         );
+    }
+
+    #[tokio::test]
+    async fn round_trips_workspace_summaries() {
+        let store = TursoStore::open_memory().await.unwrap();
+        let root = ProjectRootRecord {
+            id: "root-1".to_owned(),
+            root_path: "/tmp/repo".to_owned(),
+            display_name: "repo".to_owned(),
+            created_at: 1,
+            updated_at: 2,
+        };
+        store.upsert_project_root(&root).await.unwrap();
+        let workspace = WorkspaceSummary {
+            id: "workspace-1".to_owned(),
+            root_id: root.id,
+            root_path: "/tmp/repo".to_owned(),
+            project_display_name: "repo".to_owned(),
+            workspace_name: "default".to_owned(),
+            display_name: "default".to_owned(),
+            workspace_path: "/tmp/repo".to_owned(),
+            status: WorkspaceStatus {
+                workspace_state: WorkspaceState::Draft,
+                has_working_copy_changes: true,
+                bookmarks: vec!["main".to_owned()],
+                bookmark_relation: WorkspaceBookmarkRelation::Exact,
+                ..WorkspaceStatus::default()
+            },
+            created_at: 3,
+            updated_at: 4,
+            last_opened_at: 5,
+        };
+
+        store.upsert_workspace(&workspace).await.unwrap();
+
+        assert_eq!(store.list_workspaces().await.unwrap(), vec![workspace]);
     }
 
     #[tokio::test]

@@ -43,6 +43,8 @@ It starts with empty state rather than importing the Electron SQLite database.
 cargo test --workspace --all-targets
 cargo run -p octty-app --bin octty-rs
 cargo run -p octty-app --bin octty-rs -- --headless-check
+cargo run -p octty-app --bin octty-rs -- --bootstrap-check
+OCTTY_RS_STATE_PATH=/tmp/octty-rs-check.turso cargo run -p octty-app --bin octty-rs -- --pane-check
 ```
 
 Rust scaffold pieces:

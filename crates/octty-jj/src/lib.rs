@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use octty_core::{
@@ -8,7 +8,7 @@ use octty_core::{
 use thiserror::Error;
 use tokio::process::Command;
 
-const WORKSPACE_LIST_SEPARATOR: &str = "\u{1f}";
+const WORKSPACE_LIST_SEPARATOR: &str = "\t";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscoveredWorkspace {
@@ -45,25 +45,41 @@ pub fn is_stale_workspace_error(message: &str) -> bool {
     message.contains("working copy is stale") && message.contains("jj workspace update-stale")
 }
 
+pub async fn resolve_repo_root(input_path: impl AsRef<Path>) -> Result<PathBuf, JjError> {
+    let input_path = input_path.as_ref();
+    let root = with_stale_retry(input_path, &["root", "-R", path_str(input_path)?]).await?;
+    Ok(tokio::fs::canonicalize(root.trim()).await?)
+}
+
 pub async fn discover_workspaces(
     root: &ProjectRootRecord,
 ) -> Result<Vec<WorkspaceSummary>, JjError> {
-    let template = format!("workspace ++ \"{WORKSPACE_LIST_SEPARATOR}\" ++ change_id ++ \"\\n\"");
+    let root_path = tokio::fs::canonicalize(&root.root_path).await?;
+    let root_path = path_str(&root_path)?;
+    let template =
+        format!("name ++ \"{WORKSPACE_LIST_SEPARATOR}\" ++ target.change_id().short() ++ \"\\n\"");
     let output = run_jj(
-        root.root_path.as_ref(),
-        &["workspace", "list", "--template", template.as_str()],
+        root_path.as_ref(),
+        &[
+            "workspace",
+            "list",
+            "-R",
+            root_path,
+            "--template",
+            template.as_str(),
+        ],
     )
     .await?;
     let entries = parse_workspace_list_output(&output);
     let mut summaries = Vec::with_capacity(entries.len());
     for entry in entries {
-        let workspace_path = workspace_path(&root.root_path, &entry.workspace_name)
+        let workspace_path = workspace_path(root_path, &entry.workspace_name)
             .await
             .unwrap_or_else(|_| encode_missing_workspace_path(&entry.workspace_name));
         summaries.push(WorkspaceSummary {
-            id: stable_workspace_id(&root.root_path, &entry.workspace_name),
+            id: stable_workspace_id(root_path, &entry.workspace_name),
             root_id: root.id.clone(),
-            root_path: root.root_path.clone(),
+            root_path: root_path.to_owned(),
             project_display_name: root.display_name.clone(),
             workspace_name: entry.workspace_name.clone(),
             display_name: entry.workspace_name,
@@ -113,10 +129,20 @@ pub async fn read_workspace_status(
 async fn workspace_path(root_path: &str, workspace_name: &str) -> Result<String, JjError> {
     let output = run_jj(
         root_path.as_ref(),
-        &["workspace", "root", "--workspace", workspace_name],
+        &[
+            "workspace",
+            "root",
+            "-R",
+            root_path,
+            "--name",
+            workspace_name,
+        ],
     )
     .await?;
-    Ok(output.trim().to_owned())
+    Ok(tokio::fs::canonicalize(output.trim())
+        .await?
+        .to_string_lossy()
+        .to_string())
 }
 
 async fn with_stale_retry(workspace_path: &Path, args: &[&str]) -> Result<String, JjError> {
@@ -152,6 +178,11 @@ fn stable_workspace_id(root_path: &str, workspace_name: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("workspace-{hash:016x}")
+}
+
+fn path_str(path: &Path) -> Result<&str, JjError> {
+    path.to_str()
+        .ok_or_else(|| JjError::Command(format!("path is not valid UTF-8: {}", path.display())))
 }
 
 #[cfg(test)]
