@@ -1,6 +1,8 @@
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { createInterface } from "node:readline";
 import type { SessionSnapshot, TerminalKind } from "../shared/types";
 import { sanitizeChildEnv } from "./env";
 import { defaultTerminalCommand, isAgentTerminalKind, normalizeTerminalKind } from "../shared/terminal-kind";
@@ -45,6 +47,7 @@ function resolveSidecarPath(): string {
   const sourceRoot = process.env.OCTTY_SOURCE_ROOT || process.env.WORKSPACE_ORBIT_SOURCE_ROOT;
   const candidates = [
     sourceRoot ? resolve(sourceRoot, "src/pty-host/index.mjs") : null,
+    sourceRoot ? resolve(sourceRoot, "runtime/pty-host/index.mjs") : null,
     resolve(process.cwd(), "src/pty-host/index.mjs"),
     resolve(process.cwd(), "runtime/pty-host/index.mjs"),
     new URL("../runtime/pty-host/index.mjs", import.meta.url).pathname,
@@ -120,75 +123,56 @@ type TmuxTarget = {
 export class PtySidecar {
   private readonly sessions = new Map<string, LiveSession>();
   private readonly listeners = new Set<SidecarListener>();
-  private readonly proc: ReturnType<typeof Bun.spawn>;
-  private readonly stdin: {
-    write: (chunk: string) => unknown;
-    end?: () => unknown;
-  };
+  private readonly proc: ChildProcessWithoutNullStreams;
   private readonly childEnv = sanitizeChildEnv();
   private readonly tmuxConfigPath = resolveTmuxConfigPath();
 
   constructor() {
     const sourceRoot = process.env.OCTTY_SOURCE_ROOT || process.env.WORKSPACE_ORBIT_SOURCE_ROOT;
-    const proc = Bun.spawn({
-      cmd: ["node", resolveSidecarPath()],
+    const proc = spawn("node", [resolveSidecarPath()], {
       cwd: sourceRoot || process.cwd(),
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
       env: this.childEnv,
+      stdio: ["pipe", "pipe", "pipe"],
     });
 
     this.proc = proc;
-    this.stdin = proc.stdin as unknown as {
-      write: (chunk: string) => unknown;
-      end?: () => unknown;
-    };
     this.consumeStdout(proc.stdout);
     this.consumeStderr(proc.stderr);
   }
 
-  private async consumeStdout(stream: ReadableStream<Uint8Array>): Promise<void> {
-    const reader = stream.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
+  private consumeStdout(stream: NodeJS.ReadableStream): void {
+    const reader = createInterface({ input: stream });
+    reader.on("line", (line) => {
+      if (!line.trim()) {
         return;
       }
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-
-      for (const line of lines) {
-        if (!line.trim()) {
-          continue;
+      const message = JSON.parse(line) as Parameters<SidecarListener>[0];
+      if (message.type === "exit" && message.sessionId) {
+        const session = this.sessions.get(message.sessionId);
+        if (session) {
+          session.state = "stopped";
+          session.exitCode = message.exitCode ?? null;
         }
-        const message = JSON.parse(line) as Parameters<SidecarListener>[0];
-        if (message.type === "exit" && message.sessionId) {
-          const session = this.sessions.get(message.sessionId);
-          if (session) {
-            session.state = "stopped";
-            session.exitCode = message.exitCode ?? null;
-          }
-        }
-        this.listeners.forEach((listener) => listener(message));
       }
-    }
+      this.listeners.forEach((listener) => listener(message));
+    });
   }
 
-  private async consumeStderr(stream: ReadableStream<Uint8Array>): Promise<void> {
-    const text = await new Response(stream).text();
-    if (text.trim()) {
-      console.error("[pty-sidecar]", text.trim());
-    }
+  private consumeStderr(stream: NodeJS.ReadableStream): void {
+    const chunks: Buffer[] = [];
+    stream.on("data", (chunk: Buffer | string) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    stream.on("end", () => {
+      const text = Buffer.concat(chunks).toString("utf8").trim();
+      if (text) {
+        console.error("[pty-sidecar]", text);
+      }
+    });
   }
 
   private send(message: SidecarEnvelope): void {
-    this.stdin.write(`${JSON.stringify(message)}\n`);
+    this.proc.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
   private tmuxCommandArgs(mode: TmuxTarget["mode"], args: string[]): string[] {
@@ -202,30 +186,25 @@ export class PtySidecar {
     args: string[],
     mode: TmuxTarget["mode"] = "octty",
   ): { success: boolean; stdout: string; stderr: string } {
-    const result = Bun.spawnSync({
-      cmd: ["tmux", ...this.tmuxCommandArgs(mode, args)],
+    const result = spawnSync("tmux", this.tmuxCommandArgs(mode, args), {
       cwd: process.cwd(),
       env: this.childEnv,
-      stdout: "pipe",
-      stderr: "pipe",
+      encoding: "utf8",
     });
-    const decoder = new TextDecoder();
     return {
-      success: result.exitCode === 0,
-      stdout: decoder.decode(result.stdout),
-      stderr: decoder.decode(result.stderr),
+      success: result.status === 0,
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
     };
   }
 
   private spawnTmux(args: string[], mode: TmuxTarget["mode"] = "octty"): void {
-    const proc = Bun.spawn({
-      cmd: ["tmux", ...this.tmuxCommandArgs(mode, args)],
+    const proc = spawn("tmux", this.tmuxCommandArgs(mode, args), {
       cwd: process.cwd(),
       env: this.childEnv,
-      stdout: "ignore",
-      stderr: "ignore",
+      stdio: "ignore",
     });
-    void proc.exited.catch(() => {});
+    proc.unref();
   }
 
   private resolveTmuxTarget(sessionId: string): TmuxTarget {
@@ -396,7 +375,7 @@ export class PtySidecar {
     for (const sessionId of Array.from(this.sessions.keys())) {
       this.detach(sessionId);
     }
-    this.stdin.end?.();
+    this.proc.stdin.end();
     this.proc.kill();
   }
 }

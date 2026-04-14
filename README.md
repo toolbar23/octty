@@ -1,6 +1,6 @@
 # Octty
 
-Octty is an Electrobun desktop app for working across many JJ workspaces.
+Octty is an Electron desktop app for working across many JJ workspaces.
 
 It keeps repo and workspace state on disk, stores cached UI state in a local SQLite database, and restores taskspaces with panes such as:
 
@@ -12,35 +12,41 @@ It keeps repo and workspace state on disk, stores cached UI state in a local SQL
 
 ## Prerequisites
 
-- Bun
-- Electrobun
+- Node.js
+- npm
 - `jj`
 - `tmux`
 
 ## Development
 
 ```bash
-bun install
-bun run dev
+npm install
+npm run dev
 ```
 
 Useful commands:
 
 ```bash
-bun run build
-bun run typecheck
-bun test
+npm run build
+npm run typecheck
+npm test
 ```
 
 Per-tool launch arguments can be configured with environment variables:
 
 ```bash
-OCTTY_TERMINAL_ARGS_CODEX='--profile dev --approval-mode "never ask"' bun run dev
-OCTTY_TERMINAL_ARGS_PI='--some-flag value' bun run dev
+OCTTY_TERMINAL_ARGS_CODEX='--profile dev --approval-mode "never ask"' npm run dev
+OCTTY_TERMINAL_ARGS_PI='--some-flag value' npm run dev
 ```
 
 Octty inserts these arguments immediately after the executable, so a resumed Codex pane launches as
 `codex <your args> resume <session-id>`.
+
+Terminal font rendering can also be tuned from the environment:
+
+```bash
+OCTTY_TERMINAL_FONT_FAMILY='"Iosevka Term", monospace' OCTTY_TERMINAL_FONT_SIZE=15 npm run dev
+```
 
 ## Storage
 

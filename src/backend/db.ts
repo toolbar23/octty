@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { Database } from "bun:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import type {
   BrowserRefRecord,
   ProjectRootRecord,
@@ -11,11 +11,11 @@ import type {
 import { normalizeTerminalKind } from "../shared/terminal-kind";
 
 export class AppDatabase {
-  private readonly db: Database;
+  private readonly db: DatabaseSync;
 
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
-    this.db = new Database(dbPath);
+    this.db = new DatabaseSync(dbPath);
     this.db.exec("pragma journal_mode = WAL;");
     this.db.exec("pragma foreign_keys = ON;");
     this.init();
@@ -182,7 +182,7 @@ export class AppDatabase {
         from project_roots
         order by label asc
       `)
-      .all() as ProjectRootRecord[];
+      .all() as unknown as ProjectRootRecord[];
   }
 
   deleteProjectRoot(rootId: string): void {
@@ -402,7 +402,8 @@ export class AppDatabase {
   }
 
   saveSnapshot(snapshot: WorkspaceSnapshot): void {
-    const transaction = this.db.transaction((value: WorkspaceSnapshot) => {
+    this.db.exec("begin");
+    try {
       const existingSessionRows = this.db
         .prepare(`
           select
@@ -419,7 +420,7 @@ export class AppDatabase {
           from session_state
           where workspace_id = ?
         `)
-        .all(value.workspaceId) as Array<{
+        .all(snapshot.workspaceId) as Array<{
           paneId: string;
           sessionId: string | null;
           kind: string;
@@ -435,12 +436,12 @@ export class AppDatabase {
         existingSessionRows.map((row) => [row.paneId, row]),
       );
 
-      this.saveSnapshotDocument(value);
+      this.saveSnapshotDocument(snapshot);
 
-      this.db.prepare("delete from browser_refs where workspace_id = ?").run(value.workspaceId);
-      this.db.prepare("delete from session_state where workspace_id = ?").run(value.workspaceId);
+      this.db.prepare("delete from browser_refs where workspace_id = ?").run(snapshot.workspaceId);
+      this.db.prepare("delete from session_state where workspace_id = ?").run(snapshot.workspaceId);
 
-      for (const pane of Object.values(value.panes)) {
+      for (const pane of Object.values(snapshot.panes)) {
         if (pane.type === "browser") {
           const payload = pane.payload as { url: string; title: string };
           this.db
@@ -448,7 +449,7 @@ export class AppDatabase {
               insert into browser_refs (workspace_id, pane_id, url, title, updated_at)
               values (?, ?, ?, ?, ?)
             `)
-            .run(value.workspaceId, pane.id, payload.url, payload.title, Date.now());
+            .run(snapshot.workspaceId, pane.id, payload.url, payload.title, Date.now());
         }
 
         if (pane.type === "shell" || pane.type === "agent-shell") {
@@ -517,7 +518,7 @@ export class AppDatabase {
             `)
             .run(
               pane.id,
-              value.workspaceId,
+              snapshot.workspaceId,
               persistedSessionId,
               persistedKind,
               persistedCwd,
@@ -532,9 +533,11 @@ export class AppDatabase {
             );
         }
       }
-    });
-
-    transaction(snapshot);
+      this.db.exec("commit");
+    } catch (error) {
+      this.db.exec("rollback");
+      throw error;
+    }
   }
 
   getSnapshot(workspaceId: string): WorkspaceSnapshot | null {
@@ -566,7 +569,7 @@ export class AppDatabase {
         where workspace_id = ?
         order by updated_at desc
       `)
-      .all(workspaceId) as BrowserRefRecord[];
+      .all(workspaceId) as unknown as BrowserRefRecord[];
   }
 
   upsertNoteState(note: {

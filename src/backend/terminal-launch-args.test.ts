@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { describe, expect, test, vi } from "vitest";
 import {
   applyConfiguredTerminalArgs,
   configuredTerminalArgs,
@@ -22,7 +22,7 @@ describe("terminal launch args", () => {
   });
 
   test("ignores invalid shell syntax in configured args", () => {
-    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     expect(
       configuredTerminalArgs("codex", {

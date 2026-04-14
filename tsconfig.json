@@ -9,9 +9,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "types": [
-      "bun-types"
-    ],
+    "types": ["node"],
     "lib": [
       "ES2022",
       "DOM",
@@ -19,9 +17,9 @@
     ]
   },
   "include": [
-    "electrobun.config.ts",
     "src/**/*.ts",
     "src/**/*.tsx",
-    "src/**/*.d.ts"
+    "src/**/*.d.ts",
+    "scripts/**/*.mjs"
   ]
 }

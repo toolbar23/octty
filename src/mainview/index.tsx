@@ -1,5 +1,5 @@
-import { Electroview } from "electrobun/view";
 import { init as initGhostty, Terminal, FitAddon, type ITheme } from "ghostty-web";
+import "./index.css";
 import React, {
   useCallback,
   useEffect,
@@ -62,16 +62,14 @@ import {
   terminalKindLabel,
 } from "../shared/terminal-kind";
 import {
+  defaultTerminalAppearanceConfig,
+  type TerminalAppearanceConfig,
+} from "../shared/terminal-font";
+import {
   workspaceStateClassName,
   workspaceStateLabel,
 } from "../shared/workspace-state";
-
-const apiOrigin =
-  document
-    .querySelector('meta[name="octty-api-origin"], meta[name="workspace-orbit-api-origin"]')
-    ?.getAttribute("content") ??
-  new URLSearchParams(window.location.search).get("apiOrigin") ??
-  "http://127.0.0.1:0";
+import { desktopClient } from "./desktop-client";
 const debugTerminal =
   document.querySelector('meta[name="octty-debug-terminal"], meta[name="workspace-orbit-debug-terminal"]')?.getAttribute("content") ===
   "1";
@@ -96,7 +94,6 @@ const ghosttyRenderIntervalMs = Math.max(
     10,
   ) || 80,
 );
-const wsOrigin = apiOrigin.replace("http://", "ws://").replace("https://", "wss://");
 let ghosttyInitPromise: Promise<void> | null = null;
 let forwardTerminalUiDebug:
   | ((message: string, details: Record<string, unknown>) => void)
@@ -160,30 +157,16 @@ function trackRendererDebugRate(key: string, sample?: Record<string, unknown>): 
   }, 1_000);
 }
 
-function isElectrobunRuntime(): boolean {
-  const electrobunWindow = window as Window & {
-    __electrobun?: unknown;
-    __electrobunRpcSocketPort?: unknown;
-    __electrobunWebviewId?: unknown;
-  };
-
-  return (
-    typeof electrobunWindow.__electrobun === "object" &&
-    typeof electrobunWindow.__electrobunRpcSocketPort === "number" &&
-    typeof electrobunWindow.__electrobunWebviewId === "number"
-  );
-}
-
 type WorkspaceOrbitWindow = Window & {
   __workspaceOrbitHandleClosePane?: () => void;
   __workspaceOrbitInvokeShortcut?: (action: string) => void;
 };
 
-type ShortcutBridgeEvent = CustomEvent<string>;
-
-if (isElectrobunRuntime()) {
-  new Electroview({ rpc: null as any });
+function desktop() {
+  return desktopClient.bridge();
 }
+
+type ShortcutBridgeEvent = CustomEvent<string>;
 
 function patchGhosttyRenderLoop(): void {
   if (ghosttyRenderLoopPatched || ghosttyRenderLoopMode === "raf") {
@@ -246,27 +229,6 @@ async function ensureGhostty(): Promise<void> {
   await ghosttyInitPromise;
 }
 
-async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiOrigin}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers ?? {}),
-    },
-  });
-
-  if (!response.ok) {
-    const data = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(data?.error || `Request failed: ${response.status}`);
-  }
-
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  return (await response.json()) as T;
-}
-
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer = 0;
   const timeout = new Promise<never>((_, reject) => {
@@ -319,6 +281,7 @@ type KeyboardNavigationRequest = {
 };
 
 const paneFocusRegistry = new Map<string, () => boolean>();
+let terminalAppearance = defaultTerminalAppearanceConfig();
 
 type TerminalRuntime = {
   paneId: string;
@@ -384,9 +347,28 @@ function applyTerminalTheme(term: Terminal): void {
   term.renderer?.setTheme(theme);
 }
 
+function applyTerminalAppearanceToHost(host: HTMLDivElement, term: Terminal): void {
+  host.style.fontFamily = terminalAppearance.fontFamily;
+  host.style.fontKerning = "none";
+  host.style.fontVariantLigatures = "none";
+  host.style.textRendering = "geometricPrecision";
+  term.options.fontFamily = terminalAppearance.fontFamily;
+  term.options.fontSize = terminalAppearance.fontSize;
+  term.renderer?.remeasureFont();
+}
+
 function refreshTerminalThemes(): void {
   for (const runtime of terminalRuntimeRegistry.values()) {
     applyTerminalTheme(runtime.term);
+  }
+}
+
+function refreshConnectedTerminalMetrics(): void {
+  for (const runtime of terminalRuntimeRegistry.values()) {
+    applyTerminalAppearanceToHost(runtime.host, runtime.term);
+    if (runtime.host.isConnected) {
+      runtime.fitAddon.fit();
+    }
   }
 }
 
@@ -394,6 +376,15 @@ if (typeof window.matchMedia === "function") {
   window
     .matchMedia("(prefers-color-scheme: dark)")
     .addEventListener("change", refreshTerminalThemes);
+}
+
+if (typeof document.fonts?.addEventListener === "function") {
+  document.fonts.addEventListener("loadingdone", refreshConnectedTerminalMetrics);
+}
+if (typeof document.fonts?.ready?.then === "function") {
+  void document.fonts.ready.then(() => {
+    refreshConnectedTerminalMetrics();
+  });
 }
 
 function formatTerminalChunk(data: string, limit = 120): string {
@@ -415,8 +406,8 @@ function createTerminalRuntime(paneId: string): TerminalRuntime {
   host.style.height = "100%";
 
   const term = new Terminal({
-    fontSize: 15,
-    fontFamily: "JetBrains Mono, monospace",
+    fontSize: terminalAppearance.fontSize,
+    fontFamily: terminalAppearance.fontFamily,
     theme: getTerminalTheme(),
   });
   const fitAddon = new FitAddon();
@@ -453,6 +444,7 @@ function createTerminalRuntime(paneId: string): TerminalRuntime {
   });
   host.tabIndex = 0;
   host.setAttribute("spellcheck", "false");
+  applyTerminalAppearanceToHost(host, term);
   scrubTerminalSurface(host);
   fitAddon.fit();
 
@@ -732,59 +724,6 @@ function logTerminalUi(
   }
 }
 
-function summarizeSocketMessage(message: unknown): Record<string, unknown> {
-  if (!message || typeof message !== "object") {
-    return { message };
-  }
-
-  const data = message as { type?: unknown; payload?: Record<string, unknown> | null };
-  const payload = data.payload ?? {};
-
-  if (data.type === "terminal-input") {
-    return {
-      type: data.type,
-      sessionId: typeof payload.sessionId === "string" ? payload.sessionId : null,
-      data:
-        typeof payload.data === "string" ? formatTerminalChunk(payload.data) : String(payload.data),
-    };
-  }
-
-  if (data.type === "terminal-resize") {
-    return {
-      type: data.type,
-      sessionId: typeof payload.sessionId === "string" ? payload.sessionId : null,
-      cols: typeof payload.cols === "number" ? payload.cols : null,
-      rows: typeof payload.rows === "number" ? payload.rows : null,
-    };
-  }
-
-  if (data.type === "terminal-focus") {
-    return {
-      type: data.type,
-      sessionId: typeof payload.sessionId === "string" ? payload.sessionId : null,
-      focused: typeof payload.focused === "boolean" ? payload.focused : null,
-    };
-  }
-
-  if (data.type === "terminal-detach") {
-    return {
-      type: data.type,
-      sessionId: typeof payload.sessionId === "string" ? payload.sessionId : null,
-    };
-  }
-
-  if (data.type === "terminal-close") {
-    return {
-      type: data.type,
-      sessionId: typeof payload.sessionId === "string" ? payload.sessionId : null,
-    };
-  }
-
-  return {
-    type: typeof data.type === "string" ? data.type : String(data.type ?? "unknown"),
-  };
-}
-
 type LayoutDragPayload =
   | { type: "column"; columnId: string }
   | { type: "pane"; paneId: string };
@@ -978,6 +917,7 @@ function App(): React.ReactElement {
   const [bootstrap, setBootstrap] = useState<BootstrapPayload>({
     projectRoots: [],
     workspaces: [],
+    terminalAppearance: defaultTerminalAppearanceConfig(),
   });
   const [details, setDetails] = useState<Record<string, WorkspaceDetail>>({});
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
@@ -998,7 +938,6 @@ function App(): React.ReactElement {
   const detailsRef = useRef(details);
   const sessionListenersRef = useRef<Map<string, Set<(event: SessionEvent) => void>>>(new Map());
   const snapshotTimersRef = useRef<Map<string, number>>(new Map());
-  const socketRef = useRef<WebSocket | null>(null);
   const activeWorkspaceIdRef = useRef<string | null>(null);
   const activeDetail = activeWorkspaceId ? details[activeWorkspaceId] ?? null : null;
 
@@ -1009,6 +948,11 @@ function App(): React.ReactElement {
   useEffect(() => {
     activeWorkspaceIdRef.current = activeWorkspaceId;
   }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    terminalAppearance = bootstrap.terminalAppearance;
+    refreshConnectedTerminalMetrics();
+  }, [bootstrap.terminalAppearance]);
 
   useEffect(() => {
     const handlePointerDown = (event: PointerEvent) => {
@@ -1063,10 +1007,7 @@ function App(): React.ReactElement {
     }
 
     const timer = window.setTimeout(() => {
-      void apiFetch<WorkspaceSnapshot>(`/api/workspaces/${encodeURIComponent(workspaceId)}/snapshot`, {
-        method: "POST",
-        body: JSON.stringify({ snapshot }),
-      }).catch((err) => {
+      void desktop().saveSnapshot(workspaceId, snapshot).catch((err) => {
         setError(err instanceof Error ? err.message : String(err));
       });
     }, 220);
@@ -1116,13 +1057,7 @@ function App(): React.ReactElement {
       setLoadingWorkspaceId(hasCachedDetail ? null : workspaceId);
       setError(null);
       try {
-        const detail = await apiFetch<WorkspaceDetail>(
-          `/api/workspaces/${encodeURIComponent(workspaceId)}/open`,
-          {
-            method: "POST",
-            body: JSON.stringify({ viewportWidth: currentViewportWidth() }),
-          },
-        );
+        const detail = await desktop().openWorkspace(workspaceId, currentViewportWidth());
         setDetails((current) => ({
           ...current,
           [workspaceId]: detail,
@@ -1141,7 +1076,8 @@ function App(): React.ReactElement {
   );
 
   useEffect(() => {
-    void apiFetch<BootstrapPayload>("/api/bootstrap")
+    void desktop()
+      .getBootstrap()
       .then((payload) => {
         setBootstrap(payload);
       })
@@ -1151,28 +1087,13 @@ function App(): React.ReactElement {
   }, []);
 
   useEffect(() => {
-    const socket = new WebSocket(`${wsOrigin}/ws`);
-    socketRef.current = socket;
     const forwarder = (message: string, details: Record<string, unknown>) => {
-      if (socket.readyState !== WebSocket.OPEN) {
-        return;
+      if (debugTerminal || debugMessageRates) {
+        console.log("[terminal-ui]", message, details);
       }
-      socket.send(
-        JSON.stringify({
-          type: "terminal-ui-debug",
-          payload: { message, details },
-        }),
-      );
     };
     forwardTerminalUiDebug = forwarder;
-    socket.addEventListener("open", () => {
-      logTerminalUi("socket-open", {});
-    });
-    socket.addEventListener("close", (event) => {
-      logTerminalUi("socket-close", { code: event.code, reason: event.reason });
-    });
-    socket.addEventListener("message", (event) => {
-      const message = JSON.parse(event.data) as { type: string; payload: unknown };
+    const unsubscribe = desktop().onWorkspaceEvent((message) => {
       trackRendererDebugRate(`ws:recv:${message.type}`);
 
       if (message.type === "nav-updated") {
@@ -1276,37 +1197,15 @@ function App(): React.ReactElement {
       if (forwardTerminalUiDebug === forwarder) {
         forwardTerminalUiDebug = null;
       }
-      socketRef.current = null;
-      socket.close();
+      unsubscribe();
     };
-  }, [emitSession, wsOrigin]);
-
-  const sendSocketMessage = useCallback((message: unknown) => {
-    const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      logTerminalUi("socket-drop", () => ({
-        readyState: socket?.readyState ?? null,
-        ...summarizeSocketMessage(message),
-      }));
-      return;
-    }
-    const summary = summarizeSocketMessage(message);
-    trackRendererDebugRate(`ws:send:${String(summary.type ?? "unknown")}`, summary);
-    logTerminalUi("socket-send", () => ({
-      readyState: socket.readyState,
-      ...summary,
-    }));
-    socket.send(JSON.stringify(message));
-  }, []);
+  }, [debugMessageRates, debugTerminal, emitSession]);
 
   const browseRoot = useCallback(async () => {
     try {
-      const data = await apiFetch<{ path: string | null }>("/api/dialog/directory", {
-        method: "POST",
-        body: JSON.stringify({ startingFolder: rootPathInput || undefined }),
-      });
-      if (data.path) {
-        setRootPathInput(data.path);
+      const path = await desktop().pickDirectory(rootPathInput || undefined);
+      if (path) {
+        setRootPathInput(path);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -1315,10 +1214,7 @@ function App(): React.ReactElement {
 
   const submitRoot = useCallback(async () => {
     try {
-      await apiFetch("/api/project-roots", {
-        method: "POST",
-        body: JSON.stringify({ path: rootPathInput }),
-      });
+      await desktop().addProjectRoot(rootPathInput);
       setShowRootForm(false);
       setRootPathInput("");
     } catch (err) {
@@ -1329,11 +1225,8 @@ function App(): React.ReactElement {
   const createWorkspace = useCallback(async (rootId: string) => {
     setCreatingWorkspaceRootId(rootId);
     try {
-      const workspace = await apiFetch<WorkspaceSummary>("/api/workspaces", {
-        method: "POST",
-        body: JSON.stringify({
-          rootId,
-        }),
+      const workspace = await desktop().createWorkspace({
+        rootId,
       });
       setBootstrap((current) => ({
         ...current,
@@ -1354,9 +1247,7 @@ function App(): React.ReactElement {
     }
 
     try {
-      await apiFetch(`/api/workspaces/${encodeURIComponent(workspaceId)}`, {
-        method: "DELETE",
-      });
+      await desktop().forgetWorkspace(workspaceId);
       setDetails((current) => {
         const next = { ...current };
         delete next[workspaceId];
@@ -1379,9 +1270,7 @@ function App(): React.ReactElement {
     }
 
     try {
-      await apiFetch(`/api/workspaces/${encodeURIComponent(workspace.id)}/delete-and-forget`, {
-        method: "POST",
-      });
+      await desktop().deleteAndForgetWorkspace(workspace.id);
       setDetails((current) => {
         const next = { ...current };
         delete next[workspace.id];
@@ -1402,9 +1291,7 @@ function App(): React.ReactElement {
     }
 
     try {
-      await apiFetch(`/api/project-roots/${encodeURIComponent(rootId)}`, {
-        method: "DELETE",
-      });
+      await desktop().removeProjectRoot(rootId);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -1430,13 +1317,7 @@ function App(): React.ReactElement {
     }
 
     try {
-      const root = await apiFetch<BootstrapPayload["projectRoots"][number]>(
-        `/api/project-roots/${encodeURIComponent(rootId)}/display-name`,
-        {
-          method: "PUT",
-          body: JSON.stringify({ displayName: nextDisplayName }),
-        },
-      );
+      const root = await desktop().updateProjectRootDisplayName(rootId, nextDisplayName);
       setBootstrap((current) => ({
         ...current,
         projectRoots: mergeProjectRoot(current.projectRoots, root),
@@ -1456,13 +1337,7 @@ function App(): React.ReactElement {
     }
 
     try {
-      const workspace = await apiFetch<WorkspaceSummary>(
-        `/api/workspaces/${encodeURIComponent(workspaceId)}/display-name`,
-        {
-          method: "PUT",
-          body: JSON.stringify({ displayName: nextDisplayName }),
-        },
-      );
+      const workspace = await desktop().updateWorkspaceDisplayName(workspaceId, nextDisplayName);
       setBootstrap((current) => ({
         ...current,
         workspaces: mergeWorkspace(current.workspaces, workspace),
@@ -1490,18 +1365,13 @@ function App(): React.ReactElement {
   const createTerminalSession = useCallback(
     async (workspaceId: string, paneId: string, kind: TerminalKind, cols = 120, rows = 32) => {
       const session = await withTimeout(
-        apiFetch<SessionSnapshot>(
-          `/api/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              paneId,
-              kind,
-              cols,
-              rows,
-            }),
-          },
-        ),
+        desktop().createTerminalSession({
+          workspaceId,
+          paneId,
+          kind,
+          cols,
+          rows,
+        }),
         TERMINAL_REQUEST_TIMEOUT_MS,
         "Terminal session start",
       );
@@ -1682,10 +1552,7 @@ function App(): React.ReactElement {
           if (activePane.type === "shell") {
             const payload = activePane.payload as TerminalPanePayload;
             if (payload.sessionId) {
-              sendSocketMessage({
-                type: "terminal-close",
-                payload: { sessionId: payload.sessionId },
-              });
+              desktop().closeTerminal(payload.sessionId);
             }
             destroyTerminalRuntime(activePane.id);
           }
@@ -1706,7 +1573,6 @@ function App(): React.ReactElement {
       bootstrap.workspaces,
       loadWorkspace,
       mutateWorkspace,
-      sendSocketMessage,
     ],
   );
 
@@ -2145,13 +2011,7 @@ function App(): React.ReactElement {
                   }))
                 }
                 onCreateNote={async (fileName) => {
-                  const note = await apiFetch<NoteRecord>(
-                    `/api/workspaces/${encodeURIComponent(activeDetail.workspace.id)}/notes`,
-                    {
-                      method: "POST",
-                      body: JSON.stringify({ fileName }),
-                    },
-                  );
+                  const note = await desktop().createNote(activeDetail.workspace.id, fileName);
                   setDetails((current) => ({
                     ...current,
                     [activeDetail.workspace.id]: {
@@ -2162,13 +2022,7 @@ function App(): React.ReactElement {
                   return note;
                 }}
                 onSaveNote={async (path, body) => {
-                  const note = await apiFetch<NoteRecord>(
-                    `/api/workspaces/${encodeURIComponent(activeDetail.workspace.id)}/notes`,
-                    {
-                      method: "PUT",
-                      body: JSON.stringify({ path, body }),
-                    },
-                  );
+                  const note = await desktop().saveNote(activeDetail.workspace.id, path, body);
                   setDetails((current) => ({
                     ...current,
                     [activeDetail.workspace.id]: {
@@ -2181,42 +2035,14 @@ function App(): React.ReactElement {
                   return note;
                 }}
                 onMarkNoteRead={async (path) => {
-                  await apiFetch<void>(
-                    `/api/workspaces/${encodeURIComponent(activeDetail.workspace.id)}/notes/read`,
-                    {
-                      method: "POST",
-                      body: JSON.stringify({ path }),
-                    },
-                  );
+                  await desktop().markNoteRead(activeDetail.workspace.id, path);
                 }}
                 onCreateSession={createTerminalSession}
-                onFetchSession={async (sessionId) =>
-                  apiFetch<SessionSnapshot>(`/api/sessions/${encodeURIComponent(sessionId)}`)
-                }
-                onSendSessionInput={(sessionId, data) =>
-                  sendSocketMessage({
-                    type: "terminal-input",
-                    payload: { sessionId, data },
-                  })
-                }
-                onResizeSession={(sessionId, cols, rows) =>
-                  sendSocketMessage({
-                    type: "terminal-resize",
-                    payload: { sessionId, cols, rows },
-                  })
-                }
-                onSetSessionFocus={(sessionId, focused) =>
-                  sendSocketMessage({
-                    type: "terminal-focus",
-                    payload: { sessionId, focused },
-                  })
-                }
-                onCloseSession={(sessionId) =>
-                  sendSocketMessage({
-                    type: "terminal-close",
-                    payload: { sessionId },
-                  })
-                }
+                onFetchSession={(sessionId) => desktop().getSession(sessionId)}
+                onSendSessionInput={(sessionId, data) => desktop().sendTerminalInput(sessionId, data)}
+                onResizeSession={(sessionId, cols, rows) => desktop().resizeTerminal(sessionId, cols, rows)}
+                onSetSessionFocus={(sessionId, focused) => desktop().focusTerminal(sessionId, focused)}
+                onCloseSession={(sessionId) => desktop().closeTerminal(sessionId)}
                 onAddPane={(type, terminalKind) =>
                   addPaneToWorkspace(activeDetail.workspace.id, type, terminalKind)
                 }
@@ -3582,8 +3408,6 @@ function NotePane({
 
 function BrowserPane({
   pane,
-  isActive,
-  isVisible,
   onUpdatePane,
 }: {
   pane: PaneState;
@@ -3592,137 +3416,43 @@ function BrowserPane({
   onUpdatePane: (updater: (pane: PaneState) => PaneState) => void;
 }): React.ReactElement {
   const payload = pane.payload as BrowserPanePayload;
-  const webviewRef = useRef<HTMLElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const toolbarId = `browser-toolbar-${pane.id}`;
   const [urlValue, setUrlValue] = useState(payload.url);
 
   useEffect(() => {
     setUrlValue(payload.url);
   }, [payload.url]);
 
-  useEffect(() => {
-    const webview = webviewRef.current as HTMLElement & {
-      webviewId?: number | null;
-      toggleHidden?: (value?: boolean) => void;
-      togglePassthrough?: (value?: boolean) => void;
-    } | null;
-    if (!webview) {
-      return;
-    }
-
-    const timers: number[] = [];
-    let disposed = false;
-
-    const syncInteractionState = () => {
-      if (disposed) {
-        return;
-      }
-      trackRendererDebugRate("browser:sync-interaction", {
-        paneId: pane.id,
-        isVisible,
-        isActive,
-        webviewId: webview.webviewId ?? null,
-      });
-      webview.toggleHidden?.(!isVisible);
-      webview.togglePassthrough?.(!isActive);
-    };
-
-    syncInteractionState();
-
-    if (webview.webviewId == null) {
-      for (const delayMs of [16, 64, 160, 320]) {
-        timers.push(window.setTimeout(syncInteractionState, delayMs));
-      }
-    }
-
-    return () => {
-      disposed = true;
-      for (const timer of timers) {
-        window.clearTimeout(timer);
-      }
-    };
-  }, [isActive, isVisible]);
-
-  useEffect(() => {
-    const webview = webviewRef.current as HTMLElement & {
-      on: (name: string, listener: (event: CustomEvent) => void) => void;
-      off: (name: string, listener: (event: CustomEvent) => void) => void;
-      src: string | null;
-      goBack: () => void;
-      goForward: () => void;
-      reload: () => void;
-    } | null;
-
-    if (!webview) {
-      return;
-    }
-
-    const listener = (event: CustomEvent) => {
-      const detail = event.detail as { url?: string } | string;
-      const url = typeof detail === "string" ? detail : detail?.url;
-      if (!url) {
-        return;
-      }
-      setUrlValue(url);
-      onUpdatePane((current) => ({
-        ...current,
-        payload: {
-          ...(current.payload as BrowserPanePayload),
-          url,
-        },
-      }));
-    };
-
-    webview.on("did-navigate", listener);
-    webview.on("did-navigate-in-page", listener);
-
-    return () => {
-      webview.off("did-navigate", listener);
-      webview.off("did-navigate-in-page", listener);
-    };
-  }, [onUpdatePane]);
+  const normalizedUrl = urlValue.match(/^https?:\/\//) ? urlValue : `https://${urlValue}`;
+  const openExternalBrowser = async (): Promise<void> => {
+    await desktop().openExternal(normalizedUrl);
+    onUpdatePane((current) => ({
+      ...current,
+      payload: {
+        ...(current.payload as BrowserPanePayload),
+        url: normalizedUrl,
+      },
+    }));
+  };
 
   return (
     <div className="browser-pane">
-      <div className="browser-toolbar browser-toolbar-compact" id={toolbarId}>
+      <div className="browser-toolbar browser-toolbar-compact">
         <button
           className="browser-nav-button"
-          title="Back"
-          aria-label="Back"
-          onClick={() => (webviewRef.current as any)?.goBack?.()}
+          title="Open in browser"
+          aria-label="Open in browser"
+          onClick={() => {
+            void openExternalBrowser();
+          }}
         >
-          ←
-        </button>
-        <button
-          className="browser-nav-button"
-          title="Forward"
-          aria-label="Forward"
-          onClick={() => (webviewRef.current as any)?.goForward?.()}
-        >
-          →
-        </button>
-        <button
-          className="browser-nav-button"
-          title="Reload"
-          aria-label="Reload"
-          onClick={() => (webviewRef.current as any)?.reload?.()}
-        >
-          ↻
+          ↗
         </button>
         <form
           className="browser-form browser-omnibox"
           onSubmit={(event) => {
             event.preventDefault();
-            const normalized = urlValue.match(/^https?:\/\//) ? urlValue : `https://${urlValue}`;
-            (webviewRef.current as any).src = normalized;
-            onUpdatePane((current) => ({
-              ...current,
-              payload: {
-                ...(current.payload as BrowserPanePayload),
-                url: normalized,
-              },
-            }));
+            void openExternalBrowser();
           }}
         >
           <span className="browser-omnibox-prefix" aria-hidden="true">
@@ -3738,14 +3468,16 @@ function BrowserPane({
           />
         </form>
       </div>
-      <electrobun-webview
-        {...({ masks: `#${toolbarId}` } as any)}
-        id={`browser-${pane.id}`}
-        ref={webviewRef as any}
-        className="embedded-webview"
-        src={payload.url}
-        renderer="native"
-      />
+      <div className="empty-stage compact">
+        <p>{normalizedUrl}</p>
+        <button
+          onClick={() => {
+            void openExternalBrowser();
+          }}
+        >
+          Open in browser
+        </button>
+      </div>
     </div>
   );
 }

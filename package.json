@@ -4,33 +4,30 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "OCTTY_SOURCE_ROOT=$PWD electrobun dev",
-    "dev:fresh-cef": "bash -lc 'dir=$(mktemp -d \"${TMPDIR:-/tmp}/octty-cef-dev.XXXXXX\"); echo \"Using fresh CEF profile: $dir\"; OCTTY_CEF_USER_DATA_DIR=\"$dir\" OCTTY_SOURCE_ROOT=$PWD electrobun dev'",
-    "dev:native": "OCTTY_DEFAULT_RENDERER=native OCTTY_SOURCE_ROOT=$PWD electrobun dev",
-    "dev:native-pure": "OCTTY_BUNDLE_CEF=0 OCTTY_DEFAULT_RENDERER=native OCTTY_SOURCE_ROOT=$PWD electrobun dev",
-    "dev:terminal-debug": "OCTTY_DEBUG_TERMINAL=1 OCTTY_SOURCE_ROOT=$PWD electrobun dev",
-    "dev:profile": "BUN_OPTIONS='--cpu-prof --inspect' OCTTY_OPEN_DEVTOOLS=1 OCTTY_SOURCE_ROOT=$PWD electrobun dev",
-    "dev:profile:fresh-cef": "bash -lc 'dir=$(mktemp -d \"${TMPDIR:-/tmp}/octty-cef-dev.XXXXXX\"); echo \"Using fresh CEF profile: $dir\"; BUN_OPTIONS=\"--cpu-prof --inspect\" OCTTY_OPEN_DEVTOOLS=1 OCTTY_CEF_USER_DATA_DIR=\"$dir\" OCTTY_SOURCE_ROOT=$PWD electrobun dev'",
-    "dev:profile:native": "BUN_OPTIONS='--cpu-prof --inspect' OCTTY_OPEN_DEVTOOLS=1 OCTTY_DEFAULT_RENDERER=native OCTTY_SOURCE_ROOT=$PWD electrobun dev",
-    "dev:profile:native-pure": "BUN_OPTIONS='--cpu-prof --inspect' OCTTY_OPEN_DEVTOOLS=1 OCTTY_BUNDLE_CEF=0 OCTTY_DEFAULT_RENDERER=native OCTTY_SOURCE_ROOT=$PWD electrobun dev",
-    "dev:headless-api": "OCTTY_HEADLESS_API=1 OCTTY_SOURCE_ROOT=$PWD electrobun dev",
-    "start": "OCTTY_SOURCE_ROOT=$PWD electrobun dev",
-    "build": "OCTTY_SOURCE_ROOT=$PWD electrobun build",
+    "dev": "node scripts/build-electron.mjs && electron build/electron/main.js",
+    "dev:terminal-debug": "OCTTY_DEBUG_TERMINAL=1 node scripts/build-electron.mjs && electron build/electron/main.js",
+    "dev:profile": "OCTTY_OPEN_DEVTOOLS=1 node scripts/build-electron.mjs && electron build/electron/main.js",
+    "start": "electron build/electron/main.js",
+    "build": "node scripts/build-electron.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "test": "bun test"
+    "test": "vitest run"
   },
   "dependencies": {
     "chokidar": "^4.0.3",
-    "electrobun": "^1.16.0",
     "ghostty-web": "^0.4.0",
     "node-pty": "^1.1.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@types/node": "^24.7.2",
     "@types/react": "^19.2.2",
     "@types/react-dom": "^19.2.2",
-    "typescript": "^5.9.3"
-  }
+    "electron": "^37.3.1",
+    "esbuild": "^0.25.10",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "packageManager": "npm@11.6.0"
 }

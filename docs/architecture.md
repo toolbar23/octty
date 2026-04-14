@@ -4,7 +4,7 @@
 
 Octty has three main layers:
 
-1. Bun backend application logic
+1. Electron-backed desktop application logic
 2. React renderer for the main view
 3. PTY sidecar process for terminal I/O
 
@@ -16,22 +16,20 @@ Supporting those are:
 
 ## Process model
 
-### Electrobun main process
+### Electron main process
 
-Entrypoint: [src/bun/index.ts](/home/pm/dev/workspac/src/bun/index.ts)
+Entrypoint: [main.ts](/home/pm/dev/workspac/src/electron/main.ts)
 
 Responsibilities:
 
-- start the local HTTP and WebSocket API
-- create the main BrowserWindow
-- bootstrap the renderer HTML
-- bridge app-level shortcuts through the native shortcut system
-
-This layer is also where headless API mode is exposed for debugging.
+- create the main `BrowserWindow`
+- own the preload bridge and IPC surface
+- forward backend events into renderer windows
+- handle desktop concerns such as dialogs and external URLs
 
 ### Workspace service
 
-Core implementation: [src/bun/service.ts](/home/pm/dev/workspac/src/bun/service.ts)
+Core implementation: [service.ts](/home/pm/dev/workspac/src/backend/service.ts)
 
 Responsibilities:
 
@@ -41,19 +39,19 @@ Responsibilities:
 - load and save workspace snapshots
 - manage note files and note metadata
 - create, restore, detach, and close terminal sessions
-- broadcast updates to renderer clients over WebSocket
+- broadcast updates to renderer clients over Electron IPC
 
 This is the main application coordinator.
 
 ### PTY sidecar
 
 Entrypoint: [src/pty-host/index.mjs](/home/pm/dev/workspac/src/pty-host/index.mjs)  
-Controller: [src/bun/pty-sidecar.ts](/home/pm/dev/workspac/src/bun/pty-sidecar.ts)
+Controller: [pty-sidecar.ts](/home/pm/dev/workspac/src/backend/pty-sidecar.ts)
 
 Responsibilities:
 
 - spawn terminal processes through `node-pty`
-- stream terminal output back to the Bun service
+- stream terminal output back to the workspace service
 - accept input, resize, and kill commands
 
 The sidecar exists so terminal I/O is separated from the rest of the app runtime.
@@ -97,7 +95,7 @@ Keeping those concerns separate is important. Replaying full shell history into 
 
 ## Persistence model
 
-SQLite implementation: [src/bun/db.ts](/home/pm/dev/workspac/src/bun/db.ts)
+SQLite implementation: [db.ts](/home/pm/dev/workspac/src/backend/db.ts)
 
 Default DB path:
 

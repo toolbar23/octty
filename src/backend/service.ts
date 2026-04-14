@@ -12,7 +12,6 @@ import {
   writeFile,
 } from "node:fs/promises";
 import chokidar from "chokidar";
-import { Utils } from "electrobun/bun";
 import {
   addPane,
   createDefaultSnapshot,
@@ -36,6 +35,7 @@ import type {
 import { hasRecordedWorkspacePath } from "../shared/types";
 import { aggregateAgentAttentionStates } from "../shared/agent-attention";
 import { AppDatabase } from "./db";
+import { readTerminalAppearanceConfig } from "./terminal-config";
 import {
   buildTerminalLaunch,
   createEmbeddedSessionCorrelationId,
@@ -159,7 +159,7 @@ type DebugRateBucket = {
 };
 
 const serviceDebugRateBuckets = new Map<string, DebugRateBucket>();
-let serviceDebugRateTimer: Timer | null = null;
+let serviceDebugRateTimer: ReturnType<typeof setTimeout> | null = null;
 
 function trackServiceDebugRate(key: string, sample?: Record<string, unknown>): void {
   if (!DEBUG_MESSAGE_RATES) {
@@ -216,13 +216,14 @@ function extractNoteTitle(fileName: string, body: string): string {
 export class WorkspaceService {
   private readonly db: AppDatabase;
   private readonly ptySidecar: PtySidecar;
+  private readonly terminalAppearance = readTerminalAppearanceConfig();
   private readonly clients = new Set<ClientSink>();
   private readonly runtimes = new Map<string, WorkspaceRuntime>();
   private readonly watchers = new Map<string, ReturnType<typeof chokidar.watch>>();
-  private readonly refreshTimers = new Map<string, Timer>();
-  private readonly sessionPersistTimers = new Map<string, Timer>();
-  private readonly embeddedSessionDetectTimers = new Map<string, Timer>();
-  private readonly attentionTimers = new Map<string, Timer>();
+  private readonly refreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly sessionPersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly embeddedSessionDetectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly attentionTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly agentPendingSessions = new Set<string>();
   private readonly focusedAttentionSessions = new Set<string>();
 
@@ -373,18 +374,8 @@ export class WorkspaceService {
     return {
       projectRoots: this.db.listProjectRoots(),
       workspaces: this.db.listWorkspaces(),
+      terminalAppearance: this.terminalAppearance,
     };
-  }
-
-  async pickDirectory(startingFolder?: string): Promise<string | null> {
-    const paths = await Utils.openFileDialog({
-      startingFolder: startingFolder || homedir(),
-      canChooseFiles: false,
-      canChooseDirectory: true,
-      allowsMultipleSelection: false,
-    });
-
-    return paths[0] || null;
   }
 
   async addProjectRoot(inputPath: string): Promise<ProjectRootRecord> {

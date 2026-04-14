@@ -151,6 +151,7 @@ export interface SessionSnapshot {
 export interface BootstrapPayload {
   projectRoots: ProjectRootRecord[];
   workspaces: WorkspaceSummary[];
+  terminalAppearance: import("./terminal-font").TerminalAppearanceConfig;
 }
 
 export interface TerminalCreateRequest {
