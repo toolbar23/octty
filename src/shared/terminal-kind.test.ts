@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   isAgentTerminalKind,
   shouldCloseTerminalPaneOnExit,
+  shouldShowTerminalRestart,
   supportsTerminalAttention,
   terminalRestoreRerenderMode,
 } from "./terminal-kind";
@@ -21,12 +22,16 @@ describe("terminal attention kinds", () => {
     expect(supportsTerminalAttention("jjui")).toBe(false);
   });
 
-  test("auto-closes only plain shell panes on exit", () => {
-    expect(shouldCloseTerminalPaneOnExit("shell")).toBe(true);
-    expect(shouldCloseTerminalPaneOnExit("codex")).toBe(false);
-    expect(shouldCloseTerminalPaneOnExit("pi")).toBe(false);
-    expect(shouldCloseTerminalPaneOnExit("nvim")).toBe(false);
-    expect(shouldCloseTerminalPaneOnExit("jjui")).toBe(false);
+  test("auto-closes terminal panes only after clean exits", () => {
+    expect(shouldCloseTerminalPaneOnExit(0)).toBe(true);
+    expect(shouldCloseTerminalPaneOnExit(1)).toBe(false);
+    expect(shouldCloseTerminalPaneOnExit(null)).toBe(false);
+  });
+
+  test("shows restart only after unclean or unknown exits", () => {
+    expect(shouldShowTerminalRestart(0)).toBe(false);
+    expect(shouldShowTerminalRestart(1)).toBe(true);
+    expect(shouldShowTerminalRestart(null)).toBe(true);
   });
 
   test("defines a restore rerender mode for every terminal kind", () => {

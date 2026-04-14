@@ -4,6 +4,8 @@ import {
   agentAttentionLabel,
   aggregateAgentAttentionStates,
   aggregateWorkspaceAttentionState,
+  focusedShellAttentionState,
+  settledShellAttentionState,
 } from "./agent-attention";
 
 describe("agent attention helpers", () => {
@@ -33,6 +35,18 @@ describe("agent attention helpers", () => {
         { kind: "nvim", state: "live", agentAttentionState: "idle-unseen" },
       ]),
     ).toBeNull();
+  });
+
+  test("keeps focused shell thinking visible but clears seen shell attention", () => {
+    expect(focusedShellAttentionState("thinking")).toBe("thinking");
+    expect(focusedShellAttentionState("idle-unseen")).toBeNull();
+    expect(focusedShellAttentionState("idle-seen")).toBeNull();
+    expect(focusedShellAttentionState(null)).toBeNull();
+  });
+
+  test("settles focused shells to no marker and unfocused shells to unseen", () => {
+    expect(settledShellAttentionState(true)).toBeNull();
+    expect(settledShellAttentionState(false)).toBe("idle-unseen");
   });
 
   test("maps state labels and CSS classes", () => {

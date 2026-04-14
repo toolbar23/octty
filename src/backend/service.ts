@@ -33,7 +33,11 @@ import type {
   WorkspaceSummary,
 } from "../shared/types";
 import { hasRecordedWorkspacePath } from "../shared/types";
-import { aggregateWorkspaceAttentionState } from "../shared/agent-attention";
+import {
+  aggregateWorkspaceAttentionState,
+  focusedShellAttentionState,
+  settledShellAttentionState,
+} from "../shared/agent-attention";
 import { AppDatabase } from "./db";
 import { resolveStateDbPath } from "./app-paths";
 import { readTerminalAppearanceConfig } from "./terminal-config";
@@ -255,8 +259,7 @@ export class WorkspaceService {
         } else if (
           session &&
           session.kind === "shell" &&
-          session.state === "live" &&
-          !this.focusedAttentionSessions.has(sessionId)
+          session.state === "live"
         ) {
           if (session.agentAttentionState !== "thinking") {
             this.setAgentAttentionState(session, "thinking");
@@ -610,13 +613,10 @@ export class WorkspaceService {
         return;
       }
 
-      if (this.focusedAttentionSessions.has(sessionId)) {
-        this.setAgentAttentionState(session, null);
-        this.cancelAttentionSettle(sessionId);
-        return;
-      }
-
-      this.setAgentAttentionState(session, "idle-unseen");
+      this.setAgentAttentionState(
+        session,
+        settledShellAttentionState(this.focusedAttentionSessions.has(sessionId)),
+      );
       this.cancelAttentionSettle(sessionId);
     }, 2_000);
     this.attentionTimers.set(sessionId, timer);
@@ -1303,9 +1303,11 @@ export class WorkspaceService {
     if (focused) {
       this.focusedAttentionSessions.add(sessionId);
       if (session.kind === "shell") {
-        this.cancelAttentionSettle(sessionId);
-        if (session.agentAttentionState !== null) {
-          this.setAgentAttentionState(session, null);
+        const nextState = focusedShellAttentionState(session.agentAttentionState);
+        if (nextState === "thinking") {
+          this.scheduleShellAttentionSettle(sessionId);
+        } else if (session.agentAttentionState !== nextState) {
+          this.setAgentAttentionState(session, nextState);
         }
       } else if (session.agentAttentionState === "idle-unseen") {
         this.setAgentAttentionState(session, "idle-seen");

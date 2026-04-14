@@ -72,6 +72,7 @@ import {
 import {
   isAgentTerminalKind,
   shouldCloseTerminalPaneOnExit,
+  shouldShowTerminalRestart,
   supportsTerminalAttention,
   terminalRestoreRerenderMode,
   terminalKindLabel,
@@ -142,8 +143,38 @@ let rendererDebugRateTimer: number | null = null;
 let ghosttyRenderLoopPatched = false;
 
 type PatchedGhosttyTerminal = Terminal & {
+  __octtyRenderLoopActive?: boolean;
   __octtyRenderLoopTimer?: number | null;
 };
+
+function clearTerminalRenderLoopTimer(term: PatchedGhosttyTerminal): void {
+  if (term.__octtyRenderLoopTimer != null) {
+    window.clearTimeout(term.__octtyRenderLoopTimer);
+    term.__octtyRenderLoopTimer = null;
+  }
+}
+
+function setTerminalRenderLoopActive(term: Terminal, active: boolean): void {
+  if (ghosttyRenderLoopMode === "raf") {
+    return;
+  }
+
+  const patchedTerm = term as PatchedGhosttyTerminal;
+  if (
+    patchedTerm.__octtyRenderLoopActive === active &&
+    (!active || patchedTerm.__octtyRenderLoopTimer != null)
+  ) {
+    return;
+  }
+
+  patchedTerm.__octtyRenderLoopActive = active;
+  if (!active) {
+    clearTerminalRenderLoopTimer(patchedTerm);
+    return;
+  }
+
+  (patchedTerm as unknown as { startRenderLoop?: () => void }).startRenderLoop?.();
+}
 
 function trackRendererDebugRate(key: string, sample?: Record<string, unknown>): void {
   if (!debugMessageRates) {
@@ -207,13 +238,17 @@ function patchGhosttyRenderLoop(): void {
   terminalPrototype.startRenderLoop = function patchedStartRenderLoop(
     this: PatchedGhosttyTerminal,
   ): void {
-    if (this.__octtyRenderLoopTimer != null) {
-      window.clearTimeout(this.__octtyRenderLoopTimer);
-      this.__octtyRenderLoopTimer = null;
+    clearTerminalRenderLoopTimer(this);
+    if (this.__octtyRenderLoopActive === false) {
+      return;
     }
 
     const tick = () => {
-      if ((this as any).isDisposed || !(this as any).isOpen) {
+      if (
+        this.__octtyRenderLoopActive === false ||
+        (this as any).isDisposed ||
+        !(this as any).isOpen
+      ) {
         this.__octtyRenderLoopTimer = null;
         return;
       }
@@ -238,10 +273,8 @@ function patchGhosttyRenderLoop(): void {
   };
 
   terminalPrototype.dispose = function patchedDispose(this: PatchedGhosttyTerminal): void {
-    if (this.__octtyRenderLoopTimer != null) {
-      window.clearTimeout(this.__octtyRenderLoopTimer);
-      this.__octtyRenderLoopTimer = null;
-    }
+    this.__octtyRenderLoopActive = false;
+    clearTerminalRenderLoopTimer(this);
     originalDispose?.call(this);
   };
 
@@ -517,6 +550,7 @@ function createTerminalRuntime(paneId: string): TerminalRuntime {
     fontFamily: terminalAppearance.fontFamily,
     theme: getTerminalTheme(),
   });
+  setTerminalRenderLoopActive(term, false);
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
   term.open(host);
@@ -710,6 +744,7 @@ function attachTerminalRuntime(runtime: TerminalRuntime, container: HTMLDivEleme
   if (container.firstChild !== runtime.host) {
     container.replaceChildren(runtime.host);
   }
+  setTerminalRenderLoopActive(runtime.term, true);
   requestAnimationFrame(() => {
     if (runtime.host.isConnected) {
       runtime.fitAddon.fit();
@@ -770,6 +805,7 @@ function detachTerminalRuntime(runtime: TerminalRuntime): void {
   if (activeElement instanceof HTMLElement && runtime.host.contains(activeElement)) {
     activeElement.blur();
   }
+  setTerminalRenderLoopActive(runtime.term, false);
   runtime.host.remove();
 }
 
@@ -817,6 +853,7 @@ function destroyTerminalRuntime(paneId: string): void {
   runtime.unsubscribe = null;
   runtime.setSessionId(null);
   runtime.clearPendingOutput();
+  setTerminalRenderLoopActive(runtime.term, false);
   runtime.host.remove();
   runtime.fitAddon.dispose();
   runtime.term.dispose();
@@ -1021,6 +1058,38 @@ function focusPaneTarget(
     target.focus();
   }
   return document.activeElement === target;
+}
+
+function schedulePaneFocusRetry(paneId: string, pane: PaneState): () => void {
+  let cancelled = false;
+  let attemptsLeft = 8;
+  let frame = 0;
+
+  const focusAttempt = () => {
+    frame = 0;
+    if (cancelled) {
+      return;
+    }
+
+    const paneElement = document.querySelector<HTMLElement>(`[data-pane-id="${paneId}"]`);
+    if (paneElement && focusPaneTarget(paneId, paneElement, pane)) {
+      return;
+    }
+
+    attemptsLeft -= 1;
+    if (attemptsLeft <= 0) {
+      return;
+    }
+    frame = window.requestAnimationFrame(focusAttempt);
+  };
+
+  frame = window.requestAnimationFrame(focusAttempt);
+  return () => {
+    cancelled = true;
+    if (frame) {
+      window.cancelAnimationFrame(frame);
+    }
+  };
 }
 
 function mergeWorkspace(
@@ -2377,36 +2446,22 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
 
     handledNavigationRequestNonceRef.current = navigationRequest.nonce;
 
-    let cancelled = false;
-    let attemptsLeft = 8;
-    let frame = 0;
-
-    const focusAttempt = () => {
-      frame = 0;
-      if (cancelled) {
-        return;
-      }
-
-      const paneElement = document.querySelector<HTMLElement>(`[data-pane-id="${paneId}"]`);
-      if (paneElement && focusPaneTarget(paneId, paneElement, pane)) {
-        return;
-      }
-
-      attemptsLeft -= 1;
-      if (attemptsLeft <= 0) {
-        return;
-      }
-      frame = window.requestAnimationFrame(focusAttempt);
-    };
-
-    frame = window.requestAnimationFrame(focusAttempt);
-    return () => {
-      cancelled = true;
-      if (frame) {
-        window.cancelAnimationFrame(frame);
-      }
-    };
+    return schedulePaneFocusRetry(paneId, pane);
   }, [detail.snapshot.activePaneId, detail.snapshot.panes, detail.workspace.id, isVisible, navigationRequest]);
+
+  useEffect(() => {
+    if (!isVisible || !detail.snapshot.activePaneId) {
+      return;
+    }
+
+    const paneId = detail.snapshot.activePaneId;
+    const pane = detail.snapshot.panes[paneId];
+    if (!pane) {
+      return;
+    }
+
+    return schedulePaneFocusRetry(paneId, pane);
+  }, [detail.snapshot.activePaneId, detail.snapshot.panes, isVisible]);
 
   useEffect(() => {
     return () => {
@@ -2500,6 +2555,49 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
       mutateSnapshot((snapshot) => removePane(snapshot, pane.id));
     },
     [mutateSnapshot, onCloseSession],
+  );
+
+  const focusActivePaneFromScrollContainer = useCallback((): boolean => {
+    const paneId = detail.snapshot.activePaneId;
+    if (!paneId) {
+      return false;
+    }
+
+    const pane = detail.snapshot.panes[paneId];
+    if (!pane) {
+      return false;
+    }
+
+    const paneElement = document.querySelector<HTMLElement>(`[data-pane-id="${paneId}"]`);
+    return Boolean(paneElement && focusPaneTarget(paneId, paneElement, pane));
+  }, [detail.snapshot.activePaneId, detail.snapshot.panes]);
+
+  const handleCenterScrollFocus = useCallback(
+    (event: React.FocusEvent<HTMLDivElement>) => {
+      if (event.target !== event.currentTarget) {
+        return;
+      }
+
+      window.requestAnimationFrame(() => {
+        focusActivePaneFromScrollContainer();
+      });
+    },
+    [focusActivePaneFromScrollContainer],
+  );
+
+  const handleCenterScrollKeyDownCapture = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (event.target !== event.currentTarget) {
+        return;
+      }
+      if (!focusActivePaneFromScrollContainer()) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+    },
+    [focusActivePaneFromScrollContainer],
   );
 
   const startColumnResize = useCallback(
@@ -2706,7 +2804,12 @@ function WorkspaceTaskspace(props: WorkspaceTaskspaceProps): React.ReactElement 
       </aside>
 
       <section className="center-taskspace">
-        <div className="center-column-scroll" ref={centerScrollRef}>
+        <div
+          className="center-column-scroll"
+          ref={centerScrollRef}
+          onFocus={handleCenterScrollFocus}
+          onKeyDownCapture={handleCenterScrollKeyDownCapture}
+        >
           <div className="center-column-strip">
             {detail.snapshot.centerColumnIds.length === 0 && (
               <div className="empty-stage compact">
@@ -3019,6 +3122,16 @@ function TerminalPane({
     };
   }, [isActive, isVisible, payload.kind, payload.sessionId]);
 
+  useEffect(() => {
+    if (
+      payload.sessionState !== "live" &&
+      !payload.autoStart &&
+      shouldCloseTerminalPaneOnExit(payload.exitCode)
+    ) {
+      onClosePaneRef.current();
+    }
+  }, [payload.autoStart, payload.exitCode, payload.sessionState]);
+
   const resetSurface = useCallback(() => {
     resetTerminalSurface(containerRef.current);
   }, []);
@@ -3303,7 +3416,7 @@ function TerminalPane({
       runtime.resizeSession = (sessionId, cols, rows) =>
         onResizeSessionRef.current(sessionId, cols, rows);
       runtime.onExit = (exitCode) => {
-        if (shouldCloseTerminalPaneOnExit(payloadRef.current.kind)) {
+        if (shouldCloseTerminalPaneOnExit(exitCode)) {
           onClosePaneRef.current();
           return;
         }
@@ -3462,17 +3575,19 @@ function TerminalPane({
           focusTerminalInput();
         }}
       />
-      {payload.sessionState !== "live" && !payload.autoStart && (
-        <button
-          className="restart-button"
-          onClick={async () => {
-            setStatusText("starting");
-            await startSession(payload.kind, { focus: true });
-          }}
-        >
-          Restart session
-        </button>
-      )}
+      {payload.sessionState !== "live" &&
+        !payload.autoStart &&
+        shouldShowTerminalRestart(payload.exitCode) && (
+          <button
+            className="restart-button"
+            onClick={async () => {
+              setStatusText("starting");
+              await startSession(payload.kind, { focus: true });
+            }}
+          >
+            Restart session
+          </button>
+        )}
     </div>
   );
 }

@@ -26,6 +26,16 @@ export function aggregateWorkspaceAttentionState(
   );
 }
 
+export function focusedShellAttentionState(
+  state: AgentAttentionState | null | undefined,
+): AgentAttentionState | null {
+  return state === "thinking" ? "thinking" : null;
+}
+
+export function settledShellAttentionState(focused: boolean): AgentAttentionState | null {
+  return focused ? null : "idle-unseen";
+}
+
 export function agentAttentionLabel(state: AgentAttentionState | null | undefined): string | null {
   switch (state) {
     case "idle-seen":
