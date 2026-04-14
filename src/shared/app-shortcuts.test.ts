@@ -50,6 +50,15 @@ describe("appShortcutActionForKeyEvent", () => {
     ).toBe("open-jjui-pane");
     expect(
       appShortcutActionForKeyEvent({
+        key: "b",
+        ctrlKey: true,
+        shiftKey: true,
+        altKey: false,
+        metaKey: false,
+      }),
+    ).toBe("open-browser-pane");
+    expect(
+      appShortcutActionForKeyEvent({
         key: "d",
         ctrlKey: true,
         shiftKey: true,

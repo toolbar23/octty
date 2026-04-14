@@ -209,7 +209,6 @@ textarea {
 }
 
 .sidebar-actions,
-.workspace-toolbar,
 .modal-actions,
 .field-row,
 .workspace-item-row,
@@ -230,8 +229,7 @@ textarea {
   flex-direction: column;
 }
 
-.sidebar h1,
-.workspace-toolbar button {
+.sidebar h1 {
   margin: 0;
 }
 
@@ -468,8 +466,7 @@ textarea {
   border-color: transparent;
 }
 
-.sidebar button:hover,
-.workspace-toolbar button:hover {
+.sidebar button:hover {
   background: var(--color-nav-selected);
 }
 
@@ -481,29 +478,6 @@ textarea {
 
 .sidebar-inline-button:hover {
   background: rgb(255 255 255 / 0.04);
-}
-
-.workspace-toolbar button {
-  background: var(--color-nav-surface);
-  border-color: var(--color-nav-border);
-}
-
-.workspace-toolbar-floating {
-  position: absolute;
-  top: 10px;
-  right: 12px;
-  z-index: 15;
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 6px;
-  max-width: calc(100% - 24px);
-}
-
-.workspace-toolbar-floating button {
-  padding: 4px 8px;
-  font-size: 0.75rem;
-  line-height: 1.1;
 }
 
 .workspace-item-head {
@@ -671,6 +645,7 @@ textarea {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   grid-template-rows: minmax(0, 1fr);
+  padding-inline: 5px;
 }
 
 .pinned-slot {

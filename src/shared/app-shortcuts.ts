@@ -12,6 +12,7 @@ export type AppShortcutAction =
   | "open-pi-pane"
   | "open-nvim-pane"
   | "open-jjui-pane"
+  | "open-browser-pane"
   | "open-diff-pane";
 
 export interface AppShortcutKeyEvent {
@@ -72,6 +73,8 @@ export function appShortcutActionForKeyEvent(
       return "open-nvim-pane";
     case "j":
       return "open-jjui-pane";
+    case "b":
+      return "open-browser-pane";
     case "d":
       return "open-diff-pane";
     default:

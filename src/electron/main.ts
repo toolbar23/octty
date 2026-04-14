@@ -1,7 +1,16 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  dialog,
+  ipcMain,
+  shell,
+  type MenuItemConstructorOptions,
+} from "electron";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertRuntimeDependencies } from "../backend/requirements";
+import type { AppShortcutAction } from "../shared/app-shortcuts";
 import { OCTTY_EVENT_CHANNEL } from "../shared/desktop-bridge";
 import { OcttyBackend } from "./backend";
 import { BrowserPaneManager } from "./browser-manager";
@@ -16,6 +25,8 @@ let backend: OcttyBackend | null = null;
 const browserPaneManager = new BrowserPaneManager();
 const windows = new Set<BrowserWindow>();
 const DEBUG_ELECTRON_DIAGNOSTICS = process.env.OCTTY_DEBUG_ELECTRON === "1";
+const GITHUB_URL = "https://github.com/toolbar23/octty";
+const LICENSE_URL = `${GITHUB_URL}/blob/main/LICENSE`;
 
 function getBackend(): OcttyBackend {
   if (!backend) {
@@ -30,6 +41,119 @@ function broadcastEvent(event: unknown): void {
       window.webContents.send(OCTTY_EVENT_CHANNEL, event);
     }
   }
+}
+
+function sendAppShortcut(action: AppShortcutAction): void {
+  const targetWindow = BrowserWindow.getFocusedWindow() ?? [...windows][0] ?? null;
+  if (!targetWindow || targetWindow.isDestroyed()) {
+    return;
+  }
+  targetWindow.webContents.send("octty:shortcut", action);
+}
+
+function menuTargetWindow(): BrowserWindow | null {
+  const targetWindow = BrowserWindow.getFocusedWindow() ?? [...windows][0] ?? null;
+  return targetWindow && !targetWindow.isDestroyed() ? targetWindow : null;
+}
+
+function showAboutDialog(): void {
+  const message = `Octty ${app.getVersion()}`;
+  const detail = [
+    `Electron ${process.versions.electron}`,
+    `Chromium ${process.versions.chrome}`,
+    `Node.js ${process.versions.node}`,
+  ].join("\n");
+  const window = menuTargetWindow();
+  const options = {
+    type: "info" as const,
+    title: "About Octty",
+    message,
+    detail,
+    buttons: ["OK"],
+  };
+
+  if (window) {
+    void dialog.showMessageBox(window, options);
+    return;
+  }
+  void dialog.showMessageBox(options);
+}
+
+function openExternalUrl(url: string): void {
+  void shell.openExternal(url);
+}
+
+function installApplicationMenu(): void {
+  const paneMenuItems: MenuItemConstructorOptions[] = [
+    {
+      label: "New Shell",
+      accelerator: "Ctrl+Shift+S",
+      click: () => sendAppShortcut("open-shell-pane"),
+    },
+    {
+      label: "New Codex",
+      accelerator: "Ctrl+Shift+A",
+      click: () => sendAppShortcut("open-codex-pane"),
+    },
+    {
+      label: "New Pi",
+      accelerator: "Ctrl+Shift+P",
+      click: () => sendAppShortcut("open-pi-pane"),
+    },
+    {
+      label: "New Nvim",
+      accelerator: "Ctrl+Shift+N",
+      click: () => sendAppShortcut("open-nvim-pane"),
+    },
+    {
+      label: "New JJUI",
+      accelerator: "Ctrl+Shift+J",
+      click: () => sendAppShortcut("open-jjui-pane"),
+    },
+    {
+      label: "New Browser",
+      accelerator: "Ctrl+Shift+B",
+      click: () => sendAppShortcut("open-browser-pane"),
+    },
+    {
+      label: "New Diff",
+      accelerator: "Ctrl+Shift+D",
+      click: () => sendAppShortcut("open-diff-pane"),
+    },
+  ];
+  const template: MenuItemConstructorOptions[] = [
+    {
+      label: "Pane",
+      submenu: paneMenuItems,
+    },
+    {
+      label: "View",
+      submenu: [
+        { role: "reload" },
+        { role: "toggleDevTools" },
+      ],
+    },
+    {
+      label: "Help",
+      submenu: [
+        {
+          label: "About Octty",
+          click: () => showAboutDialog(),
+        },
+        { type: "separator" },
+        {
+          label: "GitHub",
+          click: () => openExternalUrl(GITHUB_URL),
+        },
+        {
+          label: "License",
+          click: () => openExternalUrl(LICENSE_URL),
+        },
+      ],
+    },
+  ];
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 function registerIpcHandlers(): void {
@@ -236,6 +360,7 @@ async function main(): Promise<void> {
     broadcastEvent(event);
   });
   registerIpcHandlers();
+  installApplicationMenu();
   createMainWindow();
 
   app.on("activate", () => {

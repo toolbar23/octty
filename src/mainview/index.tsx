@@ -74,7 +74,6 @@ import {
   shouldShowTerminalRestart,
   supportsTerminalAttention,
   terminalRestoreRerenderMode,
-  terminalKindLabel,
 } from "../shared/terminal-kind";
 import {
   defaultTerminalAppearanceConfig,
@@ -121,7 +120,6 @@ const MAX_TERMINAL_WRITE_CHUNKS_PER_TICK = 4;
 const TERMINAL_INPUT_BATCH_DELAY_MS = 4;
 const TERMINAL_INPUT_BATCH_SIZE = 256;
 const TERMINAL_REQUEST_TIMEOUT_MS = 8_000;
-const TERMINAL_TOOLBAR_KINDS: TerminalKind[] = ["shell", "codex", "pi", "nvim", "jjui"];
 const MIN_STACK_PANE_HEIGHT_PX = 96;
 const KEYBOARD_COLUMN_RESIZE_STEP_PX = 80;
 const HORIZONTAL_WHEEL_FOCUS_THRESHOLD_PX = 80;
@@ -1583,8 +1581,14 @@ function App(): React.ReactElement {
         case "open-pi-pane":
         case "open-nvim-pane":
         case "open-jjui-pane":
+        case "open-browser-pane":
         case "open-diff-pane": {
           if (!detail) {
+            return;
+          }
+
+          if (action === "open-browser-pane") {
+            addPaneToWorkspace(detail.workspace.id, "browser");
             return;
           }
 
@@ -2093,22 +2097,6 @@ function App(): React.ReactElement {
       </aside>
 
       <main className="workspace-shell">
-        {activeDetail && (
-          <div className="workspace-toolbar workspace-toolbar-floating">
-            {TERMINAL_TOOLBAR_KINDS.map((kind) => (
-              <button
-                key={kind}
-                onClick={() => addPaneToWorkspace(activeDetail.workspace.id, "shell", kind)}
-              >
-                {terminalKindLabel(kind)}
-              </button>
-            ))}
-            <button onClick={() => addPaneToWorkspace(activeDetail.workspace.id, "note")}>Note</button>
-            <button onClick={() => addPaneToWorkspace(activeDetail.workspace.id, "browser")}>Browser</button>
-            <button onClick={() => addPaneToWorkspace(activeDetail.workspace.id, "diff")}>Diff</button>
-          </div>
-        )}
-
         {error && <div className="error-banner">{error}</div>}
 
         {showRootForm && (
