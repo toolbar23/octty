@@ -213,14 +213,14 @@ Workspace status is updated from a combination of:
 - filesystem watching
 - explicit refresh paths after relevant actions
 
-The primary workspace color is JJ-native rather than Git-style dirty/clean. The
-service classifies each workspace by an effective commit, using the current
-working-copy commit when it has content and otherwise the parent commit:
+The primary workspace status is JJ-native rather than Git-style dirty/clean.
+The service exposes independent markers instead of forcing all work into one
+state:
 
-- `published`: reachable from any remote bookmark
-- `merged-local`: already contained in another local workspace
-- `draft`: still unique to this workspace
-- `conflicted`: unresolved conflicts override the other states
+- `published`: no non-empty workspace changes are outside remote bookmarks
+- `unpublished`: non-empty workspace changes outside remote bookmarks
+- `not in default`: non-empty workspace changes not contained in `default@`
+- `conflicted`: unresolved conflicts in the effective workspace commit
 
 The current working-copy diff is still tracked separately for the diff pane and
 for secondary status detail.

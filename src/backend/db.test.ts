@@ -19,6 +19,14 @@ function makeWorkspaceSummary(): WorkspaceSummary {
     hasWorkingCopyChanges: false,
     effectiveAddedLines: 0,
     effectiveRemovedLines: 0,
+    hasConflicts: false,
+    unpublishedChangeCount: 0,
+    unpublishedAddedLines: 0,
+    unpublishedRemovedLines: 0,
+    notInDefaultAvailable: false,
+    notInDefaultChangeCount: 0,
+    notInDefaultAddedLines: 0,
+    notInDefaultRemovedLines: 0,
     bookmarks: [],
     bookmarkRelation: "none",
     unreadNotes: 0,
@@ -250,6 +258,32 @@ describe("AppDatabase session state", () => {
       projectDisplayName: "Panda",
       workspaceName: "default",
       displayName: "Review",
+    });
+  });
+
+  test("round-trips independent workspace status metrics", () => {
+    db.updateWorkspaceStatus("workspace-1", {
+      workspaceState: "draft",
+      hasConflicts: true,
+      unpublishedChangeCount: 3,
+      unpublishedAddedLines: 120,
+      unpublishedRemovedLines: 8,
+      notInDefaultAvailable: true,
+      notInDefaultChangeCount: 2,
+      notInDefaultAddedLines: 40,
+      notInDefaultRemovedLines: 4,
+    });
+
+    expect(db.listWorkspaces()[0]).toMatchObject({
+      workspaceState: "draft",
+      hasConflicts: true,
+      unpublishedChangeCount: 3,
+      unpublishedAddedLines: 120,
+      unpublishedRemovedLines: 8,
+      notInDefaultAvailable: true,
+      notInDefaultChangeCount: 2,
+      notInDefaultAddedLines: 40,
+      notInDefaultRemovedLines: 4,
     });
   });
 });

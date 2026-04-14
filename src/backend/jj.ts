@@ -11,9 +11,17 @@ import { runCheckedCommand } from "./command";
 
 const EFFECTIVE_WORKSPACE_REVSET = "coalesce(@ ~ empty(), @-)";
 const DISPLAY_BOOKMARK_REVSET = `heads(first_ancestors(${EFFECTIVE_WORKSPACE_REVSET}) & bookmarks())`;
-const PUBLISHED_WORKSPACE_REVSET = `${EFFECTIVE_WORKSPACE_REVSET} & ::remote_bookmarks()`;
-const MERGED_LOCAL_WORKSPACE_REVSET = `${EFFECTIVE_WORKSPACE_REVSET} & ::(working_copies() ~ @)`;
 const CONFLICTED_WORKSPACE_REVSET = `${EFFECTIVE_WORKSPACE_REVSET} & conflicts()`;
+const UNPUBLISHED_WORKSPACE_REVSET = "remote_bookmarks()..@ ~ empty()";
+const DEFAULT_WORKSPACE_REVSET = "present(default@)";
+const NOT_IN_DEFAULT_WORKSPACE_REVSET = "default@..@ ~ empty()";
+
+export const WORKSPACE_STATUS_REVSETS = {
+  conflicts: CONFLICTED_WORKSPACE_REVSET,
+  unpublished: UNPUBLISHED_WORKSPACE_REVSET,
+  defaultWorkspace: DEFAULT_WORKSPACE_REVSET,
+  notInDefault: NOT_IN_DEFAULT_WORKSPACE_REVSET,
+} as const;
 
 export interface DiscoveredWorkspace {
   id: string;
@@ -245,23 +253,33 @@ async function countRevset(workspacePath: string, revset: string): Promise<numbe
   );
 }
 
+async function diffStatsForRevset(
+  workspacePath: string,
+  revset: string,
+): Promise<{ addedLines: number; removedLines: number }> {
+  const diffText = await runCheckedCommand([
+    "jj",
+    "diff",
+    "-r",
+    revset,
+    "--git",
+    "--color=never",
+  ], workspacePath);
+  return summarizeUnifiedDiff(diffText);
+}
+
 export function classifyWorkspaceState({
   hasConflicts,
-  isPublished,
-  isMergedLocal,
+  unpublishedChangeCount,
 }: {
   hasConflicts: boolean;
-  isPublished: boolean;
-  isMergedLocal: boolean;
+  unpublishedChangeCount: number;
 }): WorkspaceState {
   if (hasConflicts) {
     return "conflicted";
   }
-  if (isPublished) {
+  if (unpublishedChangeCount === 0) {
     return "published";
-  }
-  if (isMergedLocal) {
-    return "merged-local";
   }
   return "draft";
 }
@@ -325,8 +343,9 @@ export async function readWorkspaceStatus(workspacePath: string): Promise<Worksp
         "--color=never",
       ], workspacePath),
       countRevset(workspacePath, CONFLICTED_WORKSPACE_REVSET),
-      countRevset(workspacePath, PUBLISHED_WORKSPACE_REVSET),
-      countRevset(workspacePath, MERGED_LOCAL_WORKSPACE_REVSET),
+      countRevset(workspacePath, UNPUBLISHED_WORKSPACE_REVSET),
+      diffStatsForRevset(workspacePath, UNPUBLISHED_WORKSPACE_REVSET),
+      countRevset(workspacePath, DEFAULT_WORKSPACE_REVSET),
     ]);
 
   const [
@@ -335,9 +354,19 @@ export async function readWorkspaceStatus(workspacePath: string): Promise<Worksp
     diffText,
     effectiveDiffText,
     conflictedCount,
-    publishedCount,
-    mergedLocalCount,
+    unpublishedChangeCount,
+    unpublishedDiffStats,
+    defaultWorkspaceCount,
   ] = await withStaleWorkspaceRetry(workspacePath, readStatus);
+  const notInDefaultAvailable = defaultWorkspaceCount > 0;
+  const [notInDefaultChangeCount, notInDefaultDiffStats] = notInDefaultAvailable
+    ? await withStaleWorkspaceRetry(workspacePath, () =>
+        Promise.all([
+          countRevset(workspacePath, NOT_IN_DEFAULT_WORKSPACE_REVSET),
+          diffStatsForRevset(workspacePath, NOT_IN_DEFAULT_WORKSPACE_REVSET),
+        ]),
+      )
+    : [0, { addedLines: 0, removedLines: 0 }];
 
   const exactBookmarks = parseBookmarks(exactBookmarkOutput);
   const displayBookmarks = parseBookmarks(displayBookmarkOutput);
@@ -347,10 +376,10 @@ export async function readWorkspaceStatus(workspacePath: string): Promise<Worksp
     displayBookmarks,
   });
   const hasWorkingCopyChanges = diffText.trim().length > 0;
+  const hasConflicts = conflictedCount > 0;
   const workspaceState = classifyWorkspaceState({
-    hasConflicts: conflictedCount > 0,
-    isPublished: publishedCount > 0,
-    isMergedLocal: mergedLocalCount > 0,
+    hasConflicts,
+    unpublishedChangeCount,
   });
   const effectiveDiffStats = summarizeUnifiedDiff(effectiveDiffText);
 
@@ -359,6 +388,14 @@ export async function readWorkspaceStatus(workspacePath: string): Promise<Worksp
     hasWorkingCopyChanges,
     effectiveAddedLines: effectiveDiffStats.addedLines,
     effectiveRemovedLines: effectiveDiffStats.removedLines,
+    hasConflicts,
+    unpublishedChangeCount,
+    unpublishedAddedLines: unpublishedDiffStats.addedLines,
+    unpublishedRemovedLines: unpublishedDiffStats.removedLines,
+    notInDefaultAvailable,
+    notInDefaultChangeCount,
+    notInDefaultAddedLines: notInDefaultDiffStats.addedLines,
+    notInDefaultRemovedLines: notInDefaultDiffStats.removedLines,
     bookmarks,
     bookmarkRelation,
     unreadNotes: 0,

@@ -33,6 +33,14 @@ export interface WorkspaceStatus {
   hasWorkingCopyChanges: boolean;
   effectiveAddedLines: number;
   effectiveRemovedLines: number;
+  hasConflicts: boolean;
+  unpublishedChangeCount: number;
+  unpublishedAddedLines: number;
+  unpublishedRemovedLines: number;
+  notInDefaultAvailable: boolean;
+  notInDefaultChangeCount: number;
+  notInDefaultAddedLines: number;
+  notInDefaultRemovedLines: number;
   bookmarks: string[];
   bookmarkRelation: WorkspaceBookmarkRelation;
   unreadNotes: number;

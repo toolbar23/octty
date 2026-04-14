@@ -44,6 +44,14 @@ export class AppDatabase {
         has_working_copy_changes integer not null default 0,
         effective_added_lines integer not null default 0,
         effective_removed_lines integer not null default 0,
+        has_conflicts integer not null default 0,
+        unpublished_change_count integer not null default 0,
+        unpublished_added_lines integer not null default 0,
+        unpublished_removed_lines integer not null default 0,
+        not_in_default_available integer not null default 0,
+        not_in_default_change_count integer not null default 0,
+        not_in_default_added_lines integer not null default 0,
+        not_in_default_removed_lines integer not null default 0,
         bookmarks text not null default '',
         bookmark_relation text not null default 'none',
         unread_notes integer not null default 0,
@@ -140,6 +148,44 @@ export class AppDatabase {
         "alter table workspaces add column effective_removed_lines integer not null default 0",
       );
     }
+    if (!workspaceColumns.some((column) => column.name === "has_conflicts")) {
+      this.db.exec("alter table workspaces add column has_conflicts integer not null default 0");
+    }
+    if (!workspaceColumns.some((column) => column.name === "unpublished_change_count")) {
+      this.db.exec(
+        "alter table workspaces add column unpublished_change_count integer not null default 0",
+      );
+    }
+    if (!workspaceColumns.some((column) => column.name === "unpublished_added_lines")) {
+      this.db.exec(
+        "alter table workspaces add column unpublished_added_lines integer not null default 0",
+      );
+    }
+    if (!workspaceColumns.some((column) => column.name === "unpublished_removed_lines")) {
+      this.db.exec(
+        "alter table workspaces add column unpublished_removed_lines integer not null default 0",
+      );
+    }
+    if (!workspaceColumns.some((column) => column.name === "not_in_default_available")) {
+      this.db.exec(
+        "alter table workspaces add column not_in_default_available integer not null default 0",
+      );
+    }
+    if (!workspaceColumns.some((column) => column.name === "not_in_default_change_count")) {
+      this.db.exec(
+        "alter table workspaces add column not_in_default_change_count integer not null default 0",
+      );
+    }
+    if (!workspaceColumns.some((column) => column.name === "not_in_default_added_lines")) {
+      this.db.exec(
+        "alter table workspaces add column not_in_default_added_lines integer not null default 0",
+      );
+    }
+    if (!workspaceColumns.some((column) => column.name === "not_in_default_removed_lines")) {
+      this.db.exec(
+        "alter table workspaces add column not_in_default_removed_lines integer not null default 0",
+      );
+    }
     if (!workspaceColumns.some((column) => column.name === "display_name")) {
       this.db.exec(
         "alter table workspaces add column display_name text not null default ''",
@@ -211,6 +257,14 @@ export class AppDatabase {
           has_working_copy_changes,
           effective_added_lines,
           effective_removed_lines,
+          has_conflicts,
+          unpublished_change_count,
+          unpublished_added_lines,
+          unpublished_removed_lines,
+          not_in_default_available,
+          not_in_default_change_count,
+          not_in_default_added_lines,
+          not_in_default_removed_lines,
           bookmarks,
           bookmark_relation,
           unread_notes,
@@ -222,6 +276,14 @@ export class AppDatabase {
           updated_at,
           last_opened_at
         ) values (
+          ?,
+          ?,
+          ?,
+          ?,
+          ?,
+          ?,
+          ?,
+          ?,
           ?,
           ?,
           ?,
@@ -257,6 +319,14 @@ export class AppDatabase {
           has_working_copy_changes = excluded.has_working_copy_changes,
           effective_added_lines = excluded.effective_added_lines,
           effective_removed_lines = excluded.effective_removed_lines,
+          has_conflicts = excluded.has_conflicts,
+          unpublished_change_count = excluded.unpublished_change_count,
+          unpublished_added_lines = excluded.unpublished_added_lines,
+          unpublished_removed_lines = excluded.unpublished_removed_lines,
+          not_in_default_available = excluded.not_in_default_available,
+          not_in_default_change_count = excluded.not_in_default_change_count,
+          not_in_default_added_lines = excluded.not_in_default_added_lines,
+          not_in_default_removed_lines = excluded.not_in_default_removed_lines,
           bookmarks = excluded.bookmarks,
           bookmark_relation = excluded.bookmark_relation,
           unread_notes = excluded.unread_notes,
@@ -280,6 +350,14 @@ export class AppDatabase {
         workspace.hasWorkingCopyChanges ? 1 : 0,
         workspace.effectiveAddedLines,
         workspace.effectiveRemovedLines,
+        workspace.hasConflicts ? 1 : 0,
+        workspace.unpublishedChangeCount,
+        workspace.unpublishedAddedLines,
+        workspace.unpublishedRemovedLines,
+        workspace.notInDefaultAvailable ? 1 : 0,
+        workspace.notInDefaultChangeCount,
+        workspace.notInDefaultAddedLines,
+        workspace.notInDefaultRemovedLines,
         JSON.stringify(workspace.bookmarks),
         workspace.bookmarkRelation,
         workspace.unreadNotes,
@@ -308,6 +386,14 @@ export class AppDatabase {
           has_working_copy_changes as hasWorkingCopyChanges,
           effective_added_lines as effectiveAddedLines,
           effective_removed_lines as effectiveRemovedLines,
+          has_conflicts as hasConflicts,
+          unpublished_change_count as unpublishedChangeCount,
+          unpublished_added_lines as unpublishedAddedLines,
+          unpublished_removed_lines as unpublishedRemovedLines,
+          not_in_default_available as notInDefaultAvailable,
+          not_in_default_change_count as notInDefaultChangeCount,
+          not_in_default_added_lines as notInDefaultAddedLines,
+          not_in_default_removed_lines as notInDefaultRemovedLines,
           bookmarks,
           bookmark_relation as bookmarkRelation,
           unread_notes as unreadNotes,
@@ -335,6 +421,14 @@ export class AppDatabase {
       hasWorkingCopyChanges: Number(row.hasWorkingCopyChanges) === 1,
       effectiveAddedLines: Number(row.effectiveAddedLines),
       effectiveRemovedLines: Number(row.effectiveRemovedLines),
+      hasConflicts: Number(row.hasConflicts) === 1,
+      unpublishedChangeCount: Number(row.unpublishedChangeCount),
+      unpublishedAddedLines: Number(row.unpublishedAddedLines),
+      unpublishedRemovedLines: Number(row.unpublishedRemovedLines),
+      notInDefaultAvailable: Number(row.notInDefaultAvailable) === 1,
+      notInDefaultChangeCount: Number(row.notInDefaultChangeCount),
+      notInDefaultAddedLines: Number(row.notInDefaultAddedLines),
+      notInDefaultRemovedLines: Number(row.notInDefaultRemovedLines),
       bookmarks: JSON.parse(String(row.bookmarks)),
       bookmarkRelation: String(row.bookmarkRelation) as WorkspaceSummary["bookmarkRelation"],
       unreadNotes: Number(row.unreadNotes),

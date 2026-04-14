@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  WORKSPACE_STATUS_REVSETS,
   classifyWorkspaceState,
   fallbackWorkspacePath,
   isStaleWorkingCopyError,
@@ -97,43 +98,41 @@ describe("fallbackWorkspacePath", () => {
 });
 
 describe("classifyWorkspaceState", () => {
-  test("lets conflicts override other states", () => {
+  test("lets conflicts override unpublished state", () => {
     expect(
       classifyWorkspaceState({
         hasConflicts: true,
-        isPublished: true,
-        isMergedLocal: true,
+        unpublishedChangeCount: 3,
       }),
     ).toBe("conflicted");
   });
 
-  test("marks published work before merged-local", () => {
+  test("marks published when there are no unpublished changes", () => {
     expect(
       classifyWorkspaceState({
         hasConflicts: false,
-        isPublished: true,
-        isMergedLocal: true,
+        unpublishedChangeCount: 0,
       }),
     ).toBe("published");
   });
 
-  test("marks merged-local work when another workspace already contains it", () => {
+  test("falls back to draft for compatibility when unpublished changes exist", () => {
     expect(
       classifyWorkspaceState({
         hasConflicts: false,
-        isPublished: false,
-        isMergedLocal: true,
-      }),
-    ).toBe("merged-local");
-  });
-
-  test("falls back to draft for unique work", () => {
-    expect(
-      classifyWorkspaceState({
-        hasConflicts: false,
-        isPublished: false,
-        isMergedLocal: false,
+        unpublishedChangeCount: 2,
       }),
     ).toBe("draft");
+  });
+});
+
+describe("workspace status revsets", () => {
+  test("tracks unpublished work independently from current revision state", () => {
+    expect(WORKSPACE_STATUS_REVSETS.unpublished).toBe("remote_bookmarks()..@ ~ empty()");
+  });
+
+  test("tracks work not contained in the default workspace", () => {
+    expect(WORKSPACE_STATUS_REVSETS.defaultWorkspace).toBe("present(default@)");
+    expect(WORKSPACE_STATUS_REVSETS.notInDefault).toBe("default@..@ ~ empty()");
   });
 });

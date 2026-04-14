@@ -47,7 +47,6 @@ import type {
   TerminalPanePayload,
   WorkspaceColumn,
   WorkspaceDetail,
-  WorkspaceState,
   WorkspaceSnapshot,
   WorkspaceSummary,
 } from "../shared/types";
@@ -81,10 +80,7 @@ import {
   defaultTerminalAppearanceConfig,
   type TerminalAppearanceConfig,
 } from "../shared/terminal-font";
-import {
-  workspaceStateClassName,
-  workspaceStateLabel,
-} from "../shared/workspace-state";
+import { workspaceStatusBadges } from "../shared/workspace-state";
 import {
   clampBrowserZoom,
   normalizeBrowserNavigationInput,
@@ -906,48 +902,6 @@ function terminalStatusLabel(payload: TerminalPanePayload): string {
     return `exit ${payload.exitCode}`;
   }
   return "inactive";
-}
-
-function workspaceStateDescription(state: WorkspaceState): string {
-  switch (state) {
-    case "published":
-      return "effective change is reachable from a remote bookmark";
-    case "merged-local":
-      return "effective change is already contained in another local workspace";
-    case "draft":
-      return "effective change is still unique to this workspace";
-    case "conflicted":
-      return "effective change has unresolved conflicts";
-    case "unknown":
-      return "workspace state is unavailable";
-  }
-}
-
-function workspaceStateTitle(workspace: WorkspaceSummary): string {
-  const lines = [
-    `${workspaceStateLabel(workspace.workspaceState)}: ${workspaceStateDescription(workspace.workspaceState)}`,
-    `effective change: +${workspace.effectiveAddedLines}/-${workspace.effectiveRemovedLines}`,
-    workspace.hasWorkingCopyChanges
-      ? "working copy has changes"
-      : "no working-copy changes",
-  ];
-  return lines.join("\n");
-}
-
-function workspaceStateBeadText(workspace: WorkspaceSummary): string {
-  const label =
-    workspace.workspaceState === "merged-local"
-      ? "Merged"
-      : workspace.workspaceState === "conflicted"
-        ? "Conflict"
-        : workspaceStateLabel(workspace.workspaceState);
-  if (
-    workspace.workspaceState === "draft" ||
-    workspace.workspaceState === "merged-local"
-  ) {
-    return `${label} +${workspace.effectiveAddedLines}/-${workspace.effectiveRemovedLines}`;
-  }
-  return label;
 }
 
 function workspaceBookmarkLabel(workspace: WorkspaceSummary): string {
@@ -1953,6 +1907,7 @@ function App(): React.ReactElement {
                   .map((workspace) => {
                     const attentionClassName = agentAttentionClassName(workspace.agentAttentionState);
                     const attentionLabel = agentAttentionLabel(workspace.agentAttentionState);
+                    const statusBadges = workspaceStatusBadges(workspace);
 
                     return (
                       <div
@@ -2038,13 +1993,16 @@ function App(): React.ReactElement {
                                   {workspace.displayName}
                                 </span>
                               )}
-                              <span
-                                className={`workspace-state-bead ${workspaceStateClassName(workspace.workspaceState)} ${workspace.hasWorkingCopyChanges ? "changed" : "unchanged"}`}
-                                title={workspaceStateTitle(workspace)}
-                                aria-label={workspaceStateTitle(workspace)}
-                              >
-                                {workspaceStateBeadText(workspace)}
-                              </span>
+                              {statusBadges.map((badge) => (
+                                <span
+                                  key={badge.className}
+                                  className={`workspace-state-bead ${badge.className} ${workspace.hasWorkingCopyChanges ? "changed" : "unchanged"}`}
+                                  title={badge.title}
+                                  aria-label={badge.title}
+                                >
+                                  {badge.label}
+                                </span>
+                              ))}
                               <div className="inline-menu-root" data-nav-menu-root="true">
                                 <button
                                   className="sidebar-inline-button inline-menu-trigger"

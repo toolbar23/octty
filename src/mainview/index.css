@@ -1207,12 +1207,14 @@ textarea {
   color: var(--color-nav-text);
 }
 
+.workspace-state-bead.not-in-default,
 .workspace-state-bead.merged-local {
   background: var(--color-badge-warning);
   border-color: var(--color-badge-warning-border);
   color: var(--color-nav-text);
 }
 
+.workspace-state-bead.unpublished,
 .workspace-state-bead.draft {
   background: var(--color-error-bg);
   border-color: var(--color-error-border);
