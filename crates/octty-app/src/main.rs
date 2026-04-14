@@ -7,12 +7,13 @@ use gpui::{
 };
 use gpui_component::Root;
 use octty_core::{
-    PanePayload, PaneState, PaneType, ProjectRootRecord, WorkspaceSnapshot, WorkspaceState,
-    WorkspaceSummary, add_pane, create_default_snapshot, create_pane_state,
-    has_recorded_workspace_path, layout::now_ms, workspace_shortcut_targets,
+    PanePayload, PaneState, PaneType, ProjectRootRecord, SessionSnapshot, SessionState,
+    WorkspaceSnapshot, WorkspaceState, WorkspaceSummary, add_pane, create_default_snapshot,
+    create_pane_state, has_recorded_workspace_path, layout::now_ms, workspace_shortcut_targets,
 };
 use octty_jj::{discover_workspaces, read_workspace_status, resolve_repo_root};
 use octty_store::{TursoStore, default_store_path};
+use octty_term::{TerminalSessionSpec, capture_tmux_pane, ensure_tmux_session};
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
@@ -109,15 +110,48 @@ impl OcttyApp {
             .take()
             .unwrap_or_else(|| create_default_snapshot(workspace.id.clone()));
         let pane = create_pane_state(pane_type, workspace.workspace_path.clone(), None);
+        let pane_id = pane.id.clone();
         let snapshot = add_pane(snapshot, pane);
+        let is_terminal = matches!(
+            snapshot.panes.get(&pane_id).map(|pane| &pane.payload),
+            Some(PanePayload::Terminal(_))
+        );
+        let mut terminal_start_failed = false;
+        let (snapshot, terminal_started) = if is_terminal {
+            match start_terminal_session_sync(
+                &self.store_path,
+                &workspace,
+                snapshot.clone(),
+                &pane_id,
+            ) {
+                Ok(snapshot) => (snapshot, true),
+                Err(error) => {
+                    terminal_start_failed = true;
+                    self.status =
+                        format!("Added pane, but terminal start failed: {error:#}").into();
+                    (snapshot, false)
+                }
+            }
+        } else {
+            (snapshot, false)
+        };
         match save_workspace_snapshot_sync(&self.store_path, &snapshot) {
             Ok(()) => {
-                self.status = format!(
-                    "Saved {} pane(s) for {}.",
-                    snapshot.panes.len(),
-                    workspace.display_name_or_workspace_name()
-                )
-                .into();
+                if terminal_started {
+                    self.status = format!(
+                        "Started shell and saved {} pane(s) for {}.",
+                        snapshot.panes.len(),
+                        workspace.display_name_or_workspace_name()
+                    )
+                    .into();
+                } else if !terminal_start_failed {
+                    self.status = format!(
+                        "Saved {} pane(s) for {}.",
+                        snapshot.panes.len(),
+                        workspace.display_name_or_workspace_name()
+                    )
+                    .into();
+                }
                 self.active_snapshot = Some(snapshot);
             }
             Err(error) => {
@@ -290,6 +324,13 @@ fn main() {
         println!("octty-rs pane check ok: {count} pane(s)");
         return;
     }
+    if std::env::args().any(|arg| arg == "--shell-check") {
+        let session_id = runtime
+            .block_on(shell_session_check())
+            .expect("run shell session check");
+        println!("octty-rs shell check ok: {session_id}");
+        return;
+    }
 
     let bootstrap = runtime
         .block_on(load_bootstrap(true))
@@ -425,6 +466,98 @@ async fn pane_persistence_check() -> anyhow::Result<usize> {
     store.save_snapshot(&snapshot).await?;
     let saved = load_workspace_snapshot(&store, workspace).await?;
     Ok(saved.panes.len())
+}
+
+async fn shell_session_check() -> anyhow::Result<String> {
+    let bootstrap = load_bootstrap(true).await?;
+    let Some(index) = bootstrap.active_workspace_index else {
+        anyhow::bail!("no active workspace");
+    };
+    let workspace = &bootstrap.workspaces[index];
+    let snapshot = bootstrap
+        .active_snapshot
+        .unwrap_or_else(|| create_default_snapshot(workspace.id.clone()));
+    let pane = create_pane_state(PaneType::Shell, workspace.workspace_path.clone(), None);
+    let pane_id = pane.id.clone();
+    let snapshot = add_pane(snapshot, pane);
+    let snapshot = start_terminal_session(
+        &TursoStore::open(default_store_path()).await?,
+        workspace,
+        snapshot,
+        &pane_id,
+    )
+    .await?;
+    Ok(snapshot
+        .panes
+        .get(&pane_id)
+        .and_then(|pane| match &pane.payload {
+            PanePayload::Terminal(payload) => payload.session_id.clone(),
+            _ => None,
+        })
+        .unwrap_or_default())
+}
+
+fn start_terminal_session_sync(
+    store_path: &Path,
+    workspace: &WorkspaceSummary,
+    snapshot: WorkspaceSnapshot,
+    pane_id: &str,
+) -> anyhow::Result<WorkspaceSnapshot> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async {
+        let store = TursoStore::open(store_path).await?;
+        start_terminal_session(&store, workspace, snapshot, pane_id).await
+    })
+}
+
+async fn start_terminal_session(
+    store: &TursoStore,
+    workspace: &WorkspaceSummary,
+    mut snapshot: WorkspaceSnapshot,
+    pane_id: &str,
+) -> anyhow::Result<WorkspaceSnapshot> {
+    let pane = snapshot
+        .panes
+        .get_mut(pane_id)
+        .ok_or_else(|| anyhow::anyhow!("pane `{pane_id}` missing from snapshot"))?;
+    let PanePayload::Terminal(payload) = &mut pane.payload else {
+        anyhow::bail!("pane `{pane_id}` is not a terminal");
+    };
+
+    let spec = TerminalSessionSpec {
+        workspace_id: workspace.id.clone(),
+        pane_id: pane_id.to_owned(),
+        kind: payload.kind.clone(),
+        cwd: payload.cwd.clone(),
+        cols: 120,
+        rows: 40,
+    };
+    let session_id = ensure_tmux_session(&spec).await?;
+    let screen = capture_tmux_pane(&spec).await.unwrap_or_default();
+    payload.session_id = Some(session_id.clone());
+    payload.session_state = SessionState::Live;
+    payload.restored_buffer = screen.clone();
+
+    store
+        .upsert_session_state(&SessionSnapshot {
+            id: session_id,
+            workspace_id: workspace.id.clone(),
+            pane_id: pane_id.to_owned(),
+            kind: payload.kind.clone(),
+            cwd: payload.cwd.clone(),
+            command: payload.command.clone(),
+            buffer: screen.clone(),
+            screen: Some(screen),
+            state: SessionState::Live,
+            exit_code: None,
+            embedded_session: payload.embedded_session.clone(),
+            embedded_session_correlation_id: payload.embedded_session_correlation_id.clone(),
+            agent_attention_state: payload.agent_attention_state.clone(),
+        })
+        .await?;
+
+    snapshot.updated_at = now_ms();
+    Ok(snapshot)
 }
 
 fn load_workspace_snapshot_sync(

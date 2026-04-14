@@ -45,6 +45,7 @@ cargo run -p octty-app --bin octty-rs
 cargo run -p octty-app --bin octty-rs -- --headless-check
 cargo run -p octty-app --bin octty-rs -- --bootstrap-check
 OCTTY_RS_STATE_PATH=/tmp/octty-rs-check.turso cargo run -p octty-app --bin octty-rs -- --pane-check
+OCTTY_RS_STATE_PATH=/tmp/octty-rs-shell.turso OCTTY_RS_TMUX_SOCKET=octty-rs-check cargo run -p octty-app --bin octty-rs -- --shell-check
 ```
 
 Rust scaffold pieces:

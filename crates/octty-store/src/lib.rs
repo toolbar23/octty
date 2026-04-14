@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use octty_core::{
-    AgentAttentionState, ProjectRootRecord, WorkspaceBookmarkRelation, WorkspaceSnapshot,
-    WorkspaceState, WorkspaceStatus, WorkspaceSummary,
+    AgentAttentionState, ProjectRootRecord, SessionSnapshot, SessionState, TerminalKind,
+    WorkspaceBookmarkRelation, WorkspaceSnapshot, WorkspaceState, WorkspaceStatus,
+    WorkspaceSummary,
 };
 use thiserror::Error;
 use turso::{Builder, Connection, Database, Value, params};
@@ -236,6 +237,73 @@ impl TursoStore {
         Ok(Some(serde_json::from_str(&snapshot_json)?))
     }
 
+    pub async fn upsert_session_state(&self, session: &SessionSnapshot) -> Result<(), StoreError> {
+        let conn = self.connection().await?;
+        conn.execute(
+            "insert into session_state (
+               pane_id, workspace_id, session_id, kind, cwd, command, state, exit_code, buffer, updated_at
+             )
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, unixepoch() * 1000)
+             on conflict(pane_id) do update set
+               workspace_id = excluded.workspace_id,
+               session_id = excluded.session_id,
+               kind = excluded.kind,
+               cwd = excluded.cwd,
+               command = excluded.command,
+               state = excluded.state,
+               exit_code = excluded.exit_code,
+               buffer = excluded.buffer,
+               updated_at = excluded.updated_at",
+            params![
+                session.pane_id.as_str(),
+                session.workspace_id.as_str(),
+                session.id.as_str(),
+                terminal_kind_to_str(&session.kind),
+                session.cwd.as_str(),
+                session.command.as_str(),
+                session_state_to_str(&session.state),
+                optional_i64_to_value(session.exit_code),
+                session.buffer.as_str()
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_session_state_by_pane(
+        &self,
+        pane_id: &str,
+    ) -> Result<Option<SessionSnapshot>, StoreError> {
+        let conn = self.connection().await?;
+        let mut rows = conn
+            .query(
+                "select pane_id, workspace_id, session_id, kind, cwd, command, state, exit_code, buffer
+                 from session_state
+                 where pane_id = ?1",
+                [pane_id],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let pane_id = text(row.get_value(0)?, "pane_id")?;
+        Ok(Some(SessionSnapshot {
+            pane_id,
+            workspace_id: text(row.get_value(1)?, "workspace_id")?,
+            id: text(row.get_value(2)?, "session_id")?,
+            kind: parse_terminal_kind(&text(row.get_value(3)?, "kind")?),
+            cwd: text(row.get_value(4)?, "cwd")?,
+            command: text(row.get_value(5)?, "command")?,
+            state: parse_session_state(&text(row.get_value(6)?, "state")?),
+            exit_code: optional_integer(row.get_value(7)?, "exit_code")?,
+            buffer: text(row.get_value(8)?, "buffer")?,
+            screen: None,
+            embedded_session: None,
+            embedded_session_correlation_id: None,
+            agent_attention_state: None,
+        }))
+    }
+
     async fn migrate(&self) -> Result<(), StoreError> {
         let conn = self.connection().await?;
         conn.execute_batch(
@@ -339,6 +407,18 @@ fn integer(value: Value, column: &'static str) -> Result<i64, StoreError> {
     }
 }
 
+fn optional_integer(value: Value, column: &'static str) -> Result<Option<i64>, StoreError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Integer(value) => Ok(Some(value)),
+        value => Err(StoreError::UnexpectedValue { column, value }),
+    }
+}
+
+fn optional_i64_to_value(value: Option<i64>) -> Result<Value, turso::Error> {
+    Ok(value.map(Value::Integer).unwrap_or(Value::Null))
+}
+
 fn bool_to_int(value: bool) -> i64 {
     i64::from(value)
 }
@@ -403,6 +483,42 @@ fn parse_optional_agent_attention(value: Value) -> Result<Option<AgentAttentionS
             column: "agent_attention_state",
             value,
         }),
+    }
+}
+
+fn terminal_kind_to_str(value: &TerminalKind) -> &'static str {
+    match value {
+        TerminalKind::Shell => "shell",
+        TerminalKind::Codex => "codex",
+        TerminalKind::Pi => "pi",
+        TerminalKind::Nvim => "nvim",
+        TerminalKind::Jjui => "jjui",
+    }
+}
+
+fn parse_terminal_kind(value: &str) -> TerminalKind {
+    match value {
+        "codex" => TerminalKind::Codex,
+        "pi" => TerminalKind::Pi,
+        "nvim" => TerminalKind::Nvim,
+        "jjui" => TerminalKind::Jjui,
+        _ => TerminalKind::Shell,
+    }
+}
+
+fn session_state_to_str(value: &SessionState) -> &'static str {
+    match value {
+        SessionState::Live => "live",
+        SessionState::Stopped => "stopped",
+        SessionState::Missing => "missing",
+    }
+}
+
+fn parse_session_state(value: &str) -> SessionState {
+    match value {
+        "live" => SessionState::Live,
+        "missing" => SessionState::Missing,
+        _ => SessionState::Stopped,
     }
 }
 
@@ -478,6 +594,33 @@ mod tests {
         store.upsert_workspace(&workspace).await.unwrap();
 
         assert_eq!(store.list_workspaces().await.unwrap(), vec![workspace]);
+    }
+
+    #[tokio::test]
+    async fn round_trips_session_state() {
+        let store = TursoStore::open_memory().await.unwrap();
+        let session = SessionSnapshot {
+            id: "tmux-session-1".to_owned(),
+            workspace_id: "workspace-1".to_owned(),
+            pane_id: "pane-1".to_owned(),
+            kind: TerminalKind::Shell,
+            cwd: "/tmp/repo".to_owned(),
+            command: "".to_owned(),
+            buffer: "hello".to_owned(),
+            screen: None,
+            state: SessionState::Live,
+            exit_code: None,
+            embedded_session: None,
+            embedded_session_correlation_id: None,
+            agent_attention_state: None,
+        };
+
+        store.upsert_session_state(&session).await.unwrap();
+
+        assert_eq!(
+            store.get_session_state_by_pane("pane-1").await.unwrap(),
+            Some(session)
+        );
     }
 
     #[tokio::test]
