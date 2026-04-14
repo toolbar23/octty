@@ -46,6 +46,7 @@ cargo run -p octty-app --bin octty-rs -- --headless-check
 cargo run -p octty-app --bin octty-rs -- --bootstrap-check
 OCTTY_RS_STATE_PATH=/tmp/octty-rs-check.turso cargo run -p octty-app --bin octty-rs -- --pane-check
 OCTTY_RS_STATE_PATH=/tmp/octty-rs-shell.turso OCTTY_RS_TMUX_SOCKET=octty-rs-check cargo run -p octty-app --bin octty-rs -- --shell-check
+OCTTY_RS_STATE_PATH=/tmp/octty-rs-io.turso OCTTY_RS_TMUX_SOCKET=octty-rs-io cargo run -p octty-app --bin octty-rs -- --terminal-io-check
 ```
 
 Rust scaffold pieces:
@@ -53,7 +54,7 @@ Rust scaffold pieces:
 - `octty-core`: domain types, layout state, workspace shortcut assignment
 - `octty-store`: local Turso database and migrations at `~/.local/share/octty-rs/state.turso`
 - `octty-jj`: JJ workspace discovery/status helpers
-- `octty-term`: tmux launch/session plumbing
+- `octty-term`: tmux launch/session/input/capture plumbing
 - `octty-app`: GPUI + gpui-component application shell
 
 The Ghostty terminal adapter is behind an optional feature because

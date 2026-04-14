@@ -84,10 +84,64 @@ pub async fn capture_tmux_pane(spec: &TerminalSessionSpec) -> Result<String, Ter
         "capture-pane".to_owned(),
         "-p".to_owned(),
         "-t".to_owned(),
-        format!("{session_name}:0.0"),
+        session_name,
     ];
     let output = tmux_output(&args).await?;
     Ok(String::from_utf8_lossy(&output).to_string())
+}
+
+pub async fn send_tmux_text(spec: &TerminalSessionSpec, text: &str) -> Result<(), TerminalError> {
+    let session_name = ensure_tmux_session(spec).await?;
+    let args = vec![
+        "-L".to_owned(),
+        tmux_socket_name(),
+        "send-keys".to_owned(),
+        "-t".to_owned(),
+        session_name,
+        "-l".to_owned(),
+        text.to_owned(),
+    ];
+    run_tmux(&args).await
+}
+
+pub async fn send_tmux_enter(spec: &TerminalSessionSpec) -> Result<(), TerminalError> {
+    send_tmux_keys(spec, &["Enter"]).await
+}
+
+pub async fn send_tmux_keys(
+    spec: &TerminalSessionSpec,
+    keys: &[&str],
+) -> Result<(), TerminalError> {
+    let session_name = ensure_tmux_session(spec).await?;
+    let mut args = vec![
+        "-L".to_owned(),
+        tmux_socket_name(),
+        "send-keys".to_owned(),
+        "-t".to_owned(),
+        session_name,
+    ];
+    args.extend(keys.iter().map(|key| (*key).to_owned()));
+    run_tmux(&args).await
+}
+
+pub async fn resize_tmux_session(
+    spec: &TerminalSessionSpec,
+    cols: u16,
+    rows: u16,
+) -> Result<(), TerminalError> {
+    let session_name = ensure_tmux_session(spec).await?;
+    let args = vec![
+        "-L".to_owned(),
+        tmux_socket_name(),
+        "resize-window".to_owned(),
+        "-t".to_owned(),
+        session_name,
+        "-x".to_owned(),
+        cols.to_string(),
+        "-y".to_owned(),
+        rows.to_string(),
+    ];
+    run_tmux(&args).await
 }
 
 pub async fn kill_tmux_session(session_name: &str) -> Result<(), TerminalError> {

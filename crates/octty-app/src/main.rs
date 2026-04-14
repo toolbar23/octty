@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use gpui::{
     Action, App, Application, Bounds, Context, IntoElement, KeyBinding, Menu, MenuItem,
@@ -8,12 +8,16 @@ use gpui::{
 use gpui_component::Root;
 use octty_core::{
     PanePayload, PaneState, PaneType, ProjectRootRecord, SessionSnapshot, SessionState,
-    WorkspaceSnapshot, WorkspaceState, WorkspaceSummary, add_pane, create_default_snapshot,
-    create_pane_state, has_recorded_workspace_path, layout::now_ms, workspace_shortcut_targets,
+    TerminalPanePayload, WorkspaceSnapshot, WorkspaceState, WorkspaceSummary, add_pane,
+    create_default_snapshot, create_pane_state, has_recorded_workspace_path, layout::now_ms,
+    workspace_shortcut_targets,
 };
 use octty_jj::{discover_workspaces, read_workspace_status, resolve_repo_root};
 use octty_store::{TursoStore, default_store_path};
-use octty_term::{TerminalSessionSpec, capture_tmux_pane, ensure_tmux_session};
+use octty_term::{
+    TerminalSessionSpec, capture_tmux_pane, ensure_tmux_session, resize_tmux_session,
+    send_tmux_enter, send_tmux_text,
+};
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
@@ -331,6 +335,13 @@ fn main() {
         println!("octty-rs shell check ok: {session_id}");
         return;
     }
+    if std::env::args().any(|arg| arg == "--terminal-io-check") {
+        let marker = runtime
+            .block_on(terminal_io_check())
+            .expect("run terminal io check");
+        println!("octty-rs terminal io check ok: {marker}");
+        return;
+    }
 
     let bootstrap = runtime
         .block_on(load_bootstrap(true))
@@ -497,6 +508,45 @@ async fn shell_session_check() -> anyhow::Result<String> {
         .unwrap_or_default())
 }
 
+async fn terminal_io_check() -> anyhow::Result<String> {
+    let bootstrap = load_bootstrap(true).await?;
+    let Some(index) = bootstrap.active_workspace_index else {
+        anyhow::bail!("no active workspace");
+    };
+    let workspace = &bootstrap.workspaces[index];
+    let snapshot = bootstrap
+        .active_snapshot
+        .unwrap_or_else(|| create_default_snapshot(workspace.id.clone()));
+    let pane = create_pane_state(PaneType::Shell, workspace.workspace_path.clone(), None);
+    let pane_id = pane.id.clone();
+    let snapshot = add_pane(snapshot, pane);
+    let store = TursoStore::open(default_store_path()).await?;
+    let mut snapshot = start_terminal_session(&store, workspace, snapshot, &pane_id).await?;
+
+    let payload = terminal_payload_for_pane(&snapshot, &pane_id)?.clone();
+    let spec = terminal_spec_for_payload(workspace, &pane_id, &payload, 120, 40);
+    resize_tmux_session(&spec, 120, 40).await?;
+
+    let marker = format!("octty-terminal-io-{}", now_ms());
+    send_tmux_text(&spec, &format!("printf '{marker}\\n'")).await?;
+    send_tmux_enter(&spec).await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let screen = capture_tmux_pane(&spec).await?;
+    if !screen.contains(&marker) {
+        anyhow::bail!("terminal screen did not contain marker `{marker}`");
+    }
+
+    let session_id = payload
+        .session_id
+        .unwrap_or_else(|| stable_session_fallback(&spec));
+    snapshot =
+        persist_terminal_screen(&store, workspace, snapshot, &pane_id, session_id, screen).await?;
+    store.save_snapshot(&snapshot).await?;
+
+    Ok(marker)
+}
+
 fn start_terminal_session_sync(
     store_path: &Path,
     workspace: &WorkspaceSummary,
@@ -513,8 +563,24 @@ fn start_terminal_session_sync(
 async fn start_terminal_session(
     store: &TursoStore,
     workspace: &WorkspaceSummary,
+    snapshot: WorkspaceSnapshot,
+    pane_id: &str,
+) -> anyhow::Result<WorkspaceSnapshot> {
+    let payload = terminal_payload_for_pane(&snapshot, pane_id)?.clone();
+    let spec = terminal_spec_for_payload(workspace, pane_id, &payload, 120, 40);
+    let session_id = ensure_tmux_session(&spec).await?;
+    let screen = capture_tmux_pane(&spec).await.unwrap_or_default();
+
+    persist_terminal_screen(store, workspace, snapshot, pane_id, session_id, screen).await
+}
+
+async fn persist_terminal_screen(
+    store: &TursoStore,
+    workspace: &WorkspaceSummary,
     mut snapshot: WorkspaceSnapshot,
     pane_id: &str,
+    session_id: String,
+    screen: String,
 ) -> anyhow::Result<WorkspaceSnapshot> {
     let pane = snapshot
         .panes
@@ -524,16 +590,6 @@ async fn start_terminal_session(
         anyhow::bail!("pane `{pane_id}` is not a terminal");
     };
 
-    let spec = TerminalSessionSpec {
-        workspace_id: workspace.id.clone(),
-        pane_id: pane_id.to_owned(),
-        kind: payload.kind.clone(),
-        cwd: payload.cwd.clone(),
-        cols: 120,
-        rows: 40,
-    };
-    let session_id = ensure_tmux_session(&spec).await?;
-    let screen = capture_tmux_pane(&spec).await.unwrap_or_default();
     payload.session_id = Some(session_id.clone());
     payload.session_state = SessionState::Live;
     payload.restored_buffer = screen.clone();
@@ -558,6 +614,41 @@ async fn start_terminal_session(
 
     snapshot.updated_at = now_ms();
     Ok(snapshot)
+}
+
+fn terminal_payload_for_pane<'a>(
+    snapshot: &'a WorkspaceSnapshot,
+    pane_id: &str,
+) -> anyhow::Result<&'a TerminalPanePayload> {
+    let pane = snapshot
+        .panes
+        .get(pane_id)
+        .ok_or_else(|| anyhow::anyhow!("pane `{pane_id}` missing from snapshot"))?;
+    let PanePayload::Terminal(payload) = &pane.payload else {
+        anyhow::bail!("pane `{pane_id}` is not a terminal");
+    };
+    Ok(payload)
+}
+
+fn terminal_spec_for_payload(
+    workspace: &WorkspaceSummary,
+    pane_id: &str,
+    payload: &TerminalPanePayload,
+    cols: u16,
+    rows: u16,
+) -> TerminalSessionSpec {
+    TerminalSessionSpec {
+        workspace_id: workspace.id.clone(),
+        pane_id: pane_id.to_owned(),
+        kind: payload.kind.clone(),
+        cwd: payload.cwd.clone(),
+        cols,
+        rows,
+    }
+}
+
+fn stable_session_fallback(spec: &TerminalSessionSpec) -> String {
+    octty_term::stable_tmux_session_name(spec)
 }
 
 fn load_workspace_snapshot_sync(
@@ -714,10 +805,14 @@ fn render_pane(pane: &PaneState) -> gpui::Div {
 
 fn pane_body_label(pane: &PaneState) -> String {
     match &pane.payload {
-        PanePayload::Terminal(payload) => format!(
-            "Terminal placeholder · kind={:?} · cwd={}",
-            payload.kind, payload.cwd
-        ),
+        PanePayload::Terminal(payload) => {
+            let screen = terminal_screen_excerpt(&payload.restored_buffer);
+            if screen.is_empty() {
+                format!("Terminal · kind={:?} · cwd={}", payload.kind, payload.cwd)
+            } else {
+                format!("Terminal · {:?} · {}\n{screen}", payload.kind, payload.cwd)
+            }
+        }
         PanePayload::Note(payload) => format!(
             "Note placeholder · {}",
             payload.note_path.as_deref().unwrap_or("no note selected")
@@ -725,6 +820,16 @@ fn pane_body_label(pane: &PaneState) -> String {
         PanePayload::Diff(_) => "Diff placeholder · JJ diff will render here.".to_owned(),
         PanePayload::Browser(payload) => format!("Browser deferred · {}", payload.url),
     }
+}
+
+fn terminal_screen_excerpt(screen: &str) -> String {
+    let lines: Vec<_> = screen
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let start = lines.len().saturating_sub(8);
+    lines[start..].join("\n")
 }
 
 fn workspace_status_label(state: &WorkspaceState) -> &'static str {
