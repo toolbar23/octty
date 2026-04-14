@@ -35,6 +35,7 @@ import type {
 import { hasRecordedWorkspacePath } from "../shared/types";
 import { aggregateAgentAttentionStates } from "../shared/agent-attention";
 import { AppDatabase } from "./db";
+import { resolveStateDbPath } from "./app-paths";
 import { readTerminalAppearanceConfig } from "./terminal-config";
 import {
   buildTerminalLaunch,
@@ -117,12 +118,6 @@ const WORKSPACE_NAME_NOUNS = [
   "wolf",
   "yak",
 ] as const;
-
-function defaultDbPath(): string {
-  const octtyPath = join(homedir(), ".local", "share", "octty", "state.sqlite");
-  const legacyPath = join(homedir(), ".local", "share", "workspace-orbit", "state.sqlite");
-  return existsSync(legacyPath) ? legacyPath : octtyPath;
-}
 
 function now(): number {
   return Date.now();
@@ -239,7 +234,7 @@ export class WorkspaceService {
     console.log("[terminal]", message, resolvedDetails ?? {});
   }
 
-  constructor(private readonly dbPath = defaultDbPath()) {
+  constructor(private readonly dbPath = resolveStateDbPath()) {
     this.db = new AppDatabase(dbPath);
     this.ptySidecar = new PtySidecar();
     this.ptySidecar.onMessage((message) => {

@@ -28,6 +28,8 @@ Useful commands:
 
 ```bash
 npm run build
+npm run pack:linux
+npm run dist:linux
 npm run typecheck
 npm test
 ```
@@ -54,6 +56,25 @@ OCTTY_TERMINAL_FONT_FAMILY='"Iosevka Term", monospace' OCTTY_TERMINAL_FONT_SIZE=
 - Legacy app state DB: `~/.local/share/workspace-orbit/state.sqlite`
 - Notes: `*.note.md` files inside the workspace directory
 - Terminal sessions: backed by `tmux`
+
+## Linux Packaging
+
+Build a distributable AppImage with:
+
+```bash
+npm install
+npm run dist:linux
+```
+
+This writes artifacts to `dist/`.
+
+For a quick packaging check without creating an AppImage, build the unpacked Linux app with:
+
+```bash
+npm run pack:linux
+```
+
+The packaged app still expects `jj` and `tmux` to be available on `PATH` at runtime.
 
 ## Current Shape
 

@@ -1,9 +1,10 @@
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { fork, spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 import type { SessionSnapshot, TerminalKind } from "../shared/types";
+import { resolveCacheDirectory } from "./app-paths";
 import { sanitizeChildEnv } from "./env";
 import { defaultTerminalCommand, isAgentTerminalKind, normalizeTerminalKind } from "../shared/terminal-kind";
 
@@ -43,20 +44,43 @@ type SidecarListener = (message: {
   message?: string;
 }) => void;
 
-function resolveSidecarPath(): string {
-  const sourceRoot = process.env.OCTTY_SOURCE_ROOT || process.env.WORKSPACE_ORBIT_SOURCE_ROOT;
-  const candidates = [
+export function sidecarPathCandidates(
+  sourceRoot: string | null,
+  cwd: string,
+  moduleUrl: string = import.meta.url,
+): string[] {
+  return [
     sourceRoot ? resolve(sourceRoot, "src/pty-host/index.mjs") : null,
     sourceRoot ? resolve(sourceRoot, "runtime/pty-host/index.mjs") : null,
-    resolve(process.cwd(), "src/pty-host/index.mjs"),
-    resolve(process.cwd(), "runtime/pty-host/index.mjs"),
-    new URL("../runtime/pty-host/index.mjs", import.meta.url).pathname,
-  ];
+    sourceRoot ? resolve(sourceRoot, "build/electron/runtime/pty-host/index.mjs") : null,
+    resolve(cwd, "src/pty-host/index.mjs"),
+    resolve(cwd, "build/electron/runtime/pty-host/index.mjs"),
+    resolve(cwd, "runtime/pty-host/index.mjs"),
+    fileURLToPath(new URL("./runtime/pty-host/index.mjs", moduleUrl)),
+  ].filter((candidate): candidate is string => Boolean(candidate));
+}
+
+export function resolveSidecarWorkingDirectory(
+  sourceRoot: string | null,
+  fallbackCwd: string = process.cwd(),
+): string {
+  if (sourceRoot) {
+    try {
+      if (statSync(sourceRoot).isDirectory()) {
+        return sourceRoot;
+      }
+    } catch {
+      // Ignore missing or unreadable roots and fall back to a known-good cwd.
+    }
+  }
+  return fallbackCwd;
+}
+
+function resolveSidecarPath(): string {
+  const sourceRoot = process.env.OCTTY_SOURCE_ROOT || process.env.WORKSPACE_ORBIT_SOURCE_ROOT;
+  const candidates = sidecarPathCandidates(sourceRoot ?? null, process.cwd());
 
   for (const candidate of candidates) {
-    if (!candidate) {
-      continue;
-    }
     if (existsSync(candidate)) {
       return realpathSync(candidate);
     }
@@ -108,7 +132,7 @@ function legacyTmuxSessionNameFor(sessionId: string): string {
 }
 
 function resolveTmuxConfigPath(): string {
-  const configDir = join(homedir(), ".cache", "octty");
+  const configDir = resolveCacheDirectory();
   const configPath = join(configDir, "tmux.conf");
   mkdirSync(configDir, { recursive: true });
   writeFileSync(configPath, OCTTY_TMUX_CONFIG);
@@ -123,17 +147,21 @@ type TmuxTarget = {
 export class PtySidecar {
   private readonly sessions = new Map<string, LiveSession>();
   private readonly listeners = new Set<SidecarListener>();
-  private readonly proc: ChildProcessWithoutNullStreams;
+  private readonly proc: ChildProcess;
   private readonly childEnv = sanitizeChildEnv();
   private readonly tmuxConfigPath = resolveTmuxConfigPath();
 
   constructor() {
     const sourceRoot = process.env.OCTTY_SOURCE_ROOT || process.env.WORKSPACE_ORBIT_SOURCE_ROOT;
-    const proc = spawn("node", [resolveSidecarPath()], {
-      cwd: sourceRoot || process.cwd(),
+    const proc = fork(resolveSidecarPath(), {
+      cwd: resolveSidecarWorkingDirectory(sourceRoot ?? null),
       env: this.childEnv,
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe", "ipc"],
+      silent: true,
     });
+    if (!proc.stdin || !proc.stdout || !proc.stderr) {
+      throw new Error("PTY sidecar stdio was not available");
+    }
 
     this.proc = proc;
     this.consumeStdout(proc.stdout);
@@ -172,6 +200,9 @@ export class PtySidecar {
   }
 
   private send(message: SidecarEnvelope): void {
+    if (!this.proc.stdin) {
+      throw new Error("PTY sidecar stdin is not available");
+    }
     this.proc.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
@@ -375,7 +406,7 @@ export class PtySidecar {
     for (const sessionId of Array.from(this.sessions.keys())) {
       this.detach(sessionId);
     }
-    this.proc.stdin.end();
+    this.proc.stdin?.end();
     this.proc.kill();
   }
 }

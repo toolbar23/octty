@@ -27,7 +27,8 @@ export function sanitizeTerminalFontSize(input: string | number | undefined | nu
   return Math.min(MAX_TERMINAL_FONT_SIZE, Math.max(MIN_TERMINAL_FONT_SIZE, Math.round(parsed)));
 }
 
-export function defaultTerminalAppearanceConfig(): TerminalAppearanceConfig {
+export function defaultTerminalAppearanceConfig(platform?: string | null): TerminalAppearanceConfig {
+  void platform;
   return {
     fontFamily: DEFAULT_TERMINAL_FONT_FAMILY,
     fontSize: DEFAULT_TERMINAL_FONT_SIZE,

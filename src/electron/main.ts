@@ -1,17 +1,26 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertRuntimeDependencies } from "../backend/requirements";
 import { OCTTY_EVENT_CHANNEL } from "../shared/desktop-bridge";
 import { OcttyBackend } from "./backend";
+import { readTerminalClipboardPaste } from "./terminal-clipboard";
 
 const currentFile = fileURLToPath(import.meta.url);
 const currentDir = dirname(currentFile);
 const appRoot = resolve(currentDir, "..", "..");
 const rendererHtmlPath = join(currentDir, "index.html");
 const preloadPath = join(currentDir, "preload.cjs");
-const backend = new OcttyBackend();
+let backend: OcttyBackend | null = null;
 const windows = new Set<BrowserWindow>();
 const DEBUG_ELECTRON_DIAGNOSTICS = process.env.OCTTY_DEBUG_ELECTRON === "1";
+
+function getBackend(): OcttyBackend {
+  if (!backend) {
+    throw new Error("Backend not initialized");
+  }
+  return backend;
+}
 
 function broadcastEvent(event: unknown): void {
   for (const window of windows) {
@@ -22,7 +31,7 @@ function broadcastEvent(event: unknown): void {
 }
 
 function registerIpcHandlers(): void {
-  ipcMain.handle("octty:get-bootstrap", () => backend.getBootstrap());
+  ipcMain.handle("octty:get-bootstrap", () => getBackend().getBootstrap());
   ipcMain.handle("octty:pick-directory", async (_event, startingFolder?: string) => {
     const result = await dialog.showOpenDialog({
       defaultPath: startingFolder,
@@ -33,68 +42,69 @@ function registerIpcHandlers(): void {
     }
     return result.filePaths[0] ?? null;
   });
-  ipcMain.handle("octty:add-project-root", (_event, path: string) => backend.addProjectRoot(path));
+  ipcMain.handle("octty:add-project-root", (_event, path: string) => getBackend().addProjectRoot(path));
   ipcMain.handle("octty:remove-project-root", (_event, rootId: string) =>
-    backend.removeProjectRoot(rootId),
+    getBackend().removeProjectRoot(rootId),
   );
   ipcMain.handle(
     "octty:update-project-root-display-name",
     (_event, rootId: string, displayName: string) =>
-      backend.updateProjectRootDisplayName(rootId, displayName),
+      getBackend().updateProjectRootDisplayName(rootId, displayName),
   );
-  ipcMain.handle("octty:create-workspace", (_event, payload) => backend.createWorkspace(payload));
+  ipcMain.handle("octty:create-workspace", (_event, payload) => getBackend().createWorkspace(payload));
   ipcMain.handle(
     "octty:update-workspace-display-name",
     (_event, workspaceId: string, displayName: string) =>
-      backend.updateWorkspaceDisplayName(workspaceId, displayName),
+      getBackend().updateWorkspaceDisplayName(workspaceId, displayName),
   );
   ipcMain.handle("octty:forget-workspace", (_event, workspaceId: string) =>
-    backend.forgetWorkspace(workspaceId),
+    getBackend().forgetWorkspace(workspaceId),
   );
   ipcMain.handle("octty:delete-and-forget-workspace", (_event, workspaceId: string) =>
-    backend.deleteAndForgetWorkspace(workspaceId),
+    getBackend().deleteAndForgetWorkspace(workspaceId),
   );
   ipcMain.handle("octty:open-workspace", (_event, workspaceId: string, viewportWidth?: number) =>
-    backend.openWorkspace(workspaceId, viewportWidth),
+    getBackend().openWorkspace(workspaceId, viewportWidth),
   );
   ipcMain.handle("octty:save-snapshot", (_event, workspaceId: string, snapshot) =>
-    backend.saveSnapshot(workspaceId, snapshot),
+    getBackend().saveSnapshot(workspaceId, snapshot),
   );
   ipcMain.handle("octty:create-note", (_event, workspaceId: string, fileName: string) =>
-    backend.createNote(workspaceId, fileName),
+    getBackend().createNote(workspaceId, fileName),
   );
   ipcMain.handle("octty:save-note", (_event, workspaceId: string, notePath: string, body: string) =>
-    backend.saveNote(workspaceId, notePath, body),
+    getBackend().saveNote(workspaceId, notePath, body),
   );
   ipcMain.handle("octty:mark-note-read", (_event, workspaceId: string, notePath: string) =>
-    backend.markNoteRead(workspaceId, notePath),
+    getBackend().markNoteRead(workspaceId, notePath),
   );
   ipcMain.handle("octty:create-terminal-session", (_event, request) =>
-    backend.createTerminalSession(request),
+    getBackend().createTerminalSession(request),
   );
   ipcMain.handle("octty:get-session", (_event, sessionId: string) => {
-    const session = backend.getSession(sessionId);
+    const session = getBackend().getSession(sessionId);
     if (!session) {
       throw new Error("Session not found");
     }
     return session;
   });
+  ipcMain.handle("octty:read-terminal-clipboard-paste", () => readTerminalClipboardPaste());
   ipcMain.handle("octty:open-external", (_event, url: string) => shell.openExternal(url));
 
   ipcMain.on("octty:terminal-input", (_event, payload) => {
-    backend.sendTerminalInput(payload.sessionId, payload.data);
+    getBackend().sendTerminalInput(payload.sessionId, payload.data);
   });
   ipcMain.on("octty:terminal-resize", (_event, payload) => {
-    backend.resizeTerminal(payload.sessionId, payload.cols, payload.rows);
+    getBackend().resizeTerminal(payload.sessionId, payload.cols, payload.rows);
   });
   ipcMain.on("octty:terminal-focus", (_event, payload) => {
-    backend.focusTerminal(payload.sessionId, payload.focused);
+    getBackend().focusTerminal(payload.sessionId, payload.focused);
   });
   ipcMain.on("octty:terminal-detach", (_event, payload) => {
-    backend.detachTerminal(payload.sessionId);
+    getBackend().detachTerminal(payload.sessionId);
   });
   ipcMain.on("octty:terminal-close", (_event, payload) => {
-    backend.closeTerminal(payload.sessionId);
+    getBackend().closeTerminal(payload.sessionId);
   });
 }
 
@@ -210,8 +220,12 @@ function createMainWindow(): BrowserWindow {
 }
 
 async function main(): Promise<void> {
-  process.env.OCTTY_SOURCE_ROOT ||= appRoot;
   await app.whenReady();
+  process.env.OCTTY_SOURCE_ROOT ||= app.isPackaged ? process.resourcesPath : appRoot;
+  process.env.OCTTY_USER_DATA_PATH ||= app.getPath("userData");
+  process.env.OCTTY_CACHE_PATH ||= join(app.getPath("sessionData"), "octty");
+  await assertRuntimeDependencies();
+  backend = new OcttyBackend();
   await backend.init();
   backend.onEvent((event) => {
     broadcastEvent(event);
@@ -227,12 +241,15 @@ async function main(): Promise<void> {
 }
 
 app.on("window-all-closed", () => {
-  backend.dispose();
+  backend?.dispose();
   app.quit();
 });
 
 void main().catch((error) => {
   console.error("[electron] failed to start", error);
-  backend.dispose();
+  if (app.isReady()) {
+    dialog.showErrorBox("Octty failed to start", error instanceof Error ? error.message : String(error));
+  }
+  backend?.dispose();
   app.exit(1);
 });

@@ -10,6 +10,7 @@ import type {
   WorkspaceSnapshot,
   WorkspaceSummary,
 } from "./types";
+import type { TerminalClipboardPaste } from "./terminal-clipboard";
 
 export const OCTTY_EVENT_CHANNEL = "octty:event";
 
@@ -36,6 +37,7 @@ export interface OcttyDesktopBridge {
   focusTerminal(sessionId: string, focused: boolean): void;
   detachTerminal(sessionId: string): void;
   closeTerminal(sessionId: string): void;
+  readTerminalClipboardPaste(): Promise<TerminalClipboardPaste>;
   openExternal(url: string): Promise<void>;
   onWorkspaceEvent(listener: (event: WorkspaceEventEnvelope) => void): () => void;
 }

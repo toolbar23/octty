@@ -8,7 +8,7 @@ import {
 export function readTerminalAppearanceConfig(
   env: Record<string, string | undefined> = process.env,
 ): TerminalAppearanceConfig {
-  const defaults = defaultTerminalAppearanceConfig();
+  const defaults = defaultTerminalAppearanceConfig(process.platform);
   return {
     fontFamily: sanitizeTerminalFontFamily(
       env.OCTTY_TERMINAL_FONT_FAMILY ?? env.WORKSPACE_ORBIT_TERMINAL_FONT_FAMILY ?? defaults.fontFamily,

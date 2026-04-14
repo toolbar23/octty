@@ -52,6 +52,8 @@ const bridge: OcttyDesktopBridge = {
     ipcRenderer.send("octty:terminal-detach", { sessionId }),
   closeTerminal: (sessionId: string) =>
     ipcRenderer.send("octty:terminal-close", { sessionId }),
+  readTerminalClipboardPaste: () =>
+    ipcRenderer.invoke("octty:read-terminal-clipboard-paste"),
   openExternal: (url: string) => ipcRenderer.invoke("octty:open-external", url),
   onWorkspaceEvent: (listener: (event: WorkspaceEventEnvelope) => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: WorkspaceEventEnvelope) => {

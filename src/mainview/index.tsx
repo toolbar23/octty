@@ -1,4 +1,9 @@
-import { init as initGhostty, Terminal, FitAddon, type ITheme } from "ghostty-web";
+import {
+  init as initGhostty,
+  Terminal,
+  FitAddon,
+  type ITheme,
+} from "ghostty-web";
 import "./index.css";
 import React, {
   useCallback,
@@ -53,7 +58,11 @@ import {
   takeStringChunk,
 } from "../shared/terminal-batching";
 import { appShortcutActionForKeyEvent } from "../shared/app-shortcuts";
-import { shouldRemapShiftEnterToCtrlJ } from "../shared/terminal-shortcuts";
+import {
+  shouldRemapShiftEnterToCtrlJ,
+  terminalClipboardShortcutActionForKeyEvent,
+  type TerminalClipboardShortcutAction,
+} from "../shared/terminal-shortcuts";
 import {
   isAgentTerminalKind,
   shouldCloseTerminalPaneOnExit,
@@ -168,6 +177,8 @@ function desktop() {
 
 type ShortcutBridgeEvent = CustomEvent<string>;
 
+const desktopPlatform = window.octtyDesktop?.platform ?? null;
+
 function patchGhosttyRenderLoop(): void {
   if (ghosttyRenderLoopPatched || ghosttyRenderLoopMode === "raf") {
     return;
@@ -270,6 +281,88 @@ async function copyTextToClipboard(text: string): Promise<void> {
   }
 }
 
+function clipboardEventHasFileOrImage(event: ClipboardEvent): boolean {
+  const clipboardData = event.clipboardData;
+  if (!clipboardData) {
+    return false;
+  }
+
+  if (clipboardData.files.length > 0 || Array.from(clipboardData.types).includes("Files")) {
+    return true;
+  }
+
+  return Array.from(clipboardData.items).some(
+    (item) => item.kind === "file" || item.type.startsWith("image/"),
+  );
+}
+
+async function readTextForTerminalPaste(event?: ClipboardEvent): Promise<string> {
+  const clipboardText = event?.clipboardData?.getData("text/plain") ?? "";
+  if (clipboardText && event && !clipboardEventHasFileOrImage(event)) {
+    return clipboardText;
+  }
+
+  try {
+    const paste = await desktop().readTerminalClipboardPaste();
+    if (paste.text) {
+      return paste.text;
+    }
+  } catch (error) {
+    logTerminalUi("terminal-clipboard-ipc-error", () => ({
+      message: error instanceof Error ? error.message : String(error),
+    }));
+  }
+
+  if (clipboardText) {
+    return clipboardText;
+  }
+
+  try {
+    return (await navigator.clipboard?.readText?.()) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function pasteClipboardIntoTerminal(runtime: TerminalRuntime, event?: ClipboardEvent): void {
+  void readTextForTerminalPaste(event).then((text) => {
+    if (!text) {
+      return;
+    }
+    runtime.term.clearSelection();
+    runtime.term.paste(text);
+  });
+}
+
+function copyTerminalSelection(term: Terminal, options?: { clearSelection?: boolean }): void {
+  const selection = term.getSelection();
+  if (!selection) {
+    return;
+  }
+
+  void copyTextToClipboard(selection).catch((error) => {
+    logTerminalUi("terminal-selection-copy-error", () => ({
+      message: error instanceof Error ? error.message : String(error),
+    }));
+  });
+
+  if (options?.clearSelection) {
+    term.clearSelection();
+  }
+}
+
+function handleTerminalClipboardShortcut(
+  runtime: TerminalRuntime,
+  action: TerminalClipboardShortcutAction,
+): void {
+  if (action === "paste") {
+    pasteClipboardIntoTerminal(runtime);
+    return;
+  }
+
+  copyTerminalSelection(runtime.term, { clearSelection: action === "cut" });
+}
+
 type SessionEvent =
   | { type: "output"; data: string }
   | { type: "exit"; exitCode: number | null };
@@ -281,7 +374,7 @@ type KeyboardNavigationRequest = {
 };
 
 const paneFocusRegistry = new Map<string, () => boolean>();
-let terminalAppearance = defaultTerminalAppearanceConfig();
+let terminalAppearance = defaultTerminalAppearanceConfig(desktopPlatform);
 
 type TerminalRuntime = {
   paneId: string;
@@ -440,6 +533,17 @@ function createTerminalRuntime(paneId: string): TerminalRuntime {
       return true;
     }
 
+    const terminalClipboardAction = terminalClipboardShortcutActionForKeyEvent(event);
+    if (terminalClipboardAction) {
+      logTerminalUi("term-clipboard-shortcut", () => ({
+        paneId,
+        sessionId: runtime.sessionId,
+        action: terminalClipboardAction,
+      }));
+      handleTerminalClipboardShortcut(runtime, terminalClipboardAction);
+      return true;
+    }
+
     return false;
   });
   host.tabIndex = 0;
@@ -535,6 +639,22 @@ function createTerminalRuntime(paneId: string): TerminalRuntime {
       runtime.sendInput(runtime.sessionId, data);
     },
   });
+
+  host.addEventListener(
+    "paste",
+    (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      logTerminalUi("term-paste-event", () => ({
+        paneId,
+        sessionId: runtime.sessionId,
+        hasFileOrImage: clipboardEventHasFileOrImage(event),
+        hasText: Boolean(event.clipboardData?.getData("text/plain")),
+      }));
+      pasteClipboardIntoTerminal(runtime, event);
+    },
+    true,
+  );
 
   term.onData((data) => {
     logTerminalUi("term-on-data", () => ({
@@ -917,7 +1037,7 @@ function App(): React.ReactElement {
   const [bootstrap, setBootstrap] = useState<BootstrapPayload>({
     projectRoots: [],
     workspaces: [],
-    terminalAppearance: defaultTerminalAppearanceConfig(),
+    terminalAppearance: defaultTerminalAppearanceConfig(desktopPlatform),
   });
   const [details, setDetails] = useState<Record<string, WorkspaceDetail>>({});
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
