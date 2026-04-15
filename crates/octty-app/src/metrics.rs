@@ -1,0 +1,268 @@
+fn push_latency_sample(samples: &mut VecDeque<u64>, micros: u64) {
+    if samples.len() == TERMINAL_LATENCY_SAMPLE_LIMIT {
+        samples.pop_front();
+    }
+    samples.push_back(micros);
+}
+
+fn duration_micros(duration: Duration) -> u64 {
+    duration.as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+fn latency_summary(samples: &VecDeque<u64>) -> Option<String> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<_> = samples.iter().copied().collect();
+    sorted.sort_unstable();
+    let p50 = latency_percentile(&sorted, 50);
+    let p95 = latency_percentile(&sorted, 95);
+    let max = *sorted.last().unwrap_or(&p95);
+    Some(format!(
+        "p50 {} p95 {} max {}",
+        format_latency_micros(p50),
+        format_latency_micros(p95),
+        format_latency_micros(max)
+    ))
+}
+
+fn count_summary(samples: &VecDeque<u64>) -> Option<String> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<_> = samples.iter().copied().collect();
+    sorted.sort_unstable();
+    let p50 = latency_percentile(&sorted, 50);
+    let p95 = latency_percentile(&sorted, 95);
+    let max = *sorted.last().unwrap_or(&p95);
+    Some(format!("p50 {p50} p95 {p95} max {max}"))
+}
+
+fn latency_percentile(sorted_micros: &[u64], percentile: usize) -> u64 {
+    let index = ((sorted_micros.len().saturating_sub(1) * percentile) / 100)
+        .min(sorted_micros.len().saturating_sub(1));
+    sorted_micros[index]
+}
+
+fn format_latency_micros(micros: u64) -> String {
+    if micros >= 1_000 {
+        format!("{:.1}ms", micros as f64 / 1_000.0)
+    } else {
+        format!("{micros}us")
+    }
+}
+
+fn terminal_font() -> Font {
+    let mut terminal_font = font(terminal_font_family());
+    terminal_font.features = FontFeatures::disable_ligatures();
+    terminal_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
+        "DejaVu Sans Mono".to_owned(),
+        "Liberation Mono".to_owned(),
+        "Noto Sans Mono".to_owned(),
+        "Cascadia Mono".to_owned(),
+        "Menlo".to_owned(),
+        "Consolas".to_owned(),
+        "monospace".to_owned(),
+    ]));
+    terminal_font
+}
+
+fn terminal_font_family() -> String {
+    std::env::var("OCTTY_RS_TERMINAL_FONT_FAMILY")
+        .or_else(|_| std::env::var("OCTTY_TERMINAL_FONT_FAMILY"))
+        .ok()
+        .and_then(|family| first_font_family(&family))
+        .unwrap_or_else(|| DEFAULT_TERMINAL_FONT_FAMILY.to_owned())
+}
+
+fn first_font_family(input: &str) -> Option<String> {
+    input
+        .split(',')
+        .map(|family| family.trim().trim_matches('"').trim_matches('\'').trim())
+        .find(|family| !family.is_empty() && !family.eq_ignore_ascii_case("monospace"))
+        .map(str::to_owned)
+}
+
+fn default_terminal_grid_for_pane() -> (u16, u16) {
+    (
+        (720.0_f32 / TERMINAL_CELL_WIDTH).floor() as u16,
+        (360.0_f32 / TERMINAL_CELL_HEIGHT).floor() as u16,
+    )
+}
+
+fn taskspace_height_for_viewport(viewport_height: f32) -> f32 {
+    (viewport_height - TERMINAL_TASKSPACE_VERTICAL_CHROME_HEIGHT).max(160.0)
+}
+
+fn taskspace_width_for_viewport(viewport_width: f32) -> f32 {
+    (viewport_width - WORKSPACE_SIDEBAR_WIDTH - TASKSPACE_HORIZONTAL_PADDING).max(240.0)
+}
+
+fn terminal_surface_chrome_height() -> f32 {
+    let debug_height = if terminal_performance_data_enabled() {
+        TERMINAL_DEBUG_TIMER_LINE_HEIGHT + TERMINAL_SURFACE_DEBUG_TIMER_MARGIN_BOTTOM
+    } else {
+        0.0
+    };
+    TERMINAL_SURFACE_PADDING_Y + debug_height
+}
+
+fn taskspace_viewport_offset(snapshot: &WorkspaceSnapshot, viewport_width: f32) -> f32 {
+    let Some((active_left, active_width, total_width)) = active_column_metrics(snapshot) else {
+        return 0.0;
+    };
+    let max_offset = (total_width - viewport_width).max(0.0);
+    let centered_offset = active_left + (active_width / 2.0) - (viewport_width / 2.0);
+    centered_offset.clamp(0.0, max_offset)
+}
+
+fn active_column_metrics(snapshot: &WorkspaceSnapshot) -> Option<(f32, f32, f32)> {
+    let active_pane_id = snapshot
+        .active_pane_id
+        .as_deref()
+        .or_else(|| first_center_pane_id(snapshot))?;
+
+    let mut total_width = 0.0;
+    let mut active_left = None;
+    let mut active_width = None;
+    let mut visible_column_count = 0usize;
+
+    for column_id in &snapshot.center_column_ids {
+        let Some(column) = snapshot.columns.get(column_id) else {
+            continue;
+        };
+        if visible_column_count > 0 {
+            total_width += TASKSPACE_PANEL_GAP;
+        }
+        if column
+            .pane_ids
+            .iter()
+            .any(|pane_id| pane_id == active_pane_id)
+        {
+            active_left = Some(total_width);
+            active_width = Some(column.width_px as f32);
+        }
+        total_width += column.width_px as f32;
+        visible_column_count += 1;
+    }
+
+    Some((active_left?, active_width?, total_width))
+}
+
+fn terminal_resize_requests(
+    snapshot: Option<&WorkspaceSnapshot>,
+    taskspace_height: f32,
+) -> Vec<(String, String, u16, u16)> {
+    let Some(snapshot) = snapshot else {
+        return Vec::new();
+    };
+    let mut requests = Vec::new();
+    for column_id in &snapshot.center_column_ids {
+        let Some(column) = snapshot.columns.get(column_id) else {
+            continue;
+        };
+        let pane_count = column.pane_ids.len().max(1);
+        let pane_height =
+            (taskspace_height - (pane_count.saturating_sub(1) as f32 * 12.0)) / pane_count as f32;
+        let terminal_height =
+            (pane_height - terminal_surface_chrome_height()).max(TERMINAL_CELL_HEIGHT);
+        let cols = ((column.width_px as f32 - 24.0) / TERMINAL_CELL_WIDTH)
+            .floor()
+            .max(20.0) as u16;
+        let rows = (terminal_height / TERMINAL_CELL_HEIGHT).floor().max(4.0) as u16;
+        for pane_id in &column.pane_ids {
+            let Some(pane) = snapshot.panes.get(pane_id) else {
+                continue;
+            };
+            if matches!(pane.payload, PanePayload::Terminal(_)) {
+                requests.push((snapshot.workspace_id.clone(), pane_id.clone(), cols, rows));
+            }
+        }
+    }
+    requests
+}
+
+fn live_terminal_key(workspace_id: &str, pane_id: &str) -> String {
+    format!("{workspace_id}:{pane_id}")
+}
+
+fn pane_activity_map(activities: Vec<PaneActivity>) -> HashMap<(String, String), PaneActivity> {
+    activities
+        .into_iter()
+        .map(|activity| {
+            (
+                (activity.workspace_id.clone(), activity.pane_id.clone()),
+                activity,
+            )
+        })
+        .collect()
+}
+
+fn pane_activity_state(
+    workspace_id: &str,
+    pane_id: &str,
+    pane_activity: &HashMap<(String, String), PaneActivity>,
+) -> ActivityState {
+    pane_activity
+        .get(&(workspace_id.to_owned(), pane_id.to_owned()))
+        .map(|activity| activity.state_at(now_ms(), PANE_ACTIVITY_ACTIVE_WINDOW_MS))
+        .unwrap_or(ActivityState::IdleSeen)
+}
+
+fn workspace_activity_state(
+    workspace: &WorkspaceSummary,
+    pane_activity: &HashMap<(String, String), PaneActivity>,
+) -> ActivityState {
+    derive_workspace_activity(
+        pane_activity
+            .iter()
+            .filter_map(|((workspace_id, _), activity)| {
+                (workspace_id == &workspace.id)
+                    .then(|| activity.state_at(now_ms(), PANE_ACTIVITY_ACTIVE_WINDOW_MS))
+            }),
+    )
+}
+
+fn pane_border_color(active: bool, activity_state: ActivityState) -> Hsla {
+    if active {
+        rgb(0x6aa36f).into()
+    } else {
+        match activity_state {
+            ActivityState::Active => rgb(0x4e86d8).into(),
+            ActivityState::IdleUnseen => rgb(0xb68a35).into(),
+            ActivityState::IdleSeen => rgb(0x444444).into(),
+        }
+    }
+}
+
+fn split_live_terminal_key(key: &str) -> Option<(&str, &str)> {
+    key.split_once(':')
+}
+
+fn terminal_rgb_to_rgba(color: TerminalRgb) -> Rgba {
+    Rgba {
+        r: color.r as f32 / 255.0,
+        g: color.g as f32 / 255.0,
+        b: color.b as f32 / 255.0,
+        a: 1.0,
+    }
+}
+
+fn terminal_dim_color(color: Rgba, target: Rgba) -> Rgba {
+    Rgba {
+        r: (color.r + target.r) * 0.5,
+        g: (color.g + target.g) * 0.5,
+        b: (color.b + target.b) * 0.5,
+        a: color.a,
+    }
+}
+
+fn workspace_status_label(state: &WorkspaceState) -> &'static str {
+    match state {
+        WorkspaceState::Published => "published",
+        WorkspaceState::MergedLocal => "merged local",
+        WorkspaceState::Draft => "draft",
+        WorkspaceState::Conflicted => "conflicted",
+        WorkspaceState::Unknown => "unknown",
+    }
+}

@@ -54,6 +54,145 @@ pub enum AgentAttentionState {
     IdleUnseen,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ActivityState {
+    Active,
+    IdleUnseen,
+    IdleSeen,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneActivity {
+    pub workspace_id: String,
+    pub pane_id: String,
+    pub last_activity_at_ms: i64,
+    pub last_seen_at_ms: i64,
+    pub last_seen_activity_at_ms: i64,
+    pub last_tmux_activity_at_s: Option<i64>,
+    pub last_seen_tmux_activity_at_s: Option<i64>,
+    pub last_screen_fingerprint: Option<String>,
+    pub last_seen_screen_fingerprint: Option<String>,
+    pub updated_at_ms: i64,
+}
+
+impl PaneActivity {
+    pub fn new(workspace_id: impl Into<String>, pane_id: impl Into<String>, now_ms: i64) -> Self {
+        Self {
+            workspace_id: workspace_id.into(),
+            pane_id: pane_id.into(),
+            last_activity_at_ms: 0,
+            last_seen_at_ms: 0,
+            last_seen_activity_at_ms: 0,
+            last_tmux_activity_at_s: None,
+            last_seen_tmux_activity_at_s: None,
+            last_screen_fingerprint: None,
+            last_seen_screen_fingerprint: None,
+            updated_at_ms: now_ms,
+        }
+    }
+
+    pub fn record_activity(
+        &mut self,
+        at_ms: i64,
+        tmux_activity_at_s: Option<i64>,
+        screen_fingerprint: Option<String>,
+    ) {
+        self.last_activity_at_ms = self.last_activity_at_ms.max(at_ms);
+        if let Some(tmux_activity_at_s) = tmux_activity_at_s {
+            self.last_tmux_activity_at_s = Some(
+                self.last_tmux_activity_at_s
+                    .unwrap_or_default()
+                    .max(tmux_activity_at_s),
+            );
+        }
+        if let Some(screen_fingerprint) = screen_fingerprint {
+            self.last_screen_fingerprint = Some(screen_fingerprint);
+        }
+        self.updated_at_ms = self.updated_at_ms.max(at_ms);
+    }
+
+    pub fn record_tmux_observation(
+        &mut self,
+        observed_at_ms: i64,
+        tmux_activity_at_s: Option<i64>,
+        screen_fingerprint: Option<String>,
+    ) {
+        if let Some(tmux_activity_at_s) = tmux_activity_at_s {
+            if self
+                .last_tmux_activity_at_s
+                .is_none_or(|current| tmux_activity_at_s > current)
+            {
+                self.last_tmux_activity_at_s = Some(tmux_activity_at_s);
+                self.last_activity_at_ms = self
+                    .last_activity_at_ms
+                    .max(tmux_activity_at_s.saturating_mul(1000));
+            }
+        }
+        if let Some(screen_fingerprint) = screen_fingerprint {
+            self.last_screen_fingerprint = Some(screen_fingerprint);
+        }
+        self.updated_at_ms = self.updated_at_ms.max(observed_at_ms);
+    }
+
+    pub fn record_seen(&mut self, seen_at_ms: i64) {
+        self.last_seen_at_ms = seen_at_ms;
+        self.last_seen_activity_at_ms = self.last_activity_at_ms;
+        self.last_seen_tmux_activity_at_s = self.last_tmux_activity_at_s;
+        self.last_seen_screen_fingerprint = self.last_screen_fingerprint.clone();
+        self.updated_at_ms = self.updated_at_ms.max(seen_at_ms);
+    }
+
+    pub fn state_at(&self, now_ms: i64, active_window_ms: i64) -> ActivityState {
+        if self.last_activity_at_ms > 0
+            && now_ms.saturating_sub(self.last_activity_at_ms) <= active_window_ms
+        {
+            ActivityState::Active
+        } else if self.has_unseen_activity() {
+            ActivityState::IdleUnseen
+        } else {
+            ActivityState::IdleSeen
+        }
+    }
+
+    pub fn has_unseen_activity(&self) -> bool {
+        self.last_activity_at_ms > self.last_seen_activity_at_ms
+            || self
+                .last_tmux_activity_at_s
+                .zip(self.last_seen_tmux_activity_at_s)
+                .is_some_and(|(activity, seen)| activity > seen)
+            || (self.last_tmux_activity_at_s.is_some()
+                && self.last_seen_tmux_activity_at_s.is_none())
+            || (self.last_screen_fingerprint.is_some()
+                && self.last_screen_fingerprint != self.last_seen_screen_fingerprint)
+    }
+}
+
+pub fn derive_workspace_activity(states: impl IntoIterator<Item = ActivityState>) -> ActivityState {
+    let mut has_unseen = false;
+    for state in states {
+        match state {
+            ActivityState::Active => return ActivityState::Active,
+            ActivityState::IdleUnseen => has_unseen = true,
+            ActivityState::IdleSeen => {}
+        }
+    }
+    if has_unseen {
+        ActivityState::IdleUnseen
+    } else {
+        ActivityState::IdleSeen
+    }
+}
+
+pub fn screen_fingerprint(screen: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in screen.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WorkspaceBookmarkRelation {
@@ -278,4 +417,71 @@ pub fn encode_missing_workspace_path(workspace_name: &str) -> String {
 
 pub fn has_recorded_workspace_path(workspace_path: &str) -> bool {
     !workspace_path.starts_with(MISSING_WORKSPACE_PATH_PREFIX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pane_activity_moves_from_active_to_unseen_until_seen() {
+        let mut activity = PaneActivity::new("workspace-1", "pane-1", 1_000);
+
+        activity.record_activity(2_000, None, Some(screen_fingerprint("hello")));
+
+        assert_eq!(activity.state_at(2_500, 1_000), ActivityState::Active);
+        assert_eq!(activity.state_at(4_000, 1_000), ActivityState::IdleUnseen);
+
+        activity.record_seen(4_100);
+
+        assert_eq!(activity.state_at(4_200, 1_000), ActivityState::IdleSeen);
+    }
+
+    #[test]
+    fn pane_activity_uses_tmux_and_fingerprint_as_restart_signals() {
+        let mut activity = PaneActivity::new("workspace-1", "pane-1", 1_000);
+        activity.record_tmux_observation(2_000, Some(10), Some(screen_fingerprint("first screen")));
+        activity.record_seen(2_100);
+
+        activity.record_tmux_observation(
+            30_000,
+            Some(11),
+            Some(screen_fingerprint("first screen")),
+        );
+
+        assert_eq!(activity.state_at(30_000, 1_000), ActivityState::IdleUnseen);
+
+        activity.record_seen(30_100);
+        activity.record_tmux_observation(
+            40_000,
+            Some(11),
+            Some(screen_fingerprint("changed screen")),
+        );
+
+        assert_eq!(activity.state_at(40_000, 1_000), ActivityState::IdleUnseen);
+    }
+
+    #[test]
+    fn workspace_activity_uses_active_then_unseen_precedence() {
+        assert_eq!(
+            derive_workspace_activity([
+                ActivityState::IdleSeen,
+                ActivityState::IdleUnseen,
+                ActivityState::IdleSeen,
+            ]),
+            ActivityState::IdleUnseen
+        );
+        assert_eq!(
+            derive_workspace_activity([
+                ActivityState::IdleUnseen,
+                ActivityState::Active,
+                ActivityState::IdleSeen,
+            ]),
+            ActivityState::Active
+        );
+        assert_eq!(
+            derive_workspace_activity([ActivityState::IdleSeen]),
+            ActivityState::IdleSeen
+        );
+    }
 }

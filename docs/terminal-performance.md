@@ -53,7 +53,7 @@ grid every frame.
 Runtime profiling:
 
 ```bash
-OCTTY_TERMINAL_PROFILE=1 cargo run -p octty-app --bin octty-rs
+OCTTY_TERMINAL_PROFILE=1 cargo run -p octty-app --bin octty
 ```
 
 The terminal label and stderr now include these buckets:
@@ -79,7 +79,7 @@ Synthetic profile tests:
 
 ```bash
 cargo test -p octty-term --features ghostty-vt --lib picker_preview_vt_pipeline_profile -- --ignored --nocapture
-cargo test -p octty-app --bin octty-rs terminal_picker_preview_paint_input_profile -- --ignored --nocapture
+cargo test -p octty-app --bin octty terminal_picker_preview_paint_input_profile -- --ignored --nocapture
 ```
 
 The first test exercises ANSI output into `libghostty-vt` and snapshot

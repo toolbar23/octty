@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use octty_core::{
-    AgentAttentionState, ProjectRootRecord, SessionSnapshot, SessionState, TerminalKind,
-    WorkspaceBookmarkRelation, WorkspaceSnapshot, WorkspaceState, WorkspaceStatus,
+    AgentAttentionState, PaneActivity, ProjectRootRecord, SessionSnapshot, SessionState,
+    TerminalKind, WorkspaceBookmarkRelation, WorkspaceSnapshot, WorkspaceState, WorkspaceStatus,
     WorkspaceSummary,
 };
 use thiserror::Error;
@@ -111,6 +111,7 @@ impl TursoStore {
     pub async fn delete_project_root(&self, root_id: &str) -> Result<(), StoreError> {
         let conn = self.connection().await?;
         conn.execute("delete from session_state where workspace_id in (select id from workspaces where root_id = ?1)", [root_id]).await?;
+        conn.execute("delete from pane_activity where workspace_id in (select id from workspaces where root_id = ?1)", [root_id]).await?;
         conn.execute("delete from workspace_snapshots where workspace_id in (select id from workspaces where root_id = ?1)", [root_id]).await?;
         conn.execute("delete from note_state where workspace_id in (select id from workspaces where root_id = ?1)", [root_id]).await?;
         conn.execute("delete from workspaces where root_id = ?1", [root_id])
@@ -211,6 +212,11 @@ impl TursoStore {
         let conn = self.connection().await?;
         conn.execute(
             "delete from session_state where workspace_id = ?1",
+            [workspace_id],
+        )
+        .await?;
+        conn.execute(
+            "delete from pane_activity where workspace_id = ?1",
             [workspace_id],
         )
         .await?;
@@ -317,6 +323,127 @@ impl TursoStore {
         };
         let snapshot_json = text(row.get_value(0)?, "snapshot_json")?;
         Ok(Some(serde_json::from_str(&snapshot_json)?))
+    }
+
+    pub async fn list_snapshots(&self) -> Result<Vec<WorkspaceSnapshot>, StoreError> {
+        let conn = self.connection().await?;
+        let mut rows = conn
+            .query(
+                "select snapshot_json from workspace_snapshots order by workspace_id",
+                (),
+            )
+            .await?;
+        let mut snapshots = Vec::new();
+        while let Some(row) = rows.next().await? {
+            snapshots.push(serde_json::from_str(&text(
+                row.get_value(0)?,
+                "snapshot_json",
+            )?)?);
+        }
+        Ok(snapshots)
+    }
+
+    pub async fn upsert_pane_activity(&self, activity: &PaneActivity) -> Result<(), StoreError> {
+        let conn = self.connection().await?;
+        conn.execute(
+            "insert into pane_activity (
+               workspace_id, pane_id, last_activity_at_ms, last_seen_at_ms,
+               last_seen_activity_at_ms, last_tmux_activity_at_s,
+               last_seen_tmux_activity_at_s, last_screen_fingerprint,
+               last_seen_screen_fingerprint, updated_at_ms
+             )
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             on conflict(workspace_id, pane_id) do update set
+               last_activity_at_ms = excluded.last_activity_at_ms,
+               last_seen_at_ms = excluded.last_seen_at_ms,
+               last_seen_activity_at_ms = excluded.last_seen_activity_at_ms,
+               last_tmux_activity_at_s = excluded.last_tmux_activity_at_s,
+               last_seen_tmux_activity_at_s = excluded.last_seen_tmux_activity_at_s,
+               last_screen_fingerprint = excluded.last_screen_fingerprint,
+               last_seen_screen_fingerprint = excluded.last_seen_screen_fingerprint,
+               updated_at_ms = excluded.updated_at_ms",
+            params![
+                activity.workspace_id.as_str(),
+                activity.pane_id.as_str(),
+                activity.last_activity_at_ms,
+                activity.last_seen_at_ms,
+                activity.last_seen_activity_at_ms,
+                optional_i64_to_value(activity.last_tmux_activity_at_s),
+                optional_i64_to_value(activity.last_seen_tmux_activity_at_s),
+                optional_str_to_value(activity.last_screen_fingerprint.as_deref()),
+                optional_str_to_value(activity.last_seen_screen_fingerprint.as_deref()),
+                activity.updated_at_ms,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn upsert_pane_activities(
+        &self,
+        activities: &[PaneActivity],
+    ) -> Result<(), StoreError> {
+        for activity in activities {
+            self.upsert_pane_activity(activity).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn delete_pane_activity(
+        &self,
+        workspace_id: &str,
+        pane_id: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.connection().await?;
+        conn.execute(
+            "delete from pane_activity where workspace_id = ?1 and pane_id = ?2",
+            params![workspace_id, pane_id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_pane_activity(&self) -> Result<Vec<PaneActivity>, StoreError> {
+        let conn = self.connection().await?;
+        let mut rows = conn
+            .query(
+                "select workspace_id, pane_id, last_activity_at_ms, last_seen_at_ms,
+                        last_seen_activity_at_ms, last_tmux_activity_at_s,
+                        last_seen_tmux_activity_at_s, last_screen_fingerprint,
+                        last_seen_screen_fingerprint, updated_at_ms
+                 from pane_activity
+                 order by workspace_id, pane_id",
+                (),
+            )
+            .await?;
+        let mut activities = Vec::new();
+        while let Some(row) = rows.next().await? {
+            activities.push(PaneActivity {
+                workspace_id: text(row.get_value(0)?, "workspace_id")?,
+                pane_id: text(row.get_value(1)?, "pane_id")?,
+                last_activity_at_ms: integer(row.get_value(2)?, "last_activity_at_ms")?,
+                last_seen_at_ms: integer(row.get_value(3)?, "last_seen_at_ms")?,
+                last_seen_activity_at_ms: integer(row.get_value(4)?, "last_seen_activity_at_ms")?,
+                last_tmux_activity_at_s: optional_integer(
+                    row.get_value(5)?,
+                    "last_tmux_activity_at_s",
+                )?,
+                last_seen_tmux_activity_at_s: optional_integer(
+                    row.get_value(6)?,
+                    "last_seen_tmux_activity_at_s",
+                )?,
+                last_screen_fingerprint: optional_text(
+                    row.get_value(7)?,
+                    "last_screen_fingerprint",
+                )?,
+                last_seen_screen_fingerprint: optional_text(
+                    row.get_value(8)?,
+                    "last_seen_screen_fingerprint",
+                )?,
+                updated_at_ms: integer(row.get_value(9)?, "updated_at_ms")?,
+            });
+        }
+        Ok(activities)
     }
 
     pub async fn upsert_session_state(&self, session: &SessionSnapshot) -> Result<(), StoreError> {
@@ -453,6 +580,20 @@ impl TursoStore {
               updated_at integer not null
             );
 
+            create table if not exists pane_activity (
+              workspace_id text not null,
+              pane_id text not null,
+              last_activity_at_ms integer not null default 0,
+              last_seen_at_ms integer not null default 0,
+              last_seen_activity_at_ms integer not null default 0,
+              last_tmux_activity_at_s integer,
+              last_seen_tmux_activity_at_s integer,
+              last_screen_fingerprint text,
+              last_seen_screen_fingerprint text,
+              updated_at_ms integer not null,
+              primary key (workspace_id, pane_id)
+            );
+
             insert or ignore into schema_migrations (version, applied_at)
             values (1, unixepoch() * 1000);
             ",
@@ -497,8 +638,22 @@ fn optional_integer(value: Value, column: &'static str) -> Result<Option<i64>, S
     }
 }
 
+fn optional_text(value: Value, column: &'static str) -> Result<Option<String>, StoreError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Text(value) => Ok(Some(value)),
+        value => Err(StoreError::UnexpectedValue { column, value }),
+    }
+}
+
 fn optional_i64_to_value(value: Option<i64>) -> Result<Value, turso::Error> {
     Ok(value.map(Value::Integer).unwrap_or(Value::Null))
+}
+
+fn optional_str_to_value(value: Option<&str>) -> Result<Value, turso::Error> {
+    Ok(value
+        .map(|value| Value::Text(value.to_owned()))
+        .unwrap_or(Value::Null))
 }
 
 fn bool_to_int(value: bool) -> i64 {
@@ -703,6 +858,31 @@ mod tests {
             store.get_session_state_by_pane("pane-1").await.unwrap(),
             Some(session)
         );
+    }
+
+    #[tokio::test]
+    async fn round_trips_pane_activity() {
+        let store = TursoStore::open_memory().await.unwrap();
+        let mut activity = PaneActivity::new("workspace-1", "pane-1", 1_000);
+        activity.record_activity(2_000, Some(2), Some("screen-a".to_owned()));
+        activity.record_seen(3_000);
+        activity.record_tmux_observation(4_000, Some(4), Some("screen-b".to_owned()));
+
+        store.upsert_pane_activity(&activity).await.unwrap();
+
+        assert_eq!(store.list_pane_activity().await.unwrap(), vec![activity]);
+    }
+
+    #[tokio::test]
+    async fn lists_saved_snapshots() {
+        let store = TursoStore::open_memory().await.unwrap();
+        let snapshot = add_pane(
+            create_default_snapshot("workspace-1"),
+            create_pane_state(PaneType::Shell, "/tmp/repo", None),
+        );
+        store.save_snapshot(&snapshot).await.unwrap();
+
+        assert_eq!(store.list_snapshots().await.unwrap(), vec![snapshot]);
     }
 
     #[tokio::test]
