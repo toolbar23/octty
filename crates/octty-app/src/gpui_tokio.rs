@@ -1,13 +1,13 @@
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 
 use gpui::{App, AppContext, AsyncApp, Global, Task};
 
-pub fn init_from_handle(cx: &mut App, handle: tokio::runtime::Handle) {
-    cx.set_global(GlobalTokio { handle });
+pub fn init_from_runtime(cx: &mut App, runtime: Arc<tokio::runtime::Runtime>) {
+    cx.set_global(GlobalTokio { runtime });
 }
 
 struct GlobalTokio {
-    handle: tokio::runtime::Handle,
+    runtime: Arc<tokio::runtime::Runtime>,
 }
 
 impl Global for GlobalTokio {}
@@ -24,7 +24,7 @@ impl Tokio {
         R: Send + 'static,
     {
         cx.read_global(|tokio: &GlobalTokio, cx| {
-            let join_handle = tokio.handle.spawn(future);
+            let join_handle = tokio.runtime.spawn(future);
             cx.background_spawn(async move {
                 match join_handle.await {
                     Ok(result) => result,

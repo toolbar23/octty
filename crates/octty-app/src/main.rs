@@ -11,15 +11,16 @@ use futures::{StreamExt, channel::mpsc};
 use gpui::{
     Action, AnyView, App, Application, Bounds, ClipboardItem, Context, Entity, FocusHandle, Font,
     FontFallbacks, FontFeatures, Hsla, IntoElement, KeyBinding, KeyDownEvent, Menu, MenuItem,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba,
-    ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString, TextRun, Window, WindowBounds,
+    Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
+    Rgba, ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString, TextRun, Window, WindowBounds,
     WindowOptions, canvas, div, fill, font, point, prelude::*, px, rgb, rgba, size,
 };
 use gpui_component::Root;
 use octty_core::{
     PanePayload, PaneState, PaneType, ProjectRootRecord, SessionSnapshot, SessionState,
-    TerminalPanePayload, WorkspaceSnapshot, WorkspaceState, WorkspaceSummary, add_pane,
-    create_default_snapshot, create_pane_state, has_recorded_workspace_path,
+    TerminalPanePayload, WorkspaceBookmarkRelation, WorkspaceSnapshot, WorkspaceState,
+    WorkspaceSummary, add_pane, create_default_snapshot, create_pane_state,
+    has_recorded_workspace_path,
     layout::{LAYOUT_VERSION, now_ms},
     remove_pane, workspace_shortcut_targets,
 };
@@ -70,6 +71,12 @@ struct OpenWorkspaceShortcut {
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
+struct NavigateWorkspace {
+    direction: WorkspaceNavigationDirection,
+}
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
 struct AddShellPane;
 
 #[derive(Clone, Debug, PartialEq, Action)]
@@ -83,6 +90,14 @@ struct AddNotePane;
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
 struct PasteTerminalClipboard;
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
+struct CopyTerminalSelection;
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
+struct CutTerminalSelection;
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
@@ -104,8 +119,12 @@ struct ResizeFocusedColumn {
 enum PaneNavigationDirection {
     Left,
     Right,
-    Up,
-    Down,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceNavigationDirection {
+    Previous,
+    Next,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +136,7 @@ enum ColumnResizeDirection {
 #[derive(Clone)]
 struct BootstrapState {
     status: String,
+    project_roots: Vec<ProjectRootRecord>,
     workspaces: Vec<WorkspaceSummary>,
     active_workspace_index: Option<usize>,
     active_snapshot: Option<WorkspaceSnapshot>,
@@ -138,6 +158,7 @@ struct PendingTerminalInput {
 
 struct OcttyApp {
     status: SharedString,
+    project_roots: Vec<ProjectRootRecord>,
     workspaces: Vec<WorkspaceSummary>,
     active_workspace_index: Option<usize>,
     active_snapshot: Option<WorkspaceSnapshot>,
@@ -179,6 +200,13 @@ struct TerminalGridPoint {
 struct TerminalSelection {
     anchor: TerminalGridPoint,
     active: TerminalGridPoint,
+    mode: TerminalSelectionMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TerminalSelectionMode {
+    rectangular: bool,
+    filter_indent: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -211,6 +239,7 @@ impl OcttyApp {
         let (terminal_snapshot_tx, terminal_snapshot_rx) = mpsc::unbounded();
         let mut app = Self {
             status: bootstrap.status.into(),
+            project_roots: bootstrap.project_roots,
             workspaces: bootstrap.workspaces,
             active_workspace_index: bootstrap.active_workspace_index,
             active_snapshot: bootstrap.active_snapshot,
@@ -286,6 +315,33 @@ impl OcttyApp {
         .detach();
     }
 
+    fn navigate_workspace(
+        &mut self,
+        action: &NavigateWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspaces.is_empty() {
+            return;
+        }
+
+        let current = self
+            .active_workspace_index
+            .unwrap_or(0)
+            .min(self.workspaces.len().saturating_sub(1));
+        let target = match action.direction {
+            WorkspaceNavigationDirection::Previous => {
+                current.checked_sub(1).unwrap_or(self.workspaces.len() - 1)
+            }
+            WorkspaceNavigationDirection::Next => (current + 1) % self.workspaces.len(),
+        };
+        if target == current {
+            return;
+        }
+
+        self.open_workspace(&OpenWorkspaceShortcut { index: target }, window, cx);
+    }
+
     fn add_shell_pane(&mut self, _: &AddShellPane, _: &mut Window, cx: &mut Context<Self>) {
         self.add_pane(PaneType::Shell, cx);
     }
@@ -312,17 +368,46 @@ impl OcttyApp {
         cx.stop_propagation();
     }
 
+    fn copy_terminal_selection(
+        &mut self,
+        _: &CopyTerminalSelection,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.copy_terminal_selection_to_clipboard(false, cx);
+        cx.stop_propagation();
+    }
+
+    fn cut_terminal_selection(
+        &mut self,
+        _: &CutTerminalSelection,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.copy_terminal_selection_to_clipboard(true, cx);
+        cx.stop_propagation();
+    }
+
     fn start_terminal_selection(
         &mut self,
         live_key: &str,
         point: TerminalGridPoint,
+        mode: TerminalSelectionMode,
         cx: &mut Context<Self>,
     ) {
+        self.activate_terminal_key(live_key);
         let Some(live) = self.live_terminals.get_mut(live_key) else {
             return;
         };
         live.selection = None;
         live.selection_drag = Some(TerminalSelectionDrag { anchor: point });
+        if mode.rectangular || mode.filter_indent {
+            live.selection = Some(TerminalSelection {
+                anchor: point,
+                active: point,
+                mode,
+            });
+        }
         cx.notify();
     }
 
@@ -330,6 +415,7 @@ impl OcttyApp {
         &mut self,
         live_key: &str,
         point: TerminalGridPoint,
+        mode: TerminalSelectionMode,
         cx: &mut Context<Self>,
     ) {
         let Some(live) = self.live_terminals.get_mut(live_key) else {
@@ -346,6 +432,7 @@ impl OcttyApp {
         let selection = TerminalSelection {
             anchor: drag.anchor,
             active: point,
+            mode,
         };
         let text = live
             .latest
@@ -374,6 +461,70 @@ impl OcttyApp {
         };
         self.send_bytes_to_terminal_key(live_key, terminal_paste_bytes(&text), cx);
         cx.stop_propagation();
+    }
+
+    fn copy_terminal_selection_to_clipboard(
+        &mut self,
+        clear_selection: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((live_key, text)) = self.active_workspace_selection_text() else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+        write_terminal_primary_text(text, cx);
+        if clear_selection && let Some(live) = self.live_terminals.get_mut(&live_key) {
+            live.selection = None;
+            live.selection_drag = None;
+            cx.notify();
+        }
+    }
+
+    fn active_workspace_selection_text(&self) -> Option<(String, String)> {
+        let workspace = self.active_workspace()?;
+        let snapshot = self.active_snapshot.as_ref()?;
+        if let Some(pane_id) = active_terminal_pane_id(snapshot) {
+            let live_key = live_terminal_key(&workspace.id, &pane_id);
+            if let Some(text) = self.live_terminal_selection_text(&live_key) {
+                return Some((live_key, text));
+            }
+        }
+
+        self.live_terminals
+            .keys()
+            .filter(|live_key| {
+                split_live_terminal_key(live_key)
+                    .is_some_and(|(workspace_id, _)| workspace_id == workspace.id)
+            })
+            .find_map(|live_key| {
+                self.live_terminal_selection_text(live_key)
+                    .map(|text| (live_key.clone(), text))
+            })
+    }
+
+    fn live_terminal_selection_text(&self, live_key: &str) -> Option<String> {
+        let live = self.live_terminals.get(live_key)?;
+        let snapshot = live.latest.as_ref()?;
+        let selection = live.selection.as_ref()?;
+        let text = terminal_selection_text(snapshot, selection);
+        (!text.is_empty()).then_some(text)
+    }
+
+    fn activate_terminal_key(&mut self, live_key: &str) {
+        let Some((workspace_id, pane_id)) = split_live_terminal_key(live_key) else {
+            return;
+        };
+        let Some(workspace) = self.active_workspace() else {
+            return;
+        };
+        if workspace.id != workspace_id {
+            return;
+        }
+        if let Some(snapshot) = self.active_snapshot.as_mut()
+            && snapshot.panes.contains_key(pane_id)
+        {
+            snapshot.active_pane_id = Some(pane_id.to_owned());
+        }
     }
 
     fn navigate_pane(
@@ -1246,6 +1397,263 @@ fn remaining_terminal_frame_delay(
     TERMINAL_FOCUSED_FRAME_INTERVAL.saturating_sub(elapsed)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SidebarWorkspaceGroup {
+    root: Option<ProjectRootRecord>,
+    workspace_indices: Vec<usize>,
+}
+
+fn sidebar_workspace_groups(
+    project_roots: &[ProjectRootRecord],
+    workspaces: &[WorkspaceSummary],
+) -> Vec<SidebarWorkspaceGroup> {
+    let root_ids = project_roots
+        .iter()
+        .map(|root| root.id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut groups = project_roots
+        .iter()
+        .map(|root| SidebarWorkspaceGroup {
+            root: Some(root.clone()),
+            workspace_indices: workspaces
+                .iter()
+                .enumerate()
+                .filter_map(|(index, workspace)| (workspace.root_id == root.id).then_some(index))
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    let orphan_indices = workspaces
+        .iter()
+        .enumerate()
+        .filter_map(|(index, workspace)| (!root_ids.contains(&workspace.root_id)).then_some(index))
+        .collect::<Vec<_>>();
+    if !orphan_indices.is_empty() {
+        groups.push(SidebarWorkspaceGroup {
+            root: None,
+            workspace_indices: orphan_indices,
+        });
+    }
+    groups
+}
+
+fn render_workspace_sidebar(
+    project_roots: &[ProjectRootRecord],
+    workspaces: &[WorkspaceSummary],
+    active_workspace_index: Option<usize>,
+    shortcut_labels: &HashMap<String, String>,
+    cx: &mut Context<OcttyApp>,
+) -> gpui::Div {
+    let mut list = div().mt_3().px_4().flex().flex_col();
+    if workspaces.is_empty() {
+        return list.child(
+            div()
+                .py_2()
+                .text_sm()
+                .text_color(rgb(0x98a1ad))
+                .child("No JJ workspaces discovered."),
+        );
+    }
+
+    let groups = sidebar_workspace_groups(project_roots, workspaces);
+    let group_count = groups.len();
+    for (group_index, group) in groups.iter().enumerate() {
+        list = list.child(render_sidebar_project_group(
+            group,
+            workspaces,
+            active_workspace_index,
+            shortcut_labels,
+            group_index + 1 == group_count,
+            cx,
+        ));
+    }
+    list
+}
+
+fn render_sidebar_project_group(
+    group: &SidebarWorkspaceGroup,
+    workspaces: &[WorkspaceSummary],
+    active_workspace_index: Option<usize>,
+    shortcut_labels: &HashMap<String, String>,
+    is_last: bool,
+    cx: &mut Context<OcttyApp>,
+) -> gpui::Div {
+    let (title, fallback_path) = match &group.root {
+        Some(root) => (root.display_name.clone(), root.root_path.clone()),
+        None => (
+            "Other repos".to_owned(),
+            "Workspaces without a current repo root".to_owned(),
+        ),
+    };
+    let mut section = div().pb_3();
+    if !is_last {
+        section = section.border_b_1().border_color(rgb(0x4d545f));
+    }
+
+    let header = div()
+        .py_2()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::BOLD)
+                .truncate()
+                .child(title),
+        )
+        .child(
+            div()
+                .mt_1()
+                .text_xs()
+                .text_color(rgb(0x98a1ad))
+                .truncate()
+                .child(fallback_path),
+        );
+
+    let mut workspace_list = div().flex().flex_col().gap_1();
+    if group.workspace_indices.is_empty() {
+        workspace_list = workspace_list.child(
+            div()
+                .py_2()
+                .text_xs()
+                .text_color(rgb(0x98a1ad))
+                .child("No workspaces discovered."),
+        );
+    }
+
+    for index in &group.workspace_indices {
+        let workspace = &workspaces[*index];
+        workspace_list = workspace_list.child(render_sidebar_workspace_row(
+            *index,
+            workspace,
+            active_workspace_index == Some(*index),
+            shortcut_labels.get(&workspace.id).map(String::as_str),
+            cx,
+        ));
+    }
+
+    section.child(header).child(workspace_list)
+}
+
+fn render_sidebar_workspace_row(
+    index: usize,
+    workspace: &WorkspaceSummary,
+    active: bool,
+    shortcut_label: Option<&str>,
+    cx: &mut Context<OcttyApp>,
+) -> gpui::Div {
+    let mut meta_row = div()
+        .mt_1()
+        .flex()
+        .gap_2()
+        .text_xs()
+        .text_color(rgb(0x98a1ad));
+    if let Some(bookmark_label) = workspace_bookmark_label(workspace) {
+        meta_row = meta_row.child(div().truncate().child(bookmark_label));
+    }
+    if let Some(shortcut_label) = shortcut_label {
+        meta_row = meta_row.child(format!("<{shortcut_label}>"));
+    }
+
+    let mut badge_row = div().mt_1().flex().gap_1();
+    if !has_recorded_workspace_path(&workspace.workspace_path) {
+        badge_row = badge_row.child(
+            div()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(0x9a7354))
+                .text_xs()
+                .text_color(rgb(0xe5b083))
+                .child("missing path"),
+        );
+    }
+    if workspace.status.unread_notes > 0 {
+        badge_row = badge_row.child(
+            div()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(0x4d545f))
+                .text_xs()
+                .text_color(rgb(0xd7dce4))
+                .child(format!("{} note", workspace.status.unread_notes)),
+        );
+    }
+
+    div()
+        .px_2()
+        .py_2()
+        .border_1()
+        .border_color(if active { rgb(0x4d545f) } else { rgb(0x323640) })
+        .rounded_md()
+        .bg(if active { rgb(0x3c424d) } else { rgb(0x323640) })
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, cx| {
+                this.open_workspace(&OpenWorkspaceShortcut { index }, window, cx);
+            }),
+        )
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(if active { rgb(0x4e86d8) } else { rgb(0xd7dce4) })
+                        .truncate()
+                        .child(workspace.display_name_or_workspace_name().to_owned()),
+                )
+                .child(render_workspace_status_pill(
+                    &workspace.status.workspace_state,
+                    workspace.status.has_working_copy_changes,
+                )),
+        )
+        .child(meta_row)
+        .child(badge_row)
+}
+
+fn render_workspace_status_pill(state: &WorkspaceState, changed: bool) -> gpui::Div {
+    let (border, text) = match state {
+        WorkspaceState::Published => (0x4c6a55, 0xa8d7b2),
+        WorkspaceState::MergedLocal => (0x5b6070, 0xb9bfcc),
+        WorkspaceState::Draft => (0x5c6f95, 0xb9cdf2),
+        WorkspaceState::Conflicted => (0x8b5151, 0xf0a7a7),
+        WorkspaceState::Unknown => (0x4d545f, 0x98a1ad),
+    };
+    let label = if changed {
+        format!("{} *", workspace_status_label(state))
+    } else {
+        workspace_status_label(state).to_owned()
+    };
+
+    div()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(border))
+        .text_xs()
+        .text_color(rgb(text))
+        .child(label)
+}
+
+fn workspace_bookmark_label(workspace: &WorkspaceSummary) -> Option<String> {
+    if workspace.status.bookmarks.is_empty() {
+        return None;
+    }
+
+    let mut label = workspace.status.bookmarks.join(", ");
+    if workspace.status.bookmark_relation == WorkspaceBookmarkRelation::Above {
+        label.push_str(" (+)");
+    }
+    Some(label)
+}
+
 impl Render for OcttyApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_live_terminals_for_active_snapshot();
@@ -1260,58 +1668,17 @@ impl Render for OcttyApp {
             self.resize_live_terminal(&workspace_id, &pane_id, cols, rows);
         }
 
-        let shortcuts = workspace_shortcut_targets(&self.workspaces);
-        let mut workspace_list = div().mt_4().flex().flex_col().gap_2();
-
-        if self.workspaces.is_empty() {
-            workspace_list = workspace_list.child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0xa0a0a0))
-                    .child("No JJ workspaces discovered."),
-            );
-        }
-
-        for (index, workspace) in self.workspaces.iter().enumerate() {
-            let shortcut = shortcuts
-                .get(index)
-                .map(|target| format!(" <{}>", target.label))
-                .unwrap_or_default();
-            workspace_list = workspace_list.child(
-                div()
-                    .p_2()
-                    .border_1()
-                    .border_color(rgb(0x333333))
-                    .rounded_md()
-                    .bg(if self.active_workspace_index == Some(index) {
-                        rgb(0x242424)
-                    } else {
-                        rgb(0x171717)
-                    })
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
-                            this.open_workspace(&OpenWorkspaceShortcut { index }, window, cx);
-                        }),
-                    )
-                    .child(div().text_sm().child(format!(
-                        "{}{}",
-                        workspace.display_name_or_workspace_name(),
-                        shortcut
-                    )))
-                    .child(
-                        div()
-                            .mt_1()
-                            .text_xs()
-                            .text_color(rgb(0xa0a0a0))
-                            .child(format!(
-                                "{} · {}",
-                                workspace.project_display_name,
-                                workspace_status_label(&workspace.status.workspace_state)
-                            )),
-                    ),
-            );
-        }
+        let shortcut_labels = workspace_shortcut_targets(&self.workspaces)
+            .into_iter()
+            .map(|target| (target.workspace_id, target.label))
+            .collect::<HashMap<_, _>>();
+        let workspace_list = render_workspace_sidebar(
+            &self.project_roots,
+            &self.workspaces,
+            self.active_workspace_index,
+            &shortcut_labels,
+            cx,
+        );
 
         let taskspace = render_taskspace(
             self.active_snapshot.as_ref(),
@@ -1327,10 +1694,13 @@ impl Render for OcttyApp {
             .key_context("OcttyApp")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::open_workspace))
+            .on_action(cx.listener(Self::navigate_workspace))
             .on_action(cx.listener(Self::add_shell_pane))
             .on_action(cx.listener(Self::add_diff_pane))
             .on_action(cx.listener(Self::add_note_pane))
             .on_action(cx.listener(Self::paste_terminal_clipboard))
+            .on_action(cx.listener(Self::copy_terminal_selection))
+            .on_action(cx.listener(Self::cut_terminal_selection))
             .on_action(cx.listener(Self::navigate_pane))
             .on_action(cx.listener(Self::close_active_pane))
             .on_action(cx.listener(Self::resize_focused_column))
@@ -1344,20 +1714,22 @@ impl Render for OcttyApp {
                     .w(px(WORKSPACE_SIDEBAR_WIDTH))
                     .h_full()
                     .border_r_1()
-                    .border_color(rgb(0x3a3a3a))
-                    .p_4()
+                    .border_color(rgb(0x4d545f))
+                    .bg(rgb(0x323640))
+                    .text_color(rgb(0xd7dce4))
                     .child(
                         div()
+                            .p_4()
                             .text_lg()
                             .font_weight(gpui::FontWeight::BOLD)
                             .child("Octty"),
                     )
                     .child(
                         div()
-                            .mt_4()
+                            .px_4()
                             .text_xs()
-                            .text_color(rgb(0x7f7f7f))
-                            .child("Workspaces"),
+                            .text_color(rgb(0x98a1ad))
+                            .child("Repos"),
                     )
                     .child(workspace_list),
             )
@@ -1407,7 +1779,7 @@ impl Render for OcttyApp {
 }
 
 fn main() {
-    let runtime = tokio::runtime::Runtime::new().expect("create tokio runtime");
+    let runtime = Arc::new(tokio::runtime::Runtime::new().expect("create tokio runtime"));
     if std::env::args().any(|arg| arg == "--headless-check") {
         runtime
             .block_on(load_bootstrap(false))
@@ -1470,6 +1842,7 @@ fn main() {
         .block_on(load_bootstrap(true))
         .unwrap_or_else(|error| BootstrapState {
             status: format!("Startup failed: {error:#}"),
+            project_roots: Vec::new(),
             workspaces: Vec::new(),
             active_workspace_index: None,
             active_snapshot: None,
@@ -1477,7 +1850,7 @@ fn main() {
 
     Application::new().run(move |cx: &mut App| {
         gpui_component::init(cx);
-        gpui_tokio::init_from_handle(cx, runtime.handle().clone());
+        gpui_tokio::init_from_runtime(cx, runtime.clone());
         cx.bind_keys(workspace_key_bindings());
         set_workspace_menu(cx, &bootstrap.workspaces);
 
@@ -1516,8 +1889,8 @@ async fn load_bootstrap(auto_seed_current_repo: bool) -> anyhow::Result<Bootstra
 
     let mut errors = Vec::new();
     let mut workspaces = Vec::new();
-    for root in roots {
-        match discover_workspaces(&root).await {
+    for root in &roots {
+        match discover_workspaces(root).await {
             Ok(discovered) => {
                 for mut workspace in discovered {
                     let now = now_ms();
@@ -1569,6 +1942,7 @@ async fn load_bootstrap(auto_seed_current_repo: bool) -> anyhow::Result<Bootstra
 
     Ok(BootstrapState {
         status,
+        project_roots: roots,
         workspaces,
         active_workspace_index,
         active_snapshot,
@@ -2286,7 +2660,11 @@ fn workspace_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-shift-8", OpenWorkspaceShortcut { index: 7 }, None),
         KeyBinding::new("ctrl-shift-9", OpenWorkspaceShortcut { index: 8 }, None),
         KeyBinding::new("ctrl-shift-0", OpenWorkspaceShortcut { index: 9 }, None),
+        KeyBinding::new("ctrl-shift-c", CopyTerminalSelection, None),
+        KeyBinding::new("ctrl-shift-x", CutTerminalSelection, None),
         KeyBinding::new("ctrl-shift-v", PasteTerminalClipboard, None),
+        KeyBinding::new("super-c", CopyTerminalSelection, None),
+        KeyBinding::new("super-x", CutTerminalSelection, None),
         KeyBinding::new("cmd-v", PasteTerminalClipboard, None),
         KeyBinding::new(
             "ctrl-shift-left",
@@ -2304,15 +2682,15 @@ fn workspace_key_bindings() -> Vec<KeyBinding> {
         ),
         KeyBinding::new(
             "ctrl-shift-up",
-            NavigatePane {
-                direction: PaneNavigationDirection::Up,
+            NavigateWorkspace {
+                direction: WorkspaceNavigationDirection::Previous,
             },
             None,
         ),
         KeyBinding::new(
             "ctrl-shift-down",
-            NavigatePane {
-                direction: PaneNavigationDirection::Down,
+            NavigateWorkspace {
+                direction: WorkspaceNavigationDirection::Next,
             },
             None,
         ),
@@ -2379,7 +2757,7 @@ fn live_terminal_input_from_key_parts(
     {
         return None;
     }
-    if control && shift && key.eq_ignore_ascii_case("v") {
+    if control && shift && is_clipboard_action_key(key) {
         return None;
     }
     if control && shift && is_pane_action_key(key) {
@@ -2540,6 +2918,10 @@ fn is_column_resize_key(key: &str) -> bool {
     )
 }
 
+fn is_clipboard_action_key(key: &str) -> bool {
+    matches!(key.to_ascii_lowercase().as_str(), "c" | "x" | "v")
+}
+
 fn unshifted_character(character: char) -> char {
     match character {
         'A'..='Z' => character.to_ascii_lowercase(),
@@ -2599,16 +2981,6 @@ fn pane_navigation_target(
 
     let (column_index, pane_index) = pane_layout_position(snapshot, active_pane_id)?;
     let target = match direction {
-        PaneNavigationDirection::Up => {
-            let column = center_column(snapshot, column_index)?;
-            pane_index
-                .checked_sub(1)
-                .and_then(|index| column.pane_ids.get(index))
-        }
-        PaneNavigationDirection::Down => {
-            let column = center_column(snapshot, column_index)?;
-            column.pane_ids.get(pane_index + 1)
-        }
         PaneNavigationDirection::Left => column_index
             .checked_sub(1)
             .and_then(|index| pane_in_neighbor_column(snapshot, index, pane_index)),
@@ -3410,7 +3782,12 @@ fn render_terminal_selection_layer(
                 ) else {
                     return;
                 };
-                this.start_terminal_selection(&mouse_down_key, point, cx);
+                this.start_terminal_selection(
+                    &mouse_down_key,
+                    point,
+                    terminal_selection_mode_from_modifiers(event.modifiers),
+                    cx,
+                );
             }),
         )
         .on_mouse_move(
@@ -3426,7 +3803,12 @@ fn render_terminal_selection_layer(
                 ) else {
                     return;
                 };
-                this.update_terminal_selection(&mouse_move_key, point, cx);
+                this.update_terminal_selection(
+                    &mouse_move_key,
+                    point,
+                    terminal_selection_mode_from_modifiers(event.modifiers),
+                    cx,
+                );
             }),
         )
         .on_mouse_up(
@@ -3441,7 +3823,12 @@ fn render_terminal_selection_layer(
                     this.finish_terminal_selection(&mouse_up_key, cx);
                     return;
                 };
-                this.update_terminal_selection(&mouse_up_key, point, cx);
+                this.update_terminal_selection(
+                    &mouse_up_key,
+                    point,
+                    terminal_selection_mode_from_modifiers(event.modifiers),
+                    cx,
+                );
                 this.finish_terminal_selection(&mouse_up_key, cx);
             }),
         )
@@ -4290,6 +4677,13 @@ fn terminal_grid_point_from_local_position(
     TerminalGridPoint { row, col }
 }
 
+fn terminal_selection_mode_from_modifiers(modifiers: Modifiers) -> TerminalSelectionMode {
+    TerminalSelectionMode {
+        rectangular: modifiers.control,
+        filter_indent: modifiers.shift,
+    }
+}
+
 fn terminal_selection_runs(
     selection: &TerminalSelection,
     cols: u16,
@@ -4297,6 +4691,9 @@ fn terminal_selection_runs(
 ) -> Vec<TerminalSelectionRun> {
     if cols == 0 || rows == 0 || selection.anchor == selection.active {
         return Vec::new();
+    }
+    if selection.mode.rectangular {
+        return terminal_rectangular_selection_runs(selection, cols, rows);
     }
     let (start, end) = terminal_selection_ordered_points(selection);
     let start_row = start.row.min(rows.saturating_sub(1));
@@ -4319,6 +4716,34 @@ fn terminal_selection_runs(
         .collect()
 }
 
+fn terminal_rectangular_selection_runs(
+    selection: &TerminalSelection,
+    cols: u16,
+    rows: u16,
+) -> Vec<TerminalSelectionRun> {
+    let start_row = selection.anchor.row.min(selection.active.row);
+    let end_row = selection.anchor.row.max(selection.active.row);
+    let start_col = selection.anchor.col.min(selection.active.col).min(cols);
+    let end_col = selection
+        .anchor
+        .col
+        .max(selection.active.col)
+        .saturating_add(1)
+        .min(cols);
+
+    if end_col <= start_col {
+        return Vec::new();
+    }
+
+    (start_row.min(rows.saturating_sub(1))..=end_row.min(rows.saturating_sub(1)))
+        .map(|row| TerminalSelectionRun {
+            row,
+            start_col,
+            end_col,
+        })
+        .collect()
+}
+
 fn terminal_selection_ordered_points(
     selection: &TerminalSelection,
 ) -> (TerminalGridPoint, TerminalGridPoint) {
@@ -4332,6 +4757,18 @@ fn terminal_selection_ordered_points(
 }
 
 fn terminal_selection_text(
+    snapshot: &TerminalGridSnapshot,
+    selection: &TerminalSelection,
+) -> String {
+    let text = terminal_selection_text_unfiltered(snapshot, selection);
+    if selection.mode.filter_indent {
+        terminal_selection_text_remove_common_indent(&text)
+    } else {
+        text
+    }
+}
+
+fn terminal_selection_text_unfiltered(
     snapshot: &TerminalGridSnapshot,
     selection: &TerminalSelection,
 ) -> String {
@@ -4355,9 +4792,49 @@ fn terminal_selection_text(
                 line.push_str(&cell.text);
             }
         }
-        lines.push(line.trim_end().to_owned());
+        if selection.mode.rectangular {
+            lines.push(line);
+        } else {
+            lines.push(line.trim_end().to_owned());
+        }
     }
     lines.join("\n")
+}
+
+fn terminal_selection_text_remove_common_indent(text: &str) -> String {
+    let lines = text.split('\n').collect::<Vec<_>>();
+    let common_indent = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            line.chars()
+                .take_while(|ch| *ch == ' ' || *ch == '\t')
+                .count()
+        })
+        .min()
+        .unwrap_or(0);
+
+    if common_indent == 0 {
+        return text.to_owned();
+    }
+
+    lines
+        .into_iter()
+        .map(|line| {
+            let mut stripped = 0usize;
+            let mut byte_index = line.len();
+            for (index, ch) in line.char_indices() {
+                if stripped == common_indent || (ch != ' ' && ch != '\t') {
+                    byte_index = index;
+                    break;
+                }
+                stripped += 1;
+                byte_index = index + ch.len_utf8();
+            }
+            &line[byte_index..]
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -4609,6 +5086,61 @@ impl WorkspaceDisplayName for WorkspaceSummary {
 mod tests {
     use super::*;
 
+    fn test_project_root(id: &str, display_name: &str) -> ProjectRootRecord {
+        ProjectRootRecord {
+            id: id.to_owned(),
+            root_path: format!("/repos/{display_name}"),
+            display_name: display_name.to_owned(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn test_workspace(id: &str, root_id: &str, workspace_name: &str) -> WorkspaceSummary {
+        WorkspaceSummary {
+            id: id.to_owned(),
+            root_id: root_id.to_owned(),
+            root_path: format!("/repos/{root_id}"),
+            project_display_name: root_id.to_owned(),
+            workspace_name: workspace_name.to_owned(),
+            display_name: workspace_name.to_owned(),
+            workspace_path: format!("/repos/{root_id}/{workspace_name}"),
+            status: Default::default(),
+            created_at: 0,
+            updated_at: 0,
+            last_opened_at: 0,
+        }
+    }
+
+    #[test]
+    fn sidebar_workspace_groups_follow_repo_order_and_keep_orphans() {
+        let project_roots = vec![
+            test_project_root("root-b", "bravo"),
+            test_project_root("root-a", "alpha"),
+        ];
+        let workspaces = vec![
+            test_workspace("workspace-1", "root-a", "one"),
+            test_workspace("workspace-2", "missing-root", "two"),
+            test_workspace("workspace-3", "root-b", "three"),
+        ];
+
+        let groups = sidebar_workspace_groups(&project_roots, &workspaces);
+
+        assert_eq!(groups.len(), 3);
+        assert_eq!(
+            groups[0].root.as_ref().map(|root| root.id.as_str()),
+            Some("root-b")
+        );
+        assert_eq!(groups[0].workspace_indices, vec![2]);
+        assert_eq!(
+            groups[1].root.as_ref().map(|root| root.id.as_str()),
+            Some("root-a")
+        );
+        assert_eq!(groups[1].workspace_indices, vec![0]);
+        assert_eq!(groups[2].root, None);
+        assert_eq!(groups[2].workspace_indices, vec![1]);
+    }
+
     #[test]
     fn printable_keys_become_terminal_text() {
         let input =
@@ -4747,13 +5279,36 @@ mod tests {
             live_terminal_input_from_key_parts("1", Some("!"), true, false, true, false, false),
             None
         );
+        assert_eq!(
+            live_terminal_input_from_key_parts("up", None, true, false, true, false, false),
+            None
+        );
+        assert_eq!(
+            live_terminal_input_from_key_parts("down", None, true, false, true, false, false),
+            None
+        );
     }
 
     #[test]
     fn terminal_input_preserves_paste_shortcut() {
-        assert_eq!(
-            live_terminal_input_from_key_parts("v", Some("V"), true, false, true, false, false),
-            None
+        for key in ["c", "x", "v"] {
+            let key_char = key.to_ascii_uppercase();
+            assert_eq!(
+                live_terminal_input_from_key_parts(
+                    key,
+                    Some(key_char.as_str()),
+                    true,
+                    false,
+                    true,
+                    false,
+                    false
+                ),
+                None
+            );
+        }
+        assert!(
+            live_terminal_input_from_key_parts("p", Some("P"), true, false, true, false, false)
+                .is_some()
         );
     }
 
@@ -4814,6 +5369,7 @@ mod tests {
         let selection = TerminalSelection {
             anchor: TerminalGridPoint { row: 0, col: 2 },
             active: TerminalGridPoint { row: 2, col: 1 },
+            mode: TerminalSelectionMode::default(),
         };
 
         assert_eq!(
@@ -4840,6 +5396,7 @@ mod tests {
         let reversed = TerminalSelection {
             anchor: selection.active,
             active: selection.anchor,
+            mode: selection.mode,
         };
         assert_eq!(
             terminal_selection_runs(&reversed, 5, 3),
@@ -4871,9 +5428,96 @@ mod tests {
         let selection = TerminalSelection {
             anchor: TerminalGridPoint { row: 0, col: 1 },
             active: TerminalGridPoint { row: 1, col: 3 },
+            mode: TerminalSelectionMode::default(),
         };
 
         assert_eq!(terminal_selection_text(&snapshot, &selection), "bc\nde f");
+    }
+
+    #[test]
+    fn terminal_selection_runs_box_columns() {
+        let selection = TerminalSelection {
+            anchor: TerminalGridPoint { row: 3, col: 4 },
+            active: TerminalGridPoint { row: 1, col: 1 },
+            mode: TerminalSelectionMode {
+                rectangular: true,
+                filter_indent: false,
+            },
+        };
+
+        assert_eq!(
+            terminal_selection_runs(&selection, 8, 5),
+            vec![
+                TerminalSelectionRun {
+                    row: 1,
+                    start_col: 1,
+                    end_col: 5,
+                },
+                TerminalSelectionRun {
+                    row: 2,
+                    start_col: 1,
+                    end_col: 5,
+                },
+                TerminalSelectionRun {
+                    row: 3,
+                    start_col: 1,
+                    end_col: 5,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_selection_text_box_preserves_selected_columns() {
+        let mut snapshot = test_terminal_snapshot("box-selection-text", 8, 3, vec![0, 1, 2], true);
+        write_picker_text(
+            &mut snapshot.rows_data[0].cells,
+            0,
+            "  alpha",
+            None,
+            None,
+            false,
+            false,
+        );
+        write_picker_text(
+            &mut snapshot.rows_data[1].cells,
+            0,
+            "  beta ",
+            None,
+            None,
+            false,
+            false,
+        );
+        write_picker_text(
+            &mut snapshot.rows_data[2].cells,
+            0,
+            "  gam  ",
+            None,
+            None,
+            false,
+            false,
+        );
+        let selection = TerminalSelection {
+            anchor: TerminalGridPoint { row: 0, col: 2 },
+            active: TerminalGridPoint { row: 2, col: 5 },
+            mode: TerminalSelectionMode {
+                rectangular: true,
+                filter_indent: false,
+            },
+        };
+
+        assert_eq!(
+            terminal_selection_text(&snapshot, &selection),
+            "alph\nbeta\ngam "
+        );
+    }
+
+    #[test]
+    fn terminal_selection_text_filter_removes_common_indent() {
+        assert_eq!(
+            terminal_selection_text_remove_common_indent("    one\n      two\n    three"),
+            "one\n  two\nthree"
+        );
     }
 
     #[test]
@@ -6013,32 +6657,6 @@ mod tests {
             None
         );
         assert_eq!(snapshot.columns[&column_id].width_px, MIN_COLUMN_WIDTH_PX);
-    }
-
-    #[test]
-    fn pane_navigation_moves_within_column() {
-        let mut snapshot = create_default_snapshot("workspace-1");
-        snapshot = add_pane(snapshot, create_pane_state(PaneType::Note, "/tmp", None));
-        let first = snapshot.active_pane_id.clone().expect("first pane");
-        let second_pane = create_pane_state(PaneType::Diff, "/tmp", None);
-        let second = second_pane.id.clone();
-        let column_id = snapshot.center_column_ids[0].clone();
-        snapshot.panes.insert(second.clone(), second_pane);
-        let column = snapshot.columns.get_mut(&column_id).expect("center column");
-        column.pane_ids.push(second.clone());
-        column.height_fractions = vec![0.5, 0.5];
-
-        snapshot.active_pane_id = Some(first.clone());
-        assert_eq!(
-            pane_navigation_target(&snapshot, PaneNavigationDirection::Down).as_deref(),
-            Some(second.as_str())
-        );
-
-        snapshot.active_pane_id = Some(second);
-        assert_eq!(
-            pane_navigation_target(&snapshot, PaneNavigationDirection::Up).as_deref(),
-            Some(first.as_str())
-        );
     }
 
     fn picker_preview_snapshot(frame: usize, cols: u16, rows: u16) -> TerminalGridSnapshot {
