@@ -2807,6 +2807,7 @@ struct TerminalGridPaintInput {
     dirty_cells: usize,
     rebuilt_rows: usize,
     reused_rows: usize,
+    repaint_backgrounds: usize,
     rebuilt_row_flags: Vec<bool>,
 }
 
@@ -2926,6 +2927,7 @@ struct TerminalRenderProfileSample {
     dirty_cells: usize,
     rebuilt_rows: usize,
     reused_rows: usize,
+    repaint_backgrounds: usize,
     painted_rows: usize,
     submitted_glyphs: usize,
     submitted_backgrounds: usize,
@@ -2945,6 +2947,7 @@ struct TerminalRenderProfiler {
     dirty_cells: VecDeque<u64>,
     rebuilt_rows: VecDeque<u64>,
     reused_rows: VecDeque<u64>,
+    repaint_backgrounds: VecDeque<u64>,
     painted_rows: VecDeque<u64>,
     submitted_glyphs: VecDeque<u64>,
     submitted_backgrounds: VecDeque<u64>,
@@ -3044,6 +3047,7 @@ fn terminal_paint_input(
 
     let mut rebuilt_rows = 0usize;
     let mut reused_rows = 0usize;
+    let mut repaint_backgrounds = 0usize;
 
     for (row_index, row) in snapshot.rows_data.iter().enumerate() {
         let rebuild_row = dirty_row_flags[row_index] || cache.rows_data[row_index].is_none();
@@ -3062,6 +3066,7 @@ fn terminal_paint_input(
 
         if rebuild_row {
             glyph_cells.extend(cached_row.glyph_cells.iter().cloned());
+            repaint_backgrounds += terminal_row_background_submission_count(&cached_row.row_input);
         }
         rows_data.push(cached_row.row_input);
     }
@@ -3078,8 +3083,13 @@ fn terminal_paint_input(
         dirty_cells: snapshot.damage.cells as usize,
         rebuilt_rows,
         reused_rows,
+        repaint_backgrounds,
         rebuilt_row_flags: dirty_row_flags,
     }
+}
+
+fn terminal_row_background_submission_count(row: &TerminalPaintRowInput) -> usize {
+    row.background_runs.len() + 1
 }
 
 fn terminal_prefers_full_canvas(input: &TerminalGridPaintInput) -> bool {
@@ -3707,6 +3717,7 @@ fn record_terminal_render_build_profile(input: &TerminalGridPaintInput, build_mi
         dirty_cells: input.dirty_cells,
         rebuilt_rows: input.rebuilt_rows,
         reused_rows: input.reused_rows,
+        repaint_backgrounds: input.repaint_backgrounds,
         ..TerminalRenderProfileSample::default()
     };
     record_terminal_render_profile(sample);
@@ -3739,6 +3750,13 @@ fn terminal_full_render_profile_sample(
         dirty_cells: surface.input.dirty_cells,
         rebuilt_rows: surface.input.rebuilt_rows,
         reused_rows: surface.input.reused_rows,
+        repaint_backgrounds: surface
+            .input
+            .rows_data
+            .iter()
+            .map(|row| row.background_runs.len())
+            .sum::<usize>()
+            + 1,
         ..TerminalRenderProfileSample::default()
     }
 }
@@ -3777,7 +3795,7 @@ fn record_terminal_row_paint_profile(
         cols,
         painted_rows: 1,
         submitted_glyphs: surface.glyph_cells.len(),
-        submitted_backgrounds: surface.row_input.background_runs.len() + 1,
+        submitted_backgrounds: terminal_row_background_submission_count(&surface.row_input),
         ..TerminalRenderProfileSample::default()
     });
 }
@@ -3816,6 +3834,7 @@ impl TerminalRenderProfiler {
             || sample.dirty_cells > 0
             || sample.rebuilt_rows > 0
             || sample.reused_rows > 0
+            || sample.repaint_backgrounds > 0
             || sample.glyph_cells > 0
             || sample.background_runs > 0
             || sample.text_bytes > 0;
@@ -3827,6 +3846,10 @@ impl TerminalRenderProfiler {
             push_latency_sample(&mut self.dirty_cells, sample.dirty_cells as u64);
             push_latency_sample(&mut self.rebuilt_rows, sample.rebuilt_rows as u64);
             push_latency_sample(&mut self.reused_rows, sample.reused_rows as u64);
+            push_latency_sample(
+                &mut self.repaint_backgrounds,
+                sample.repaint_backgrounds as u64,
+            );
         }
         let has_shape_counts =
             sample.shape_micros > 0 || sample.glyph_cache_hits > 0 || sample.glyph_cache_misses > 0;
@@ -3859,7 +3882,7 @@ impl TerminalRenderProfiler {
             parts.push(format!("shape {shape}"));
         }
         if let Some(paint) = latency_summary(&self.paint_micros) {
-            parts.push(format!("paint {paint}"));
+            parts.push(format!("row paint {paint}"));
         }
         Some(parts.join(" · "))
     }
@@ -3878,13 +3901,14 @@ impl TerminalRenderProfiler {
             return;
         };
         eprintln!(
-            "octty terminal render profile: {summary} · grid {}x{} · dirty rows {} · dirty cells {} · rebuilt rows {} · reused rows {} · painted rows {} · glyph cells {} · submitted glyphs {} · glyph hits {} · glyph misses {} · bg runs {} · submitted bgs {} · text bytes {}",
+            "octty terminal render profile: {summary} · grid {}x{} · dirty rows {} · dirty cells {} · rebuilt rows {} · reused rows {} · repainted bgs {} · painted rows {} · glyph cells {} · submitted glyphs {} · glyph hits {} · glyph misses {} · bg runs {} · submitted bgs {} · text bytes {}",
             sample.cols,
             sample.rows,
             count_summary(&self.dirty_rows).unwrap_or_else(|| "n/a".to_owned()),
             count_summary(&self.dirty_cells).unwrap_or_else(|| "n/a".to_owned()),
             count_summary(&self.rebuilt_rows).unwrap_or_else(|| "n/a".to_owned()),
             count_summary(&self.reused_rows).unwrap_or_else(|| "n/a".to_owned()),
+            count_summary(&self.repaint_backgrounds).unwrap_or_else(|| "n/a".to_owned()),
             count_summary(&self.painted_rows).unwrap_or_else(|| "n/a".to_owned()),
             count_summary(&self.glyph_cells).unwrap_or_else(|| "n/a".to_owned()),
             count_summary(&self.submitted_glyphs).unwrap_or_else(|| "n/a".to_owned()),
@@ -4400,6 +4424,12 @@ mod tests {
         assert_eq!(profiler.glyph_cells, VecDeque::from([0]));
         assert_eq!(profiler.submitted_glyphs, VecDeque::from([0]));
         assert_eq!(profiler.paint_micros, VecDeque::from([0]));
+        assert!(
+            profiler
+                .summary()
+                .expect("profile summary")
+                .contains("row paint")
+        );
     }
 
     #[test]
@@ -4785,6 +4815,7 @@ mod tests {
 
         assert_eq!(second.rebuilt_rows, 1);
         assert_eq!(second.reused_rows, 1);
+        assert_eq!(second.repaint_backgrounds, 1);
         assert!(!second.glyph_cells.iter().any(|cell| cell.row_index == 0));
         assert!(
             second
@@ -5165,8 +5196,68 @@ mod tests {
 
         assert_eq!(input.rebuilt_rows, 1);
         assert_eq!(input.reused_rows, 39);
+        assert_eq!(
+            input.repaint_backgrounds,
+            terminal_row_background_submission_count(&input.rows_data[10])
+        );
         assert!(input.glyph_cells.len() < 120);
         assert!(input.glyph_cells.iter().all(|cell| cell.row_index == 10));
+    }
+
+    #[test]
+    fn terminal_shell_keypress_repaints_one_row_payload() {
+        let default_fg = TerminalRgb {
+            r: 200,
+            g: 200,
+            b: 200,
+        };
+        let default_bg = TerminalRgb { r: 0, g: 0, b: 0 };
+        let mut snapshot =
+            shell_prompt_snapshot("shell-keypress-row", "$ ", 2, 5, 24, default_fg, default_bg);
+        let mut render_cache = TerminalRenderCache::default();
+        let _ = terminal_paint_input(
+            &snapshot,
+            terminal_rgb_to_rgba(default_fg),
+            terminal_rgb_to_rgba(default_bg),
+            &mut render_cache,
+        );
+
+        snapshot.rows_data[2] = shell_row("$ a", snapshot.cols);
+        snapshot.cursor = Some(octty_term::live::TerminalCursorSnapshot {
+            col: 3,
+            row: 2,
+            visible: true,
+        });
+        snapshot.damage = octty_term::live::TerminalDamageSnapshot {
+            full: false,
+            rows: vec![2],
+            cells: u32::from(snapshot.cols),
+        };
+        snapshot.plain_text = "$ a\n".to_owned();
+
+        let input = terminal_paint_input(
+            &snapshot,
+            terminal_rgb_to_rgba(default_fg),
+            terminal_rgb_to_rgba(default_bg),
+            &mut render_cache,
+        );
+
+        assert_eq!(input.rebuilt_rows, 1);
+        assert_eq!(input.reused_rows, 4);
+        assert_eq!(input.repaint_backgrounds, 1);
+        assert_eq!(
+            input
+                .cursor
+                .as_ref()
+                .map(|cursor| (cursor.row_index, cursor.col_index)),
+            Some((2, 3))
+        );
+        assert!(
+            input
+                .glyph_cells
+                .iter()
+                .all(|cell| cell.row_index == 2 && cell.col_index <= 2)
+        );
     }
 
     #[test]
@@ -5483,6 +5574,63 @@ mod tests {
             plain_text: String::new(),
             timing: octty_term::live::TerminalSnapshotTiming::default(),
         }
+    }
+
+    fn shell_prompt_snapshot(
+        session_id: &str,
+        prompt: &str,
+        cursor_col: u16,
+        rows: u16,
+        cols: u16,
+        default_fg: TerminalRgb,
+        default_bg: TerminalRgb,
+    ) -> TerminalGridSnapshot {
+        let mut rows_data = vec![
+            octty_term::live::TerminalRowSnapshot {
+                cells: vec![picker_cell("", None, None, false, false); cols as usize],
+            };
+            rows as usize
+        ];
+        rows_data[2] = shell_row(prompt, cols);
+
+        TerminalGridSnapshot {
+            session_id: session_id.to_owned(),
+            cols,
+            rows,
+            default_fg,
+            default_bg,
+            cursor: Some(octty_term::live::TerminalCursorSnapshot {
+                col: cursor_col,
+                row: 2,
+                visible: true,
+            }),
+            damage: octty_term::live::TerminalDamageSnapshot {
+                full: true,
+                rows: (0..rows).collect(),
+                cells: u32::from(cols) * u32::from(rows),
+            },
+            rows_data,
+            plain_text: format!("{prompt}\n"),
+            timing: octty_term::live::TerminalSnapshotTiming::default(),
+        }
+    }
+
+    fn shell_row(text: &str, cols: u16) -> octty_term::live::TerminalRowSnapshot {
+        let mut cells = vec![picker_cell("", None, None, false, false); cols as usize];
+        write_picker_text(
+            &mut cells,
+            0,
+            text,
+            Some(TerminalRgb {
+                r: 200,
+                g: 200,
+                b: 200,
+            }),
+            None,
+            false,
+            false,
+        );
+        octty_term::live::TerminalRowSnapshot { cells }
     }
 
     fn write_picker_preview_line(

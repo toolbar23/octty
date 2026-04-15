@@ -176,7 +176,7 @@ surface primitive.
 Output of this step:
 
 - [ ] Paint cost scales with dirty rows.
-- [ ] Holding a key in a shell repaints one row and cursor state, not the whole
+- [x] Holding a key in a shell repaints one row and cursor state, not the whole
    terminal.
 - [x] Dense unchanged previews do not keep submitting thousands of glyph sprites.
 
