@@ -6,8 +6,8 @@ pub fn init_from_runtime(cx: &mut App, runtime: Arc<tokio::runtime::Runtime>) {
     cx.set_global(GlobalTokio { runtime });
 }
 
-struct GlobalTokio {
-    runtime: Arc<tokio::runtime::Runtime>,
+pub(crate) struct GlobalTokio {
+    pub(crate) runtime: Arc<tokio::runtime::Runtime>,
 }
 
 impl Global for GlobalTokio {}

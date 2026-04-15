@@ -1,11 +1,13 @@
+use super::*;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum SidebarRenameTarget {
+pub(crate) enum SidebarRenameTarget {
     ProjectRoot(String),
     Workspace(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum SidebarMenuAction {
+pub(crate) enum SidebarMenuAction {
     CreateWorkspaceForRoot(String),
     RenameProjectRoot(String),
     RemoveProjectRoot(String),
@@ -15,7 +17,7 @@ enum SidebarMenuAction {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum SidebarMenuEntry {
+pub(crate) enum SidebarMenuEntry {
     Item {
         label: SharedString,
         action: SidebarMenuAction,
@@ -25,11 +27,11 @@ enum SidebarMenuEntry {
 }
 
 impl SidebarMenuEntry {
-    fn item(label: impl Into<SharedString>, action: SidebarMenuAction) -> Self {
+    pub(crate) fn item(label: impl Into<SharedString>, action: SidebarMenuAction) -> Self {
         Self::item_with_disabled(label, action, false)
     }
 
-    fn item_with_disabled(
+    pub(crate) fn item_with_disabled(
         label: impl Into<SharedString>,
         action: SidebarMenuAction,
         disabled: bool,
@@ -41,7 +43,7 @@ impl SidebarMenuEntry {
         }
     }
 
-    fn is_enabled_item(&self) -> bool {
+    pub(crate) fn is_enabled_item(&self) -> bool {
         matches!(
             self,
             Self::Item {
@@ -51,7 +53,7 @@ impl SidebarMenuEntry {
         )
     }
 
-    fn action(&self) -> Option<SidebarMenuAction> {
+    pub(crate) fn action(&self) -> Option<SidebarMenuAction> {
         match self {
             Self::Item {
                 action,
@@ -64,32 +66,32 @@ impl SidebarMenuEntry {
 }
 
 #[derive(Clone)]
-struct SidebarMenuOverlay {
-    position: Point<Pixels>,
-    menu: Entity<SidebarMenuView>,
+pub(crate) struct SidebarMenuOverlay {
+    pub(crate) position: Point<Pixels>,
+    pub(crate) menu: Entity<SidebarMenuView>,
 }
 
-struct SidebarRenameDialog {
-    target: SidebarRenameTarget,
-    title: SharedString,
-    input: Entity<InputState>,
+pub(crate) struct SidebarRenameDialog {
+    pub(crate) target: SidebarRenameTarget,
+    pub(crate) title: SharedString,
+    pub(crate) input: Entity<InputState>,
 }
 
 #[derive(Clone)]
-struct AppToast {
-    id: u64,
-    message: SharedString,
+pub(crate) struct AppToast {
+    pub(crate) id: u64,
+    pub(crate) message: SharedString,
 }
 
-struct SidebarMenuView {
-    app: Entity<OcttyApp>,
-    focus_handle: FocusHandle,
-    entries: Vec<SidebarMenuEntry>,
-    selected_index: Option<usize>,
+pub(crate) struct SidebarMenuView {
+    pub(crate) app: Entity<OcttyApp>,
+    pub(crate) focus_handle: FocusHandle,
+    pub(crate) entries: Vec<SidebarMenuEntry>,
+    pub(crate) selected_index: Option<usize>,
 }
 
 impl SidebarMenuView {
-    fn new(
+    pub(crate) fn new(
         app: Entity<OcttyApp>,
         entries: Vec<SidebarMenuEntry>,
         focus_handle: FocusHandle,
@@ -106,7 +108,7 @@ impl SidebarMenuView {
         }
     }
 
-    fn enabled_indices(&self) -> Vec<usize> {
+    pub(crate) fn enabled_indices(&self) -> Vec<usize> {
         self.entries
             .iter()
             .enumerate()
@@ -114,7 +116,12 @@ impl SidebarMenuView {
             .collect()
     }
 
-    fn select_up(&mut self, _: &SidebarMenuSelectUp, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_up(
+        &mut self,
+        _: &SidebarMenuSelectUp,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let enabled = self.enabled_indices();
         if enabled.is_empty() {
             return;
@@ -129,7 +136,12 @@ impl SidebarMenuView {
         cx.notify();
     }
 
-    fn select_down(&mut self, _: &SidebarMenuSelectDown, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_down(
+        &mut self,
+        _: &SidebarMenuSelectDown,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let enabled = self.enabled_indices();
         if enabled.is_empty() {
             return;
@@ -143,18 +155,28 @@ impl SidebarMenuView {
         cx.notify();
     }
 
-    fn confirm(&mut self, _: &SidebarMenuConfirm, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn confirm(
+        &mut self,
+        _: &SidebarMenuConfirm,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(index) = self.selected_index else {
             return;
         };
         self.execute_index(index, window, cx);
     }
 
-    fn cancel(&mut self, _: &SidebarMenuCancel, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn cancel(&mut self, _: &SidebarMenuCancel, _: &mut Window, cx: &mut Context<Self>) {
         let _ = self.app.update(cx, |app, cx| app.dismiss_sidebar_menu(cx));
     }
 
-    fn execute_index(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn execute_index(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(action) = self.entries.get(index).and_then(SidebarMenuEntry::action) else {
             return;
         };
@@ -165,12 +187,12 @@ impl SidebarMenuView {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct SidebarWorkspaceGroup {
-    root: Option<ProjectRootRecord>,
-    workspace_indices: Vec<usize>,
+pub(crate) struct SidebarWorkspaceGroup {
+    pub(crate) root: Option<ProjectRootRecord>,
+    pub(crate) workspace_indices: Vec<usize>,
 }
 
-fn sidebar_workspace_groups(
+pub(crate) fn sidebar_workspace_groups(
     project_roots: &[ProjectRootRecord],
     workspaces: &[WorkspaceSummary],
 ) -> Vec<SidebarWorkspaceGroup> {
@@ -203,7 +225,7 @@ fn sidebar_workspace_groups(
     groups
 }
 
-fn render_workspace_sidebar(
+pub(crate) fn render_workspace_sidebar(
     project_roots: &[ProjectRootRecord],
     workspaces: &[WorkspaceSummary],
     active_workspace_index: Option<usize>,
@@ -238,7 +260,7 @@ fn render_workspace_sidebar(
     list
 }
 
-fn render_sidebar_footer(cx: &mut Context<OcttyApp>) -> gpui::Div {
+pub(crate) fn render_sidebar_footer(cx: &mut Context<OcttyApp>) -> gpui::Div {
     div()
         .border_t_1()
         .border_color(rgb(0x4d545f))
@@ -280,7 +302,7 @@ fn render_sidebar_footer(cx: &mut Context<OcttyApp>) -> gpui::Div {
         )
 }
 
-fn sidebar_add_repository_button() -> gpui::Div {
+pub(crate) fn sidebar_add_repository_button() -> gpui::Div {
     sidebar_control_button()
         .w_full()
         .justify_center()
@@ -294,7 +316,7 @@ fn sidebar_add_repository_button() -> gpui::Div {
         )
 }
 
-fn sidebar_pane_button(icon: IconName, label: &'static str) -> gpui::Div {
+pub(crate) fn sidebar_pane_button(icon: IconName, label: &'static str) -> gpui::Div {
     sidebar_control_button()
         .justify_center()
         .gap_1()
@@ -302,7 +324,7 @@ fn sidebar_pane_button(icon: IconName, label: &'static str) -> gpui::Div {
         .child(div().text_xs().child(label))
 }
 
-fn sidebar_control_button() -> gpui::Div {
+pub(crate) fn sidebar_control_button() -> gpui::Div {
     div()
         .h(px(28.0))
         .px_2()
@@ -316,7 +338,11 @@ fn sidebar_control_button() -> gpui::Div {
         .cursor_pointer()
 }
 
-fn render_error_toast(id: u64, message: SharedString, cx: &mut Context<OcttyApp>) -> gpui::Div {
+pub(crate) fn render_error_toast(
+    id: u64,
+    message: SharedString,
+    cx: &mut Context<OcttyApp>,
+) -> gpui::Div {
     div()
         .w_full()
         .flex()
@@ -354,7 +380,7 @@ fn render_error_toast(id: u64, message: SharedString, cx: &mut Context<OcttyApp>
         )
 }
 
-fn render_sidebar_project_group(
+pub(crate) fn render_sidebar_project_group(
     group: &SidebarWorkspaceGroup,
     workspaces: &[WorkspaceSummary],
     active_workspace_index: Option<usize>,
@@ -417,7 +443,7 @@ fn render_sidebar_project_group(
     section.child(workspace_list)
 }
 
-fn render_sidebar_workspace_row(
+pub(crate) fn render_sidebar_workspace_row(
     index: usize,
     workspace: &WorkspaceSummary,
     active: bool,
@@ -521,7 +547,7 @@ fn render_sidebar_workspace_row(
     row
 }
 
-fn render_workspace_activity_icon(activity_state: ActivityState) -> gpui::Div {
+pub(crate) fn render_workspace_activity_icon(activity_state: ActivityState) -> gpui::Div {
     let base = div()
         .relative()
         .flex_none()
@@ -544,7 +570,7 @@ fn render_workspace_activity_icon(activity_state: ActivityState) -> gpui::Div {
     }
 }
 
-fn render_workspace_status_tag(state: &WorkspaceState, changed: bool) -> Tag {
+pub(crate) fn render_workspace_status_tag(state: &WorkspaceState, changed: bool) -> Tag {
     let tag = match state {
         WorkspaceState::Published => Tag::success(),
         WorkspaceState::MergedLocal => Tag::warning(),
@@ -561,7 +587,7 @@ fn render_workspace_status_tag(state: &WorkspaceState, changed: bool) -> Tag {
     tag.outline().xsmall().child(label)
 }
 
-fn workspace_bookmark_label(workspace: &WorkspaceSummary) -> Option<String> {
+pub(crate) fn workspace_bookmark_label(workspace: &WorkspaceSummary) -> Option<String> {
     if workspace.status.bookmarks.is_empty() {
         return None;
     }
@@ -648,7 +674,7 @@ impl Render for SidebarMenuView {
     }
 }
 
-fn rename_dialog_button(label: &'static str) -> gpui::Div {
+pub(crate) fn rename_dialog_button(label: &'static str) -> gpui::Div {
     div()
         .px_3()
         .py_1()
@@ -661,7 +687,7 @@ fn rename_dialog_button(label: &'static str) -> gpui::Div {
         .child(label)
 }
 
-fn rename_dialog_primary_button(label: &'static str) -> gpui::Div {
+pub(crate) fn rename_dialog_primary_button(label: &'static str) -> gpui::Div {
     rename_dialog_button(label)
         .border_color(rgb(0x4e86d8))
         .bg(rgb(0x2f5f9f))

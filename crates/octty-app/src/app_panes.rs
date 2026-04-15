@@ -1,17 +1,34 @@
+use super::*;
+
 impl OcttyApp {
-    fn add_shell_pane(&mut self, _: &AddShellPane, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn add_shell_pane(
+        &mut self,
+        _: &AddShellPane,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_pane(PaneType::Shell, cx);
     }
 
-    fn add_diff_pane(&mut self, _: &AddDiffPane, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn add_diff_pane(
+        &mut self,
+        _: &AddDiffPane,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_pane(PaneType::Diff, cx);
     }
 
-    fn add_note_pane(&mut self, _: &AddNotePane, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn add_note_pane(
+        &mut self,
+        _: &AddNotePane,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_pane(PaneType::Note, cx);
     }
 
-    fn paste_terminal_clipboard(
+    pub(crate) fn paste_terminal_clipboard(
         &mut self,
         _: &PasteTerminalClipboard,
         _: &mut Window,
@@ -31,7 +48,7 @@ impl OcttyApp {
         cx.stop_propagation();
     }
 
-    fn copy_terminal_selection(
+    pub(crate) fn copy_terminal_selection(
         &mut self,
         _: &CopyTerminalSelection,
         _: &mut Window,
@@ -41,7 +58,7 @@ impl OcttyApp {
         cx.stop_propagation();
     }
 
-    fn cut_terminal_selection(
+    pub(crate) fn cut_terminal_selection(
         &mut self,
         _: &CutTerminalSelection,
         _: &mut Window,
@@ -51,7 +68,7 @@ impl OcttyApp {
         cx.stop_propagation();
     }
 
-    fn start_terminal_selection(
+    pub(crate) fn start_terminal_selection(
         &mut self,
         live_key: &str,
         point: TerminalGridPoint,
@@ -74,7 +91,7 @@ impl OcttyApp {
         cx.notify();
     }
 
-    fn update_terminal_selection(
+    pub(crate) fn update_terminal_selection(
         &mut self,
         live_key: &str,
         point: TerminalGridPoint,
@@ -107,7 +124,7 @@ impl OcttyApp {
         cx.notify();
     }
 
-    fn finish_terminal_selection(&mut self, live_key: &str, cx: &mut Context<Self>) {
+    pub(crate) fn finish_terminal_selection(&mut self, live_key: &str, cx: &mut Context<Self>) {
         let Some(live) = self.live_terminals.get_mut(live_key) else {
             return;
         };
@@ -118,7 +135,11 @@ impl OcttyApp {
         cx.notify();
     }
 
-    fn paste_terminal_primary_selection(&mut self, live_key: &str, cx: &mut Context<Self>) {
+    pub(crate) fn paste_terminal_primary_selection(
+        &mut self,
+        live_key: &str,
+        cx: &mut Context<Self>,
+    ) {
         let Some(text) = read_terminal_primary_text(cx) else {
             return;
         };
@@ -126,7 +147,7 @@ impl OcttyApp {
         cx.stop_propagation();
     }
 
-    fn copy_terminal_selection_to_clipboard(
+    pub(crate) fn copy_terminal_selection_to_clipboard(
         &mut self,
         clear_selection: bool,
         cx: &mut Context<Self>,
@@ -143,7 +164,7 @@ impl OcttyApp {
         }
     }
 
-    fn active_workspace_selection_text(&self) -> Option<(String, String)> {
+    pub(crate) fn active_workspace_selection_text(&self) -> Option<(String, String)> {
         let workspace = self.active_workspace()?;
         let snapshot = self.active_snapshot.as_ref()?;
         if let Some(pane_id) = active_terminal_pane_id(snapshot) {
@@ -165,7 +186,7 @@ impl OcttyApp {
             })
     }
 
-    fn live_terminal_selection_text(&self, live_key: &str) -> Option<String> {
+    pub(crate) fn live_terminal_selection_text(&self, live_key: &str) -> Option<String> {
         let live = self.live_terminals.get(live_key)?;
         let snapshot = live.latest.as_ref()?;
         let selection = live.selection.as_ref()?;
@@ -173,7 +194,7 @@ impl OcttyApp {
         (!text.is_empty()).then_some(text)
     }
 
-    fn activate_terminal_key(&mut self, live_key: &str, cx: &mut Context<Self>) {
+    pub(crate) fn activate_terminal_key(&mut self, live_key: &str, cx: &mut Context<Self>) {
         let Some((workspace_id, pane_id)) = split_live_terminal_key(live_key) else {
             return;
         };
@@ -191,7 +212,7 @@ impl OcttyApp {
         }
     }
 
-    fn navigate_pane(
+    pub(crate) fn navigate_pane(
         &mut self,
         action: &NavigatePane,
         window: &mut Window,
@@ -220,7 +241,12 @@ impl OcttyApp {
         cx.notify();
     }
 
-    fn close_active_pane(&mut self, _: &CloseActivePane, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_active_pane(
+        &mut self,
+        _: &CloseActivePane,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(snapshot) = self.active_snapshot.clone() else {
             return;
         };
@@ -267,7 +293,7 @@ impl OcttyApp {
         }
     }
 
-    fn resize_focused_column(
+    pub(crate) fn resize_focused_column(
         &mut self,
         action: &ResizeFocusedColumn,
         _: &mut Window,
@@ -290,7 +316,7 @@ impl OcttyApp {
         cx.notify();
     }
 
-    fn add_pane(&mut self, pane_type: PaneType, cx: &mut Context<Self>) {
+    pub(crate) fn add_pane(&mut self, pane_type: PaneType, cx: &mut Context<Self>) {
         let Some(workspace) = self.active_workspace().cloned() else {
             self.show_error("No active workspace.", cx);
             return;
@@ -344,7 +370,12 @@ impl OcttyApp {
         cx.notify();
     }
 
-    fn select_pane(&mut self, pane_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_pane(
+        &mut self,
+        pane_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.focus_handle.focus(window);
         let snapshot_to_save = self.active_snapshot.as_mut().map(|snapshot| {
             snapshot.active_pane_id = Some(pane_id.to_owned());
@@ -359,7 +390,7 @@ impl OcttyApp {
         cx.notify();
     }
 
-    fn save_workspace_snapshot(
+    pub(crate) fn save_workspace_snapshot(
         &self,
         snapshot: WorkspaceSnapshot,
         error_context: &'static str,
@@ -384,7 +415,7 @@ impl OcttyApp {
         .detach();
     }
 
-    fn kill_terminal_session(&self, session_id: String, cx: &mut Context<Self>) {
+    pub(crate) fn kill_terminal_session(&self, session_id: String, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let session_id_for_error = session_id.clone();
             let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
@@ -408,7 +439,7 @@ impl OcttyApp {
         .detach();
     }
 
-    fn handle_key_down(
+    pub(crate) fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
@@ -437,7 +468,11 @@ impl OcttyApp {
         cx.stop_propagation();
     }
 
-    fn send_input_to_active_terminal(&mut self, input: TerminalInput, cx: &mut Context<Self>) {
+    pub(crate) fn send_input_to_active_terminal(
+        &mut self,
+        input: TerminalInput,
+        cx: &mut Context<Self>,
+    ) {
         let Some(workspace) = self.active_workspace().cloned() else {
             return;
         };
@@ -494,7 +529,7 @@ impl OcttyApp {
         cx.notify();
     }
 
-    fn send_bytes_to_active_terminal(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+    pub(crate) fn send_bytes_to_active_terminal(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         if bytes.is_empty() {
             return;
         }
@@ -516,7 +551,7 @@ impl OcttyApp {
         self.record_active_pane_seen(cx);
     }
 
-    fn send_bytes_to_terminal_key(
+    pub(crate) fn send_bytes_to_terminal_key(
         &mut self,
         live_key: &str,
         bytes: Vec<u8>,
@@ -535,7 +570,7 @@ impl OcttyApp {
         live.last_input_at = Some(Instant::now());
     }
 
-    fn schedule_terminal_flush(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn schedule_terminal_flush(&mut self, cx: &mut Context<Self>) {
         if self.terminal_flush_active {
             return;
         }
@@ -587,7 +622,7 @@ impl OcttyApp {
         .detach();
     }
 
-    fn apply_terminal_flush_snapshots(&mut self, snapshots: Vec<WorkspaceSnapshot>) {
+    pub(crate) fn apply_terminal_flush_snapshots(&mut self, snapshots: Vec<WorkspaceSnapshot>) {
         let pending_panes: BTreeSet<_> = self
             .pending_terminal_inputs
             .iter()

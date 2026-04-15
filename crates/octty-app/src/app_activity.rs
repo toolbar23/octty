@@ -1,10 +1,12 @@
+use super::*;
+
 impl OcttyApp {
-    fn active_workspace(&self) -> Option<&WorkspaceSummary> {
+    pub(crate) fn active_workspace(&self) -> Option<&WorkspaceSummary> {
         self.active_workspace_index
             .and_then(|index| self.workspaces.get(index))
     }
 
-    fn record_pane_activity(
+    pub(crate) fn record_pane_activity(
         &mut self,
         workspace_id: &str,
         pane_id: &str,
@@ -25,7 +27,7 @@ impl OcttyApp {
         self.schedule_pane_activity_persistence(cx);
     }
 
-    fn record_pane_seen(
+    pub(crate) fn record_pane_seen(
         &mut self,
         workspace_id: &str,
         pane_id: &str,
@@ -43,7 +45,7 @@ impl OcttyApp {
         self.schedule_pane_activity_persistence(cx);
     }
 
-    fn record_active_pane_seen(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn record_active_pane_seen(&mut self, cx: &mut Context<Self>) {
         let Some(workspace_id) = self
             .active_workspace()
             .map(|workspace| workspace.id.clone())
@@ -60,7 +62,12 @@ impl OcttyApp {
         self.record_pane_seen(&workspace_id, &pane_id, now_ms(), cx);
     }
 
-    fn delete_pane_activity(&mut self, workspace_id: &str, pane_id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn delete_pane_activity(
+        &mut self,
+        workspace_id: &str,
+        pane_id: &str,
+        cx: &mut Context<Self>,
+    ) {
         let key = (workspace_id.to_owned(), pane_id.to_owned());
         self.pane_activity.remove(&key);
         self.pending_pane_activity_persistence.remove(&key);
@@ -87,8 +94,7 @@ impl OcttyApp {
         .detach();
     }
 
-
-    fn schedule_pane_activity_persistence(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn schedule_pane_activity_persistence(&mut self, cx: &mut Context<Self>) {
         if self.pane_activity_persist_active {
             return;
         }
@@ -147,7 +153,7 @@ impl OcttyApp {
         .detach();
     }
 
-    fn schedule_pane_activity_reconciliation(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn schedule_pane_activity_reconciliation(&mut self, cx: &mut Context<Self>) {
         if self.pane_activity_reconcile_active {
             return;
         }

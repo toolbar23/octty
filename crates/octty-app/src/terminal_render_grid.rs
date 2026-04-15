@@ -1,4 +1,6 @@
-fn render_terminal_grid(
+use super::*;
+
+pub(crate) fn render_terminal_grid(
     live_key: String,
     snapshot: &TerminalGridSnapshot,
     selection: Option<&TerminalSelection>,
@@ -61,7 +63,7 @@ fn render_terminal_grid(
     grid
 }
 
-fn terminal_paint_input(
+pub(crate) fn terminal_paint_input(
     snapshot: &TerminalGridSnapshot,
     default_fg: Rgba,
     default_bg: Rgba,
@@ -145,11 +147,11 @@ fn terminal_paint_input(
     }
 }
 
-fn terminal_row_background_submission_count(row: &TerminalPaintRowInput) -> usize {
+pub(crate) fn terminal_row_background_submission_count(row: &TerminalPaintRowInput) -> usize {
     row.background_runs.len() + 1
 }
 
-fn terminal_prefers_full_canvas(input: &TerminalGridPaintInput) -> bool {
+pub(crate) fn terminal_prefers_full_canvas(input: &TerminalGridPaintInput) -> bool {
     // Keep one stable GPUI tree for the terminal. Switching between row views and
     // a monolithic canvas during dense TUI redraws caused stale pixels to be
     // composited into unrelated rows.
@@ -157,7 +159,7 @@ fn terminal_prefers_full_canvas(input: &TerminalGridPaintInput) -> bool {
     false
 }
 
-fn terminal_grid_interaction_state(
+pub(crate) fn terminal_grid_interaction_state(
     session_id: &str,
     render_cache: &mut TerminalRenderCache,
 ) -> Rc<RefCell<TerminalGridInteractionState>> {
@@ -169,13 +171,13 @@ fn terminal_grid_interaction_state(
         .clone()
 }
 
-fn clear_terminal_row_views(session_id: &str, render_cache: &mut TerminalRenderCache) {
+pub(crate) fn clear_terminal_row_views(session_id: &str, render_cache: &mut TerminalRenderCache) {
     if let Some(cache) = render_cache.sessions.get_mut(session_id) {
         cache.row_views.fill_with(|| None);
     }
 }
 
-fn render_terminal_full_canvas(
+pub(crate) fn render_terminal_full_canvas(
     input: TerminalGridPaintInput,
     terminal_glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
     build_micros: u64,
@@ -231,7 +233,7 @@ fn render_terminal_full_canvas(
     )
 }
 
-fn render_terminal_cursor_overlay(
+pub(crate) fn render_terminal_cursor_overlay(
     cursor: TerminalPaintCursor,
     terminal_glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
 ) -> impl IntoElement {
@@ -268,7 +270,7 @@ fn render_terminal_cursor_overlay(
     .overflow_hidden()
 }
 
-fn render_terminal_selection_layer(
+pub(crate) fn render_terminal_selection_layer(
     live_key: String,
     selection: Option<TerminalSelection>,
     cols: u16,

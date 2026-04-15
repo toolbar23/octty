@@ -1,3 +1,5 @@
+use super::*;
+
 impl Render for OcttyApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_live_terminals_for_active_snapshot(cx);
@@ -49,7 +51,7 @@ impl Render for OcttyApp {
             (window.viewport_size().width - px(WORKSPACE_SIDEBAR_WIDTH)).max(px(0.0));
 
         div()
-            .id("octty-rs-root")
+            .id("octty-root")
             .key_context("OcttyApp")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::open_workspace))

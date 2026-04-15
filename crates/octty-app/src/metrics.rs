@@ -1,15 +1,17 @@
-fn push_latency_sample(samples: &mut VecDeque<u64>, micros: u64) {
+use super::*;
+
+pub(crate) fn push_latency_sample(samples: &mut VecDeque<u64>, micros: u64) {
     if samples.len() == TERMINAL_LATENCY_SAMPLE_LIMIT {
         samples.pop_front();
     }
     samples.push_back(micros);
 }
 
-fn duration_micros(duration: Duration) -> u64 {
+pub(crate) fn duration_micros(duration: Duration) -> u64 {
     duration.as_micros().min(u128::from(u64::MAX)) as u64
 }
 
-fn latency_summary(samples: &VecDeque<u64>) -> Option<String> {
+pub(crate) fn latency_summary(samples: &VecDeque<u64>) -> Option<String> {
     if samples.is_empty() {
         return None;
     }
@@ -26,7 +28,7 @@ fn latency_summary(samples: &VecDeque<u64>) -> Option<String> {
     ))
 }
 
-fn count_summary(samples: &VecDeque<u64>) -> Option<String> {
+pub(crate) fn count_summary(samples: &VecDeque<u64>) -> Option<String> {
     if samples.is_empty() {
         return None;
     }
@@ -38,13 +40,13 @@ fn count_summary(samples: &VecDeque<u64>) -> Option<String> {
     Some(format!("p50 {p50} p95 {p95} max {max}"))
 }
 
-fn latency_percentile(sorted_micros: &[u64], percentile: usize) -> u64 {
+pub(crate) fn latency_percentile(sorted_micros: &[u64], percentile: usize) -> u64 {
     let index = ((sorted_micros.len().saturating_sub(1) * percentile) / 100)
         .min(sorted_micros.len().saturating_sub(1));
     sorted_micros[index]
 }
 
-fn format_latency_micros(micros: u64) -> String {
+pub(crate) fn format_latency_micros(micros: u64) -> String {
     if micros >= 1_000 {
         format!("{:.1}ms", micros as f64 / 1_000.0)
     } else {
@@ -52,7 +54,7 @@ fn format_latency_micros(micros: u64) -> String {
     }
 }
 
-fn terminal_font() -> Font {
+pub(crate) fn terminal_font() -> Font {
     let mut terminal_font = font(terminal_font_family());
     terminal_font.features = FontFeatures::disable_ligatures();
     terminal_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
@@ -67,7 +69,7 @@ fn terminal_font() -> Font {
     terminal_font
 }
 
-fn terminal_font_family() -> String {
+pub(crate) fn terminal_font_family() -> String {
     std::env::var("OCTTY_RS_TERMINAL_FONT_FAMILY")
         .or_else(|_| std::env::var("OCTTY_TERMINAL_FONT_FAMILY"))
         .ok()
@@ -75,7 +77,7 @@ fn terminal_font_family() -> String {
         .unwrap_or_else(|| DEFAULT_TERMINAL_FONT_FAMILY.to_owned())
 }
 
-fn first_font_family(input: &str) -> Option<String> {
+pub(crate) fn first_font_family(input: &str) -> Option<String> {
     input
         .split(',')
         .map(|family| family.trim().trim_matches('"').trim_matches('\'').trim())
@@ -83,22 +85,22 @@ fn first_font_family(input: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn default_terminal_grid_for_pane() -> (u16, u16) {
+pub(crate) fn default_terminal_grid_for_pane() -> (u16, u16) {
     (
         (720.0_f32 / TERMINAL_CELL_WIDTH).floor() as u16,
         (360.0_f32 / TERMINAL_CELL_HEIGHT).floor() as u16,
     )
 }
 
-fn taskspace_height_for_viewport(viewport_height: f32) -> f32 {
+pub(crate) fn taskspace_height_for_viewport(viewport_height: f32) -> f32 {
     (viewport_height - TERMINAL_TASKSPACE_VERTICAL_CHROME_HEIGHT).max(160.0)
 }
 
-fn taskspace_width_for_viewport(viewport_width: f32) -> f32 {
+pub(crate) fn taskspace_width_for_viewport(viewport_width: f32) -> f32 {
     (viewport_width - WORKSPACE_SIDEBAR_WIDTH - TASKSPACE_HORIZONTAL_PADDING).max(240.0)
 }
 
-fn terminal_surface_chrome_height() -> f32 {
+pub(crate) fn terminal_surface_chrome_height() -> f32 {
     let debug_height = if terminal_performance_data_enabled() {
         TERMINAL_DEBUG_TIMER_LINE_HEIGHT + TERMINAL_SURFACE_DEBUG_TIMER_MARGIN_BOTTOM
     } else {
@@ -107,7 +109,7 @@ fn terminal_surface_chrome_height() -> f32 {
     TERMINAL_SURFACE_PADDING_Y + debug_height
 }
 
-fn taskspace_viewport_offset(snapshot: &WorkspaceSnapshot, viewport_width: f32) -> f32 {
+pub(crate) fn taskspace_viewport_offset(snapshot: &WorkspaceSnapshot, viewport_width: f32) -> f32 {
     let Some((active_left, active_width, total_width)) = active_column_metrics(snapshot) else {
         return 0.0;
     };
@@ -116,7 +118,7 @@ fn taskspace_viewport_offset(snapshot: &WorkspaceSnapshot, viewport_width: f32) 
     centered_offset.clamp(0.0, max_offset)
 }
 
-fn active_column_metrics(snapshot: &WorkspaceSnapshot) -> Option<(f32, f32, f32)> {
+pub(crate) fn active_column_metrics(snapshot: &WorkspaceSnapshot) -> Option<(f32, f32, f32)> {
     let active_pane_id = snapshot
         .active_pane_id
         .as_deref()
@@ -149,7 +151,7 @@ fn active_column_metrics(snapshot: &WorkspaceSnapshot) -> Option<(f32, f32, f32)
     Some((active_left?, active_width?, total_width))
 }
 
-fn terminal_resize_requests(
+pub(crate) fn terminal_resize_requests(
     snapshot: Option<&WorkspaceSnapshot>,
     taskspace_height: f32,
 ) -> Vec<(String, String, u16, u16)> {
@@ -182,11 +184,13 @@ fn terminal_resize_requests(
     requests
 }
 
-fn live_terminal_key(workspace_id: &str, pane_id: &str) -> String {
+pub(crate) fn live_terminal_key(workspace_id: &str, pane_id: &str) -> String {
     format!("{workspace_id}:{pane_id}")
 }
 
-fn pane_activity_map(activities: Vec<PaneActivity>) -> HashMap<(String, String), PaneActivity> {
+pub(crate) fn pane_activity_map(
+    activities: Vec<PaneActivity>,
+) -> HashMap<(String, String), PaneActivity> {
     activities
         .into_iter()
         .map(|activity| {
@@ -198,7 +202,7 @@ fn pane_activity_map(activities: Vec<PaneActivity>) -> HashMap<(String, String),
         .collect()
 }
 
-fn pane_activity_state(
+pub(crate) fn pane_activity_state(
     workspace_id: &str,
     pane_id: &str,
     pane_activity: &HashMap<(String, String), PaneActivity>,
@@ -209,7 +213,7 @@ fn pane_activity_state(
         .unwrap_or(ActivityState::IdleSeen)
 }
 
-fn workspace_activity_state(
+pub(crate) fn workspace_activity_state(
     workspace: &WorkspaceSummary,
     pane_activity: &HashMap<(String, String), PaneActivity>,
 ) -> ActivityState {
@@ -223,7 +227,7 @@ fn workspace_activity_state(
     )
 }
 
-fn pane_border_color(active: bool, activity_state: ActivityState) -> Hsla {
+pub(crate) fn pane_border_color(active: bool, activity_state: ActivityState) -> Hsla {
     if active {
         rgb(0x6aa36f).into()
     } else {
@@ -235,11 +239,11 @@ fn pane_border_color(active: bool, activity_state: ActivityState) -> Hsla {
     }
 }
 
-fn split_live_terminal_key(key: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_live_terminal_key(key: &str) -> Option<(&str, &str)> {
     key.split_once(':')
 }
 
-fn terminal_rgb_to_rgba(color: TerminalRgb) -> Rgba {
+pub(crate) fn terminal_rgb_to_rgba(color: TerminalRgb) -> Rgba {
     Rgba {
         r: color.r as f32 / 255.0,
         g: color.g as f32 / 255.0,
@@ -248,7 +252,7 @@ fn terminal_rgb_to_rgba(color: TerminalRgb) -> Rgba {
     }
 }
 
-fn terminal_dim_color(color: Rgba, target: Rgba) -> Rgba {
+pub(crate) fn terminal_dim_color(color: Rgba, target: Rgba) -> Rgba {
     Rgba {
         r: (color.r + target.r) * 0.5,
         g: (color.g + target.g) * 0.5,
@@ -257,7 +261,7 @@ fn terminal_dim_color(color: Rgba, target: Rgba) -> Rgba {
     }
 }
 
-fn workspace_status_label(state: &WorkspaceState) -> &'static str {
+pub(crate) fn workspace_status_label(state: &WorkspaceState) -> &'static str {
     match state {
         WorkspaceState::Published => "published",
         WorkspaceState::MergedLocal => "merged local",

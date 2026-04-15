@@ -1,125 +1,127 @@
+use super::*;
+
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct OpenWorkspaceShortcut {
-    index: usize,
+pub(crate) struct OpenWorkspaceShortcut {
+    pub(crate) index: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct NavigateWorkspace {
-    direction: WorkspaceNavigationDirection,
+pub(crate) struct NavigateWorkspace {
+    pub(crate) direction: WorkspaceNavigationDirection,
 }
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct AddShellPane;
+pub(crate) struct AddShellPane;
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct AddDiffPane;
+pub(crate) struct AddDiffPane;
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct AddNotePane;
+pub(crate) struct AddNotePane;
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct PasteTerminalClipboard;
+pub(crate) struct PasteTerminalClipboard;
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct CopyTerminalSelection;
+pub(crate) struct CopyTerminalSelection;
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct CutTerminalSelection;
+pub(crate) struct CutTerminalSelection;
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct NavigatePane {
-    direction: PaneNavigationDirection,
+pub(crate) struct NavigatePane {
+    pub(crate) direction: PaneNavigationDirection,
 }
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct CloseActivePane;
+pub(crate) struct CloseActivePane;
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct ResizeFocusedColumn {
-    direction: ColumnResizeDirection,
+pub(crate) struct ResizeFocusedColumn {
+    pub(crate) direction: ColumnResizeDirection,
 }
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct AddProjectRoot;
+pub(crate) struct AddProjectRoot;
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct CreateWorkspaceForRoot {
-    root_id: String,
+pub(crate) struct CreateWorkspaceForRoot {
+    pub(crate) root_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct RenameProjectRoot {
-    root_id: String,
+pub(crate) struct RenameProjectRoot {
+    pub(crate) root_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct RemoveProjectRoot {
-    root_id: String,
+pub(crate) struct RemoveProjectRoot {
+    pub(crate) root_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct RenameWorkspace {
-    workspace_id: String,
+pub(crate) struct RenameWorkspace {
+    pub(crate) workspace_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct ForgetWorkspace {
-    workspace_id: String,
+pub(crate) struct ForgetWorkspace {
+    pub(crate) workspace_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct DeleteAndForgetWorkspace {
-    workspace_id: String,
+pub(crate) struct DeleteAndForgetWorkspace {
+    pub(crate) workspace_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct SidebarMenuSelectUp;
+pub(crate) struct SidebarMenuSelectUp;
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct SidebarMenuSelectDown;
+pub(crate) struct SidebarMenuSelectDown;
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct SidebarMenuConfirm;
+pub(crate) struct SidebarMenuConfirm;
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-struct SidebarMenuCancel;
+pub(crate) struct SidebarMenuCancel;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PaneNavigationDirection {
+pub(crate) enum PaneNavigationDirection {
     Left,
     Right,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WorkspaceNavigationDirection {
+pub(crate) enum WorkspaceNavigationDirection {
     Previous,
     Next,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ColumnResizeDirection {
+pub(crate) enum ColumnResizeDirection {
     Slimmer,
     Wider,
 }

@@ -1,4 +1,6 @@
-fn render_taskspace(
+use super::*;
+
+pub(crate) fn render_taskspace(
     snapshot: Option<&WorkspaceSnapshot>,
     live_terminals: &HashMap<String, LiveTerminalPane>,
     pane_activity: &HashMap<(String, String), PaneActivity>,
@@ -63,7 +65,7 @@ fn render_taskspace(
     taskspace.child(panel_strip)
 }
 
-fn render_pane(
+pub(crate) fn render_pane(
     workspace_id: &str,
     pane: &PaneState,
     active: bool,
@@ -117,7 +119,7 @@ fn render_pane(
     ))
 }
 
-fn render_pane_body(
+pub(crate) fn render_pane_body(
     workspace_id: &str,
     pane_id: &str,
     pane: &PaneState,
@@ -148,7 +150,7 @@ fn render_pane_body(
     }
 }
 
-fn render_terminal_surface(
+pub(crate) fn render_terminal_surface(
     workspace_id: &str,
     pane_id: &str,
     payload: &TerminalPanePayload,
@@ -212,7 +214,7 @@ fn render_terminal_surface(
     ))
 }
 
-fn pane_body_label(pane: &PaneState) -> String {
+pub(crate) fn pane_body_label(pane: &PaneState) -> String {
     match &pane.payload {
         PanePayload::Terminal(payload) => {
             let screen = terminal_screen_excerpt(&payload.restored_buffer);
@@ -231,7 +233,7 @@ fn pane_body_label(pane: &PaneState) -> String {
     }
 }
 
-fn terminal_screen_excerpt(screen: &str) -> String {
+pub(crate) fn terminal_screen_excerpt(screen: &str) -> String {
     let lines: Vec<_> = screen
         .lines()
         .map(str::trim_end)

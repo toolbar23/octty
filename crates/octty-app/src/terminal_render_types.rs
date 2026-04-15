@@ -1,168 +1,170 @@
-struct TerminalGridPaintInput {
-    session_id: String,
-    cols: u16,
-    rows: u16,
-    default_bg: Rgba,
-    rows_data: Vec<TerminalPaintRowInput>,
-    glyph_cells: Vec<TerminalPaintGlyphCell>,
-    cursor: Option<TerminalPaintCursor>,
-    dirty_rows: usize,
-    dirty_cells: usize,
-    rebuilt_rows: usize,
-    reused_rows: usize,
-    repaint_backgrounds: usize,
-    rebuilt_row_flags: Vec<bool>,
+use super::*;
+
+pub(crate) struct TerminalGridPaintInput {
+    pub(crate) session_id: String,
+    pub(crate) cols: u16,
+    pub(crate) rows: u16,
+    pub(crate) default_bg: Rgba,
+    pub(crate) rows_data: Vec<TerminalPaintRowInput>,
+    pub(crate) glyph_cells: Vec<TerminalPaintGlyphCell>,
+    pub(crate) cursor: Option<TerminalPaintCursor>,
+    pub(crate) dirty_rows: usize,
+    pub(crate) dirty_cells: usize,
+    pub(crate) rebuilt_rows: usize,
+    pub(crate) reused_rows: usize,
+    pub(crate) repaint_backgrounds: usize,
+    pub(crate) rebuilt_row_flags: Vec<bool>,
 }
 
 #[derive(Clone)]
-struct TerminalPaintRowInput {
-    default_bg: Rgba,
-    background_runs: Vec<TerminalPaintBackgroundRun>,
+pub(crate) struct TerminalPaintRowInput {
+    pub(crate) default_bg: Rgba,
+    pub(crate) background_runs: Vec<TerminalPaintBackgroundRun>,
 }
 
 #[derive(Clone)]
-struct TerminalPaintGlyphCell {
-    row_index: usize,
-    col_index: usize,
-    text: SharedString,
-    cell_width: u8,
-    color: Hsla,
-    bold: bool,
-    italic: bool,
-    underline: bool,
-    strikethrough: bool,
-    overline: bool,
+pub(crate) struct TerminalPaintGlyphCell {
+    pub(crate) row_index: usize,
+    pub(crate) col_index: usize,
+    pub(crate) text: SharedString,
+    pub(crate) cell_width: u8,
+    pub(crate) color: Hsla,
+    pub(crate) bold: bool,
+    pub(crate) italic: bool,
+    pub(crate) underline: bool,
+    pub(crate) strikethrough: bool,
+    pub(crate) overline: bool,
 }
 
 #[derive(Clone)]
-struct TerminalPaintBackgroundRun {
-    start_col: usize,
-    cell_count: usize,
-    color: Rgba,
+pub(crate) struct TerminalPaintBackgroundRun {
+    pub(crate) start_col: usize,
+    pub(crate) cell_count: usize,
+    pub(crate) color: Rgba,
 }
 
 #[derive(Clone)]
-struct TerminalPaintCursor {
-    row_index: usize,
-    col_index: usize,
-    cell_width: u8,
-    background: Rgba,
-    glyph_cell: Option<TerminalPaintGlyphCell>,
+pub(crate) struct TerminalPaintCursor {
+    pub(crate) row_index: usize,
+    pub(crate) col_index: usize,
+    pub(crate) cell_width: u8,
+    pub(crate) background: Rgba,
+    pub(crate) glyph_cell: Option<TerminalPaintGlyphCell>,
 }
 
-struct TerminalRowPaintSurface {
-    row_input: TerminalPaintRowInput,
-    glyph_cells: Vec<TerminalPaintGlyphCell>,
-    shaped_glyph_cells: Vec<TerminalShapedGlyphCell>,
+pub(crate) struct TerminalRowPaintSurface {
+    pub(crate) row_input: TerminalPaintRowInput,
+    pub(crate) glyph_cells: Vec<TerminalPaintGlyphCell>,
+    pub(crate) shaped_glyph_cells: Vec<TerminalShapedGlyphCell>,
 }
 
-struct TerminalCursorPaintSurface {
-    cursor: TerminalPaintCursor,
-    shaped_glyph_cells: Vec<TerminalShapedGlyphCell>,
+pub(crate) struct TerminalCursorPaintSurface {
+    pub(crate) cursor: TerminalPaintCursor,
+    pub(crate) shaped_glyph_cells: Vec<TerminalShapedGlyphCell>,
 }
 
-struct TerminalSelectionPaintSurface {
-    runs: Vec<TerminalSelectionRun>,
+pub(crate) struct TerminalSelectionPaintSurface {
+    pub(crate) runs: Vec<TerminalSelectionRun>,
 }
 
-struct TerminalFullPaintSurface {
-    input: TerminalGridPaintInput,
-    shaped_glyph_cells: Vec<TerminalShapedGlyphCell>,
-    shaped_cursor_glyph_cells: Vec<TerminalShapedGlyphCell>,
-    glyph_cache_hits: usize,
-    glyph_cache_misses: usize,
+pub(crate) struct TerminalFullPaintSurface {
+    pub(crate) input: TerminalGridPaintInput,
+    pub(crate) shaped_glyph_cells: Vec<TerminalShapedGlyphCell>,
+    pub(crate) shaped_cursor_glyph_cells: Vec<TerminalShapedGlyphCell>,
+    pub(crate) glyph_cache_hits: usize,
+    pub(crate) glyph_cache_misses: usize,
 }
 
-struct TerminalShapedGlyphCell {
-    input_cell_index: usize,
-    line: ShapedLine,
+pub(crate) struct TerminalShapedGlyphCell {
+    pub(crate) input_cell_index: usize,
+    pub(crate) line: ShapedLine,
 }
 
 #[derive(Default)]
-struct TerminalGlyphLayoutCache {
-    glyphs: HashMap<TerminalGlyphCacheKey, ShapedLine>,
+pub(crate) struct TerminalGlyphLayoutCache {
+    pub(crate) glyphs: HashMap<TerminalGlyphCacheKey, ShapedLine>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct TerminalGlyphCacheKey {
-    text: String,
-    bold: bool,
-    italic: bool,
-    strikethrough: bool,
+pub(crate) struct TerminalGlyphCacheKey {
+    pub(crate) text: String,
+    pub(crate) bold: bool,
+    pub(crate) italic: bool,
+    pub(crate) strikethrough: bool,
 }
 
 #[derive(Default)]
-struct TerminalRenderCache {
-    sessions: HashMap<String, TerminalRenderGridCache>,
+pub(crate) struct TerminalRenderCache {
+    pub(crate) sessions: HashMap<String, TerminalRenderGridCache>,
 }
 
-struct TerminalRenderGridCache {
-    cols: u16,
-    rows: u16,
-    default_fg: Rgba,
-    default_bg: Rgba,
-    rows_data: Vec<Option<TerminalCachedPaintRow>>,
-    row_views: Vec<Option<Entity<TerminalRowView>>>,
-    interaction: Rc<RefCell<TerminalGridInteractionState>>,
+pub(crate) struct TerminalRenderGridCache {
+    pub(crate) cols: u16,
+    pub(crate) rows: u16,
+    pub(crate) default_fg: Rgba,
+    pub(crate) default_bg: Rgba,
+    pub(crate) rows_data: Vec<Option<TerminalCachedPaintRow>>,
+    pub(crate) row_views: Vec<Option<Entity<TerminalRowView>>>,
+    pub(crate) interaction: Rc<RefCell<TerminalGridInteractionState>>,
 }
 
 #[derive(Default)]
-struct TerminalGridInteractionState {
-    bounds: Option<Bounds<Pixels>>,
+pub(crate) struct TerminalGridInteractionState {
+    pub(crate) bounds: Option<Bounds<Pixels>>,
 }
 
 #[derive(Clone)]
-struct TerminalCachedPaintRow {
-    row_input: TerminalPaintRowInput,
-    glyph_cells: Vec<TerminalPaintGlyphCell>,
+pub(crate) struct TerminalCachedPaintRow {
+    pub(crate) row_input: TerminalPaintRowInput,
+    pub(crate) glyph_cells: Vec<TerminalPaintGlyphCell>,
 }
 
-struct TerminalRowView {
-    cols: u16,
-    row_input: TerminalPaintRowInput,
-    glyph_cells: Vec<TerminalPaintGlyphCell>,
-    glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
+pub(crate) struct TerminalRowView {
+    pub(crate) cols: u16,
+    pub(crate) row_input: TerminalPaintRowInput,
+    pub(crate) glyph_cells: Vec<TerminalPaintGlyphCell>,
+    pub(crate) glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct TerminalRenderProfileSample {
-    build_micros: u64,
-    shape_micros: u64,
-    paint_micros: u64,
-    rows: u16,
-    cols: u16,
-    glyph_cells: usize,
-    glyph_cache_hits: usize,
-    glyph_cache_misses: usize,
-    background_runs: usize,
-    text_bytes: usize,
-    dirty_rows: usize,
-    dirty_cells: usize,
-    rebuilt_rows: usize,
-    reused_rows: usize,
-    repaint_backgrounds: usize,
-    painted_rows: usize,
-    submitted_glyphs: usize,
-    submitted_backgrounds: usize,
+pub(crate) struct TerminalRenderProfileSample {
+    pub(crate) build_micros: u64,
+    pub(crate) shape_micros: u64,
+    pub(crate) paint_micros: u64,
+    pub(crate) rows: u16,
+    pub(crate) cols: u16,
+    pub(crate) glyph_cells: usize,
+    pub(crate) glyph_cache_hits: usize,
+    pub(crate) glyph_cache_misses: usize,
+    pub(crate) background_runs: usize,
+    pub(crate) text_bytes: usize,
+    pub(crate) dirty_rows: usize,
+    pub(crate) dirty_cells: usize,
+    pub(crate) rebuilt_rows: usize,
+    pub(crate) reused_rows: usize,
+    pub(crate) repaint_backgrounds: usize,
+    pub(crate) painted_rows: usize,
+    pub(crate) submitted_glyphs: usize,
+    pub(crate) submitted_backgrounds: usize,
 }
 
 #[derive(Default)]
-struct TerminalRenderProfiler {
-    build_micros: VecDeque<u64>,
-    shape_micros: VecDeque<u64>,
-    paint_micros: VecDeque<u64>,
-    glyph_cells: VecDeque<u64>,
-    glyph_cache_hits: VecDeque<u64>,
-    glyph_cache_misses: VecDeque<u64>,
-    background_runs: VecDeque<u64>,
-    text_bytes: VecDeque<u64>,
-    dirty_rows: VecDeque<u64>,
-    dirty_cells: VecDeque<u64>,
-    rebuilt_rows: VecDeque<u64>,
-    reused_rows: VecDeque<u64>,
-    repaint_backgrounds: VecDeque<u64>,
-    painted_rows: VecDeque<u64>,
-    submitted_glyphs: VecDeque<u64>,
-    submitted_backgrounds: VecDeque<u64>,
-    last_report_at: Option<Instant>,
+pub(crate) struct TerminalRenderProfiler {
+    pub(crate) build_micros: VecDeque<u64>,
+    pub(crate) shape_micros: VecDeque<u64>,
+    pub(crate) paint_micros: VecDeque<u64>,
+    pub(crate) glyph_cells: VecDeque<u64>,
+    pub(crate) glyph_cache_hits: VecDeque<u64>,
+    pub(crate) glyph_cache_misses: VecDeque<u64>,
+    pub(crate) background_runs: VecDeque<u64>,
+    pub(crate) text_bytes: VecDeque<u64>,
+    pub(crate) dirty_rows: VecDeque<u64>,
+    pub(crate) dirty_cells: VecDeque<u64>,
+    pub(crate) rebuilt_rows: VecDeque<u64>,
+    pub(crate) reused_rows: VecDeque<u64>,
+    pub(crate) repaint_backgrounds: VecDeque<u64>,
+    pub(crate) painted_rows: VecDeque<u64>,
+    pub(crate) submitted_glyphs: VecDeque<u64>,
+    pub(crate) submitted_backgrounds: VecDeque<u64>,
+    pub(crate) last_report_at: Option<Instant>,
 }

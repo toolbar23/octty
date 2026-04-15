@@ -1,4 +1,9 @@
-fn record_terminal_render_build_profile(input: &TerminalGridPaintInput, build_micros: u64) {
+use super::*;
+
+pub(crate) fn record_terminal_render_build_profile(
+    input: &TerminalGridPaintInput,
+    build_micros: u64,
+) {
     if !terminal_render_profile_enabled() {
         return;
     }
@@ -24,7 +29,7 @@ fn record_terminal_render_build_profile(input: &TerminalGridPaintInput, build_mi
     record_terminal_render_profile(sample);
 }
 
-fn terminal_full_render_profile_sample(
+pub(crate) fn terminal_full_render_profile_sample(
     surface: &TerminalFullPaintSurface,
     build_micros: u64,
 ) -> TerminalRenderProfileSample {
@@ -62,7 +67,7 @@ fn terminal_full_render_profile_sample(
     }
 }
 
-fn record_terminal_render_profile(sample: TerminalRenderProfileSample) {
+pub(crate) fn record_terminal_render_profile(sample: TerminalRenderProfileSample) {
     if !terminal_render_profile_enabled() {
         return;
     }
@@ -76,7 +81,7 @@ fn record_terminal_render_profile(sample: TerminalRenderProfileSample) {
     profiler.maybe_report(sample);
 }
 
-fn record_terminal_row_paint_profile(
+pub(crate) fn record_terminal_row_paint_profile(
     surface: &TerminalRowPaintSurface,
     cols: u16,
     paint_micros: u64,
@@ -101,7 +106,7 @@ fn record_terminal_row_paint_profile(
     });
 }
 
-fn terminal_render_profile_summary() -> Option<String> {
+pub(crate) fn terminal_render_profile_summary() -> Option<String> {
     if !terminal_render_profile_enabled() {
         return None;
     }
@@ -111,32 +116,33 @@ fn terminal_render_profile_summary() -> Option<String> {
     profiler.summary()
 }
 
-fn terminal_render_profile_enabled() -> bool {
+pub(crate) fn terminal_render_profile_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| terminal_env_flag_enabled("OCTTY_TERMINAL_PROFILE"))
 }
 
-fn terminal_performance_data_enabled() -> bool {
+pub(crate) fn terminal_performance_data_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         terminal_env_flag_enabled("OCTTY_TERMINAL_PERF") || terminal_render_profile_enabled()
     })
 }
 
-fn terminal_env_flag_enabled(name: &str) -> bool {
+pub(crate) fn terminal_env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
         .ok()
         .is_some_and(|value| terminal_env_value_enabled(&value))
 }
 
-fn terminal_env_value_enabled(value: &str) -> bool {
+pub(crate) fn terminal_env_value_enabled(value: &str) -> bool {
     value != "0" && !value.eq_ignore_ascii_case("false")
 }
 
-static TERMINAL_RENDER_PROFILER: OnceLock<Mutex<TerminalRenderProfiler>> = OnceLock::new();
+pub(crate) static TERMINAL_RENDER_PROFILER: OnceLock<Mutex<TerminalRenderProfiler>> =
+    OnceLock::new();
 
 impl TerminalRenderProfiler {
-    fn record(&mut self, sample: TerminalRenderProfileSample) {
+    pub(crate) fn record(&mut self, sample: TerminalRenderProfileSample) {
         if sample.build_micros > 0 {
             push_latency_sample(&mut self.build_micros, sample.build_micros);
         }
@@ -189,7 +195,7 @@ impl TerminalRenderProfiler {
         }
     }
 
-    fn summary(&self) -> Option<String> {
+    pub(crate) fn summary(&self) -> Option<String> {
         let build = latency_summary(&self.build_micros)?;
         let mut parts = vec![format!("render build {build}")];
         if let Some(shape) = latency_summary(&self.shape_micros) {
@@ -201,7 +207,7 @@ impl TerminalRenderProfiler {
         Some(parts.join(" · "))
     }
 
-    fn maybe_report(&mut self, sample: TerminalRenderProfileSample) {
+    pub(crate) fn maybe_report(&mut self, sample: TerminalRenderProfileSample) {
         let now = Instant::now();
         if self
             .last_report_at

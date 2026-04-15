@@ -1,11 +1,13 @@
-fn set_workspace_menu(cx: &mut App, workspaces: &[WorkspaceSummary]) {
+use super::*;
+
+pub(crate) fn set_workspace_menu(cx: &mut App, workspaces: &[WorkspaceSummary]) {
     cx.set_menus(vec![Menu {
         name: "Workspaces".into(),
         items: workspace_menu_items(workspaces),
     }]);
 }
 
-fn workspace_menu_items(workspaces: &[WorkspaceSummary]) -> Vec<MenuItem> {
+pub(crate) fn workspace_menu_items(workspaces: &[WorkspaceSummary]) -> Vec<MenuItem> {
     workspace_shortcut_targets(workspaces)
         .into_iter()
         .enumerate()
@@ -21,7 +23,7 @@ fn workspace_menu_items(workspaces: &[WorkspaceSummary]) -> Vec<MenuItem> {
         .collect()
 }
 
-fn workspace_key_bindings() -> Vec<KeyBinding> {
+pub(crate) fn workspace_key_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("ctrl-shift-1", OpenWorkspaceShortcut { index: 0 }, None),
         KeyBinding::new("ctrl-shift-2", OpenWorkspaceShortcut { index: 1 }, None),

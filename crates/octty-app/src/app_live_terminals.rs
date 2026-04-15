@@ -1,5 +1,7 @@
+use super::*;
+
 impl OcttyApp {
-    fn ensure_live_terminals_for_active_snapshot(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn ensure_live_terminals_for_active_snapshot(&mut self, cx: &mut Context<Self>) {
         let Some(workspace) = self.active_workspace().cloned() else {
             return;
         };
@@ -63,7 +65,7 @@ impl OcttyApp {
         }
     }
 
-    fn schedule_terminal_snapshot_notifications(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn schedule_terminal_snapshot_notifications(&mut self, cx: &mut Context<Self>) {
         if self.terminal_notifications_active {
             return;
         }
@@ -101,7 +103,11 @@ impl OcttyApp {
         .detach();
     }
 
-    fn schedule_deferred_terminal_snapshot(&mut self, delay: Duration, cx: &mut Context<Self>) {
+    pub(crate) fn schedule_deferred_terminal_snapshot(
+        &mut self,
+        delay: Duration,
+        cx: &mut Context<Self>,
+    ) {
         if self.terminal_deferred_snapshot_timer_active {
             return;
         }
@@ -117,7 +123,7 @@ impl OcttyApp {
         .detach();
     }
 
-    fn terminal_snapshot_coalesce_interval(&self, now: Instant) -> Duration {
+    pub(crate) fn terminal_snapshot_coalesce_interval(&self, now: Instant) -> Duration {
         terminal_snapshot_coalesce_interval(
             self.terminal_window_active,
             self.has_recent_terminal_input(),
@@ -126,14 +132,14 @@ impl OcttyApp {
         )
     }
 
-    fn has_recent_terminal_input(&self) -> bool {
+    pub(crate) fn has_recent_terminal_input(&self) -> bool {
         self.live_terminals.values().any(|live| {
             live.last_input_at
                 .is_some_and(|input_at| input_at.elapsed() <= TERMINAL_INTERACTIVE_SNAPSHOT_WINDOW)
         })
     }
 
-    fn drain_live_terminal_snapshots(
+    pub(crate) fn drain_live_terminal_snapshots(
         &mut self,
         now: Instant,
         cx: &mut Context<Self>,
@@ -214,7 +220,13 @@ impl OcttyApp {
         result
     }
 
-    fn resize_live_terminal(&mut self, workspace_id: &str, pane_id: &str, cols: u16, rows: u16) {
+    pub(crate) fn resize_live_terminal(
+        &mut self,
+        workspace_id: &str,
+        pane_id: &str,
+        cols: u16,
+        rows: u16,
+    ) {
         let key = live_terminal_key(workspace_id, pane_id);
         let Some(live) = self.live_terminals.get_mut(&key) else {
             return;
@@ -231,7 +243,7 @@ impl OcttyApp {
         });
     }
 
-    fn scroll_live_terminal(
+    pub(crate) fn scroll_live_terminal(
         &mut self,
         workspace_id: &str,
         pane_id: &str,

@@ -1,146 +1,148 @@
+use super::*;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum TerminalInput {
+pub(crate) enum TerminalInput {
     LiveKey(LiveTerminalKeyInput),
 }
 
 #[derive(Clone, Debug)]
-struct PendingTerminalInput {
-    workspace: WorkspaceSummary,
-    snapshot: WorkspaceSnapshot,
-    pane_id: String,
-    payload: TerminalPanePayload,
-    input: TerminalInput,
+pub(crate) struct PendingTerminalInput {
+    pub(crate) workspace: WorkspaceSummary,
+    pub(crate) snapshot: WorkspaceSnapshot,
+    pub(crate) pane_id: String,
+    pub(crate) payload: TerminalPanePayload,
+    pub(crate) input: TerminalInput,
 }
 
-struct OcttyApp {
-    status: SharedString,
-    project_roots: Vec<ProjectRootRecord>,
-    workspaces: Vec<WorkspaceSummary>,
-    active_workspace_index: Option<usize>,
-    active_snapshot: Option<WorkspaceSnapshot>,
-    store_path: std::path::PathBuf,
-    focus_handle: FocusHandle,
-    pending_terminal_inputs: Vec<PendingTerminalInput>,
-    terminal_flush_active: bool,
-    live_terminals: HashMap<String, LiveTerminalPane>,
-    failed_live_terminals: BTreeSet<String>,
-    terminal_snapshot_tx: mpsc::UnboundedSender<()>,
-    terminal_snapshot_rx: Option<mpsc::UnboundedReceiver<()>>,
-    terminal_notifications_active: bool,
-    terminal_deferred_snapshot_timer_active: bool,
-    terminal_window_active: bool,
-    terminal_last_snapshot_notify_at: Option<Instant>,
-    terminal_glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
-    terminal_render_cache: Rc<RefCell<TerminalRenderCache>>,
-    sidebar_menu: Option<SidebarMenuOverlay>,
-    sidebar_rename_dialog: Option<SidebarRenameDialog>,
-    toasts: VecDeque<AppToast>,
-    next_toast_id: u64,
-    pane_activity: HashMap<(String, String), PaneActivity>,
-    pending_pane_activity_persistence: HashMap<(String, String), PaneActivity>,
-    pane_activity_persist_active: bool,
-    pane_activity_reconcile_active: bool,
+pub(crate) struct OcttyApp {
+    pub(crate) status: SharedString,
+    pub(crate) project_roots: Vec<ProjectRootRecord>,
+    pub(crate) workspaces: Vec<WorkspaceSummary>,
+    pub(crate) active_workspace_index: Option<usize>,
+    pub(crate) active_snapshot: Option<WorkspaceSnapshot>,
+    pub(crate) store_path: std::path::PathBuf,
+    pub(crate) focus_handle: FocusHandle,
+    pub(crate) pending_terminal_inputs: Vec<PendingTerminalInput>,
+    pub(crate) terminal_flush_active: bool,
+    pub(crate) live_terminals: HashMap<String, LiveTerminalPane>,
+    pub(crate) failed_live_terminals: BTreeSet<String>,
+    pub(crate) terminal_snapshot_tx: mpsc::UnboundedSender<()>,
+    pub(crate) terminal_snapshot_rx: Option<mpsc::UnboundedReceiver<()>>,
+    pub(crate) terminal_notifications_active: bool,
+    pub(crate) terminal_deferred_snapshot_timer_active: bool,
+    pub(crate) terminal_window_active: bool,
+    pub(crate) terminal_last_snapshot_notify_at: Option<Instant>,
+    pub(crate) terminal_glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
+    pub(crate) terminal_render_cache: Rc<RefCell<TerminalRenderCache>>,
+    pub(crate) sidebar_menu: Option<SidebarMenuOverlay>,
+    pub(crate) sidebar_rename_dialog: Option<SidebarRenameDialog>,
+    pub(crate) toasts: VecDeque<AppToast>,
+    pub(crate) next_toast_id: u64,
+    pub(crate) pane_activity: HashMap<(String, String), PaneActivity>,
+    pub(crate) pending_pane_activity_persistence: HashMap<(String, String), PaneActivity>,
+    pub(crate) pane_activity_persist_active: bool,
+    pub(crate) pane_activity_reconcile_active: bool,
 }
 
-struct LiveTerminalPane {
-    handle: LiveTerminalHandle,
-    latest: Option<TerminalGridSnapshot>,
-    pending_snapshot: Option<TerminalGridSnapshot>,
-    last_presented_snapshot_at: Option<Instant>,
-    last_resize: Option<(u16, u16)>,
-    last_input_at: Option<Instant>,
-    latency: TerminalLatencyStats,
-    selection: Option<TerminalSelection>,
-    selection_drag: Option<TerminalSelectionDrag>,
+pub(crate) struct LiveTerminalPane {
+    pub(crate) handle: LiveTerminalHandle,
+    pub(crate) latest: Option<TerminalGridSnapshot>,
+    pub(crate) pending_snapshot: Option<TerminalGridSnapshot>,
+    pub(crate) last_presented_snapshot_at: Option<Instant>,
+    pub(crate) last_resize: Option<(u16, u16)>,
+    pub(crate) last_input_at: Option<Instant>,
+    pub(crate) latency: TerminalLatencyStats,
+    pub(crate) selection: Option<TerminalSelection>,
+    pub(crate) selection_drag: Option<TerminalSelectionDrag>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct TerminalGridPoint {
-    row: u16,
-    col: u16,
+pub(crate) struct TerminalGridPoint {
+    pub(crate) row: u16,
+    pub(crate) col: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct TerminalSelection {
-    anchor: TerminalGridPoint,
-    active: TerminalGridPoint,
-    mode: TerminalSelectionMode,
+pub(crate) struct TerminalSelection {
+    pub(crate) anchor: TerminalGridPoint,
+    pub(crate) active: TerminalGridPoint,
+    pub(crate) mode: TerminalSelectionMode,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct TerminalSelectionMode {
-    rectangular: bool,
-    filter_indent: bool,
+pub(crate) struct TerminalSelectionMode {
+    pub(crate) rectangular: bool,
+    pub(crate) filter_indent: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct TerminalSelectionDrag {
-    anchor: TerminalGridPoint,
+pub(crate) struct TerminalSelectionDrag {
+    pub(crate) anchor: TerminalGridPoint,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct TerminalSelectionRun {
-    row: u16,
-    start_col: u16,
-    end_col: u16,
+pub(crate) struct TerminalSelectionRun {
+    pub(crate) row: u16,
+    pub(crate) start_col: u16,
+    pub(crate) end_col: u16,
 }
 
 #[derive(Default)]
-struct TerminalLatencyStats {
-    key_to_snapshot_micros: VecDeque<u64>,
-    pty_to_snapshot_micros: VecDeque<u64>,
-    pty_output_bytes: VecDeque<u64>,
-    vt_write_micros: VecDeque<u64>,
-    snapshot_update_micros: VecDeque<u64>,
-    snapshot_extract_micros: VecDeque<u64>,
-    snapshot_build_micros: VecDeque<u64>,
-    dirty_rows: VecDeque<u64>,
-    dirty_cells: VecDeque<u64>,
+pub(crate) struct TerminalLatencyStats {
+    pub(crate) key_to_snapshot_micros: VecDeque<u64>,
+    pub(crate) pty_to_snapshot_micros: VecDeque<u64>,
+    pub(crate) pty_output_bytes: VecDeque<u64>,
+    pub(crate) vt_write_micros: VecDeque<u64>,
+    pub(crate) snapshot_update_micros: VecDeque<u64>,
+    pub(crate) snapshot_extract_micros: VecDeque<u64>,
+    pub(crate) snapshot_build_micros: VecDeque<u64>,
+    pub(crate) dirty_rows: VecDeque<u64>,
+    pub(crate) dirty_cells: VecDeque<u64>,
 }
 
 impl TerminalLatencyStats {
-    fn record_key_to_snapshot(&mut self, duration: Duration) {
+    pub(crate) fn record_key_to_snapshot(&mut self, duration: Duration) {
         push_latency_sample(
             &mut self.key_to_snapshot_micros,
             duration.as_micros().min(u128::from(u64::MAX)) as u64,
         );
     }
 
-    fn record_pty_to_snapshot(&mut self, micros: Option<u64>) {
+    pub(crate) fn record_pty_to_snapshot(&mut self, micros: Option<u64>) {
         if let Some(micros) = micros {
             push_latency_sample(&mut self.pty_to_snapshot_micros, micros);
         }
     }
 
-    fn record_pty_output_bytes(&mut self, bytes: u64) {
+    pub(crate) fn record_pty_output_bytes(&mut self, bytes: u64) {
         push_latency_sample(&mut self.pty_output_bytes, bytes);
     }
 
-    fn record_vt_write(&mut self, micros: u64) {
+    pub(crate) fn record_vt_write(&mut self, micros: u64) {
         push_latency_sample(&mut self.vt_write_micros, micros);
     }
 
-    fn record_snapshot_update(&mut self, micros: u64) {
+    pub(crate) fn record_snapshot_update(&mut self, micros: u64) {
         push_latency_sample(&mut self.snapshot_update_micros, micros);
     }
 
-    fn record_snapshot_extract(&mut self, micros: u64) {
+    pub(crate) fn record_snapshot_extract(&mut self, micros: u64) {
         push_latency_sample(&mut self.snapshot_extract_micros, micros);
     }
 
-    fn record_snapshot_build(&mut self, micros: u64) {
+    pub(crate) fn record_snapshot_build(&mut self, micros: u64) {
         push_latency_sample(&mut self.snapshot_build_micros, micros);
     }
 
-    fn record_dirty_rows(&mut self, rows: u32) {
+    pub(crate) fn record_dirty_rows(&mut self, rows: u32) {
         push_latency_sample(&mut self.dirty_rows, u64::from(rows));
     }
 
-    fn record_dirty_cells(&mut self, cells: u32) {
+    pub(crate) fn record_dirty_cells(&mut self, cells: u32) {
         push_latency_sample(&mut self.dirty_cells, u64::from(cells));
     }
 
-    fn summary_label(&self) -> Option<String> {
+    pub(crate) fn summary_label(&self) -> Option<String> {
         let key = latency_summary(&self.key_to_snapshot_micros)?;
         let pty = latency_summary(&self.pty_to_snapshot_micros);
         let output_bytes = count_summary(&self.pty_output_bytes);
@@ -183,18 +185,20 @@ impl TerminalLatencyStats {
     }
 }
 
-fn drain_pending_terminal_notifications(notification_rx: &mut mpsc::UnboundedReceiver<()>) {
+pub(crate) fn drain_pending_terminal_notifications(
+    notification_rx: &mut mpsc::UnboundedReceiver<()>,
+) {
     while notification_rx.try_recv().is_ok() {}
 }
 
 #[derive(Default)]
-struct TerminalSnapshotDrainResult {
-    changed: bool,
-    deferred_delay: Option<Duration>,
+pub(crate) struct TerminalSnapshotDrainResult {
+    pub(crate) changed: bool,
+    pub(crate) deferred_delay: Option<Duration>,
 }
 
 impl TerminalSnapshotDrainResult {
-    fn defer_for(&mut self, delay: Duration) {
+    pub(crate) fn defer_for(&mut self, delay: Duration) {
         self.deferred_delay = Some(
             self.deferred_delay
                 .map_or(delay, |current| current.min(delay)),
@@ -202,7 +206,7 @@ impl TerminalSnapshotDrainResult {
     }
 }
 
-fn take_presentable_terminal_snapshot(
+pub(crate) fn take_presentable_terminal_snapshot(
     live: &mut LiveTerminalPane,
     focused: bool,
     now: Instant,
@@ -213,7 +217,7 @@ fn take_presentable_terminal_snapshot(
     live.pending_snapshot.take()
 }
 
-fn terminal_snapshot_presentation_delay(
+pub(crate) fn terminal_snapshot_presentation_delay(
     live: &LiveTerminalPane,
     focused: bool,
     now: Instant,
@@ -226,7 +230,7 @@ fn terminal_snapshot_presentation_delay(
     )
 }
 
-fn terminal_snapshot_presentation_delay_for_state(
+pub(crate) fn terminal_snapshot_presentation_delay_for_state(
     has_pending_snapshot: bool,
     last_presented_at: Option<Instant>,
     focused: bool,
@@ -244,7 +248,7 @@ fn terminal_snapshot_presentation_delay_for_state(
     }
 }
 
-fn coalesce_terminal_snapshots(
+pub(crate) fn coalesce_terminal_snapshots(
     snapshots: Vec<TerminalGridSnapshot>,
 ) -> Option<TerminalGridSnapshot> {
     let mut snapshots = snapshots.into_iter();
@@ -288,7 +292,7 @@ fn coalesce_terminal_snapshots(
     Some(latest)
 }
 
-fn terminal_snapshot_coalesce_interval(
+pub(crate) fn terminal_snapshot_coalesce_interval(
     window_active: bool,
     has_recent_input: bool,
     last_snapshot_notify_at: Option<Instant>,
@@ -303,7 +307,7 @@ fn terminal_snapshot_coalesce_interval(
     }
 }
 
-fn remaining_terminal_frame_delay(
+pub(crate) fn remaining_terminal_frame_delay(
     last_snapshot_notify_at: Option<Instant>,
     now: Instant,
 ) -> Duration {

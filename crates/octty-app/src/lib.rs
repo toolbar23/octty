@@ -53,7 +53,46 @@ use octty_term::{
     send_tmux_text_to_session, stable_tmux_session_name, tmux_session_activity,
 };
 
+mod actions;
+mod app_activity;
+mod app_core;
+mod app_live_terminals;
+mod app_panes;
+mod app_render;
+mod bootstrap;
+mod cli;
 mod gpui_tokio;
+mod input;
+mod menu;
+mod metrics;
+mod sidebar;
+mod taskspace;
+mod terminal_lifecycle;
+mod terminal_render_grid;
+mod terminal_render_paint;
+mod terminal_render_profile;
+mod terminal_render_types;
+mod terminal_selection;
+mod terminal_state;
+mod workspace;
+
+pub use cli::run;
+
+pub(crate) use actions::*;
+pub(crate) use bootstrap::*;
+pub(crate) use input::*;
+pub(crate) use menu::{set_workspace_menu, workspace_key_bindings};
+pub(crate) use metrics::*;
+pub(crate) use sidebar::*;
+pub(crate) use taskspace::*;
+pub(crate) use terminal_lifecycle::*;
+pub(crate) use terminal_render_grid::*;
+pub(crate) use terminal_render_paint::*;
+pub(crate) use terminal_render_profile::*;
+pub(crate) use terminal_render_types::*;
+pub(crate) use terminal_selection::*;
+pub(crate) use terminal_state::*;
+pub(crate) use workspace::*;
 
 const TERMINAL_CELL_WIDTH: f32 = 8.0;
 const TERMINAL_CELL_HEIGHT: f32 = 18.0;
@@ -78,25 +117,5 @@ const PANE_ACTIVITY_ACTIVE_WINDOW_MS: i64 = 3_000;
 const PANE_ACTIVITY_PERSIST_DELAY: Duration = Duration::from_millis(500);
 const PANE_ACTIVITY_RECONCILE_INTERVAL: Duration = Duration::from_secs(10);
 
-include!("actions.rs");
-include!("bootstrap.rs");
-include!("sidebar.rs");
-include!("terminal_state.rs");
-include!("app_core.rs");
-include!("app_panes.rs");
-include!("app_activity.rs");
-include!("app_live_terminals.rs");
-include!("app_render.rs");
-include!("cli.rs");
-include!("terminal_lifecycle.rs");
-include!("workspace.rs");
-include!("menu.rs");
-include!("input.rs");
-include!("taskspace.rs");
-include!("terminal_render_types.rs");
-include!("terminal_render_grid.rs");
-include!("terminal_render_paint.rs");
-include!("terminal_render_profile.rs");
-include!("terminal_selection.rs");
-include!("metrics.rs");
-include!("tests.rs");
+#[cfg(test)]
+mod tests;

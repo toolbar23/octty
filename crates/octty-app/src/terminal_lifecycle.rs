@@ -1,4 +1,6 @@
-async fn flush_terminal_inputs(
+use super::*;
+
+pub(crate) async fn flush_terminal_inputs(
     store_path: PathBuf,
     pending: Vec<PendingTerminalInput>,
 ) -> anyhow::Result<Vec<WorkspaceSnapshot>> {
@@ -56,7 +58,7 @@ async fn flush_terminal_inputs(
     Ok(snapshots)
 }
 
-async fn send_terminal_input_to_session(
+pub(crate) async fn send_terminal_input_to_session(
     session_id: &str,
     input: &TerminalInput,
 ) -> anyhow::Result<()> {
@@ -72,7 +74,7 @@ async fn send_terminal_input_to_session(
     Ok(())
 }
 
-fn tmux_key_for_live_key(input: &LiveTerminalKeyInput) -> Option<String> {
+pub(crate) fn tmux_key_for_live_key(input: &LiveTerminalKeyInput) -> Option<String> {
     let key = match input.key {
         LiveTerminalKey::Enter => "Enter".to_owned(),
         LiveTerminalKey::Backspace => "BSpace".to_owned(),
@@ -97,7 +99,7 @@ fn tmux_key_for_live_key(input: &LiveTerminalKeyInput) -> Option<String> {
     Some(key)
 }
 
-async fn capture_tmux_until_contains(
+pub(crate) async fn capture_tmux_until_contains(
     spec: &TerminalSessionSpec,
     needle: &str,
     timeout: Duration,
@@ -115,7 +117,7 @@ async fn capture_tmux_until_contains(
     }
 }
 
-fn prepare_live_terminal_snapshot(
+pub(crate) fn prepare_live_terminal_snapshot(
     workspace: &WorkspaceSummary,
     mut snapshot: WorkspaceSnapshot,
     pane_id: &str,
@@ -142,7 +144,7 @@ fn prepare_live_terminal_snapshot(
     Ok(snapshot)
 }
 
-async fn start_terminal_session(
+pub(crate) async fn start_terminal_session(
     store: &TursoStore,
     workspace: &WorkspaceSummary,
     snapshot: WorkspaceSnapshot,
@@ -156,7 +158,7 @@ async fn start_terminal_session(
     persist_terminal_screen(store, workspace, snapshot, pane_id, session_id, screen).await
 }
 
-async fn persist_terminal_screen(
+pub(crate) async fn persist_terminal_screen(
     store: &TursoStore,
     workspace: &WorkspaceSummary,
     mut snapshot: WorkspaceSnapshot,
@@ -198,7 +200,7 @@ async fn persist_terminal_screen(
     Ok(snapshot)
 }
 
-fn terminal_payload_for_pane<'a>(
+pub(crate) fn terminal_payload_for_pane<'a>(
     snapshot: &'a WorkspaceSnapshot,
     pane_id: &str,
 ) -> anyhow::Result<&'a TerminalPanePayload> {
@@ -212,7 +214,7 @@ fn terminal_payload_for_pane<'a>(
     Ok(payload)
 }
 
-fn terminal_spec_for_payload(
+pub(crate) fn terminal_spec_for_payload(
     workspace: &WorkspaceSummary,
     pane_id: &str,
     payload: &TerminalPanePayload,

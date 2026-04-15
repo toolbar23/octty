@@ -1,4 +1,6 @@
-fn shape_terminal_glyph_cells(
+use super::*;
+
+pub(crate) fn shape_terminal_glyph_cells(
     glyph_cells: &[TerminalPaintGlyphCell],
     glyph_cache: &mut TerminalGlyphLayoutCache,
     glyph_cache_hits: &mut usize,
@@ -42,7 +44,7 @@ fn shape_terminal_glyph_cells(
         .collect()
 }
 
-fn terminal_cached_paint_row(
+pub(crate) fn terminal_cached_paint_row(
     row_index: usize,
     row: &octty_term::live::TerminalRowSnapshot,
     snapshot: &TerminalGridSnapshot,
@@ -78,7 +80,7 @@ fn terminal_cached_paint_row(
     }
 }
 
-fn terminal_row_views_for_input(
+pub(crate) fn terminal_row_views_for_input(
     input: &TerminalGridPaintInput,
     glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
     render_cache: &mut TerminalRenderCache,
@@ -128,7 +130,7 @@ fn terminal_row_views_for_input(
     views
 }
 
-fn terminal_row_view_payload(
+pub(crate) fn terminal_row_view_payload(
     input: &TerminalGridPaintInput,
     cache: &TerminalRenderGridCache,
     row_index: usize,
@@ -187,7 +189,7 @@ impl Render for TerminalRowView {
     }
 }
 
-fn terminal_glyph_shape_style(
+pub(crate) fn terminal_glyph_shape_style(
     len: usize,
     bold: bool,
     italic: bool,
@@ -210,7 +212,7 @@ fn terminal_glyph_shape_style(
     }
 }
 
-fn paint_terminal_row_surface(
+pub(crate) fn paint_terminal_row_surface(
     bounds: Bounds<gpui::Pixels>,
     surface: &TerminalRowPaintSurface,
     window: &mut Window,
@@ -240,7 +242,7 @@ fn paint_terminal_row_surface(
     }
 }
 
-fn paint_terminal_cursor_surface(
+pub(crate) fn paint_terminal_cursor_surface(
     bounds: Bounds<gpui::Pixels>,
     surface: &TerminalCursorPaintSurface,
     window: &mut Window,
@@ -261,7 +263,7 @@ fn paint_terminal_cursor_surface(
     }
 }
 
-fn paint_terminal_selection_surface(
+pub(crate) fn paint_terminal_selection_surface(
     bounds: Bounds<gpui::Pixels>,
     surface: &TerminalSelectionPaintSurface,
     window: &mut Window,
@@ -283,7 +285,7 @@ fn paint_terminal_selection_surface(
     }
 }
 
-fn paint_terminal_full_surface(
+pub(crate) fn paint_terminal_full_surface(
     bounds: Bounds<gpui::Pixels>,
     surface: TerminalFullPaintSurface,
     window: &mut Window,
@@ -337,7 +339,7 @@ fn paint_terminal_full_surface(
     }
 }
 
-fn paint_terminal_glyph_cell(
+pub(crate) fn paint_terminal_glyph_cell(
     origin: gpui::Point<gpui::Pixels>,
     cell: &TerminalPaintGlyphCell,
     line: &ShapedLine,
@@ -384,7 +386,7 @@ fn paint_terminal_glyph_cell(
     )
 }
 
-fn terminal_glyph_cell_bounds(
+pub(crate) fn terminal_glyph_cell_bounds(
     origin: gpui::Point<gpui::Pixels>,
     cell: &TerminalPaintGlyphCell,
 ) -> Bounds<gpui::Pixels> {
@@ -397,7 +399,7 @@ fn terminal_glyph_cell_bounds(
     }
 }
 
-fn paint_terminal_cell_decorations(
+pub(crate) fn paint_terminal_cell_decorations(
     origin: gpui::Point<gpui::Pixels>,
     cell: &TerminalPaintGlyphCell,
     window: &mut Window,
@@ -433,7 +435,7 @@ fn paint_terminal_cell_decorations(
     }
 }
 
-fn terminal_background_runs(
+pub(crate) fn terminal_background_runs(
     _row_index: u16,
     row: &octty_term::live::TerminalRowSnapshot,
     snapshot: &TerminalGridSnapshot,
@@ -479,7 +481,7 @@ fn terminal_background_runs(
     runs
 }
 
-fn terminal_effective_cell_colors(
+pub(crate) fn terminal_effective_cell_colors(
     cell: &octty_term::live::TerminalCellSnapshot,
     snapshot: &TerminalGridSnapshot,
 ) -> (Rgba, Rgba) {
@@ -500,7 +502,7 @@ fn terminal_effective_cell_colors(
     (fg, bg)
 }
 
-fn terminal_paint_cursor(
+pub(crate) fn terminal_paint_cursor(
     snapshot: &TerminalGridSnapshot,
     default_fg: Rgba,
     default_bg: Rgba,

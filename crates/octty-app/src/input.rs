@@ -1,4 +1,6 @@
-fn terminal_input_from_key_event(event: &KeyDownEvent) -> Option<TerminalInput> {
+use super::*;
+
+pub(crate) fn terminal_input_from_key_event(event: &KeyDownEvent) -> Option<TerminalInput> {
     live_terminal_input_from_key_parts(
         &event.keystroke.key,
         event.keystroke.key_char.as_deref(),
@@ -11,7 +13,7 @@ fn terminal_input_from_key_event(event: &KeyDownEvent) -> Option<TerminalInput> 
     .map(TerminalInput::LiveKey)
 }
 
-fn workspace_shortcut_index_from_key_event(event: &KeyDownEvent) -> Option<usize> {
+pub(crate) fn workspace_shortcut_index_from_key_event(event: &KeyDownEvent) -> Option<usize> {
     workspace_shortcut_index_from_key_parts(
         &event.keystroke.key,
         event.keystroke.key_char.as_deref(),
@@ -23,7 +25,7 @@ fn workspace_shortcut_index_from_key_event(event: &KeyDownEvent) -> Option<usize
     )
 }
 
-fn workspace_shortcut_index_from_key_parts(
+pub(crate) fn workspace_shortcut_index_from_key_parts(
     key: &str,
     key_char: Option<&str>,
     control: bool,
@@ -40,7 +42,7 @@ fn workspace_shortcut_index_from_key_parts(
         .or_else(|| key_char.and_then(workspace_shortcut_index_from_token))
 }
 
-fn workspace_shortcut_index_from_token(token: &str) -> Option<usize> {
+pub(crate) fn workspace_shortcut_index_from_token(token: &str) -> Option<usize> {
     match token {
         "1" | "!" => Some(0),
         "2" | "@" => Some(1),
@@ -56,7 +58,7 @@ fn workspace_shortcut_index_from_token(token: &str) -> Option<usize> {
     }
 }
 
-fn live_terminal_input_from_key_parts(
+pub(crate) fn live_terminal_input_from_key_parts(
     key: &str,
     key_char: Option<&str>,
     control: bool,
@@ -154,7 +156,7 @@ fn live_terminal_input_from_key_parts(
     })
 }
 
-fn live_terminal_printable_input(
+pub(crate) fn live_terminal_printable_input(
     text: String,
     control: bool,
     alt: bool,
@@ -175,7 +177,7 @@ fn live_terminal_printable_input(
     }
 }
 
-fn terminal_printable_key_text(
+pub(crate) fn terminal_printable_key_text(
     key_char: Option<&str>,
     control: bool,
     platform: bool,
@@ -194,7 +196,7 @@ fn terminal_printable_key_text(
     Some(text.to_owned())
 }
 
-fn synthesized_terminal_printable_key_text(
+pub(crate) fn synthesized_terminal_printable_key_text(
     normalized_key: &str,
     control: bool,
     shift: bool,
@@ -212,7 +214,7 @@ fn synthesized_terminal_printable_key_text(
     None
 }
 
-fn is_pane_action_key(key: &str) -> bool {
+pub(crate) fn is_pane_action_key(key: &str) -> bool {
     matches!(
         key.to_ascii_lowercase().as_str(),
         "left"
@@ -227,18 +229,18 @@ fn is_pane_action_key(key: &str) -> bool {
     )
 }
 
-fn is_column_resize_key(key: &str) -> bool {
+pub(crate) fn is_column_resize_key(key: &str) -> bool {
     matches!(
         key.to_ascii_lowercase().as_str(),
         "left" | "right" | "arrowleft" | "arrowright"
     )
 }
 
-fn is_clipboard_action_key(key: &str) -> bool {
+pub(crate) fn is_clipboard_action_key(key: &str) -> bool {
     matches!(key.to_ascii_lowercase().as_str(), "c" | "x" | "v")
 }
 
-fn unshifted_character(character: char) -> char {
+pub(crate) fn unshifted_character(character: char) -> char {
     match character {
         'A'..='Z' => character.to_ascii_lowercase(),
         ')' => '0',
@@ -266,7 +268,7 @@ fn unshifted_character(character: char) -> char {
     }
 }
 
-fn active_terminal_pane_id(snapshot: &WorkspaceSnapshot) -> Option<String> {
+pub(crate) fn active_terminal_pane_id(snapshot: &WorkspaceSnapshot) -> Option<String> {
     snapshot
         .active_pane_id
         .as_deref()
@@ -286,7 +288,7 @@ fn active_terminal_pane_id(snapshot: &WorkspaceSnapshot) -> Option<String> {
         })
 }
 
-fn pane_navigation_target(
+pub(crate) fn pane_navigation_target(
     snapshot: &WorkspaceSnapshot,
     direction: PaneNavigationDirection,
 ) -> Option<String> {
@@ -308,7 +310,7 @@ fn pane_navigation_target(
     target.cloned()
 }
 
-fn first_center_pane_id(snapshot: &WorkspaceSnapshot) -> Option<&str> {
+pub(crate) fn first_center_pane_id(snapshot: &WorkspaceSnapshot) -> Option<&str> {
     snapshot
         .center_column_ids
         .iter()
@@ -318,7 +320,10 @@ fn first_center_pane_id(snapshot: &WorkspaceSnapshot) -> Option<&str> {
         .map(String::as_str)
 }
 
-fn pane_layout_position(snapshot: &WorkspaceSnapshot, pane_id: &str) -> Option<(usize, usize)> {
+pub(crate) fn pane_layout_position(
+    snapshot: &WorkspaceSnapshot,
+    pane_id: &str,
+) -> Option<(usize, usize)> {
     for (column_index, column_id) in snapshot.center_column_ids.iter().enumerate() {
         let column = snapshot.columns.get(column_id)?;
         if let Some(pane_index) = column.pane_ids.iter().position(|id| id == pane_id) {
@@ -328,7 +333,7 @@ fn pane_layout_position(snapshot: &WorkspaceSnapshot, pane_id: &str) -> Option<(
     None
 }
 
-fn center_column(
+pub(crate) fn center_column(
     snapshot: &WorkspaceSnapshot,
     column_index: usize,
 ) -> Option<&octty_core::WorkspaceColumn> {
@@ -338,7 +343,7 @@ fn center_column(
         .and_then(|column_id| snapshot.columns.get(column_id))
 }
 
-fn pane_in_neighbor_column(
+pub(crate) fn pane_in_neighbor_column(
     snapshot: &WorkspaceSnapshot,
     column_index: usize,
     source_pane_index: usize,
@@ -348,7 +353,7 @@ fn pane_in_neighbor_column(
     column.pane_ids.get(target_index)
 }
 
-fn resize_focused_column_in_snapshot(
+pub(crate) fn resize_focused_column_in_snapshot(
     snapshot: &mut WorkspaceSnapshot,
     direction: ColumnResizeDirection,
 ) -> Option<f64> {
@@ -367,7 +372,7 @@ fn resize_focused_column_in_snapshot(
     Some(next_width)
 }
 
-fn active_column_id(snapshot: &WorkspaceSnapshot) -> Option<String> {
+pub(crate) fn active_column_id(snapshot: &WorkspaceSnapshot) -> Option<String> {
     let active_pane_id = snapshot
         .active_pane_id
         .as_deref()
@@ -386,7 +391,11 @@ fn active_column_id(snapshot: &WorkspaceSnapshot) -> Option<String> {
         .cloned()
 }
 
-fn preview_terminal_input(snapshot: &mut WorkspaceSnapshot, pane_id: &str, input: &TerminalInput) {
+pub(crate) fn preview_terminal_input(
+    snapshot: &mut WorkspaceSnapshot,
+    pane_id: &str,
+    input: &TerminalInput,
+) {
     let Some(pane) = snapshot.panes.get_mut(pane_id) else {
         return;
     };

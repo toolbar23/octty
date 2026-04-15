@@ -1,4 +1,6 @@
-fn project_root_from_path(root_path: &Path) -> ProjectRootRecord {
+use super::*;
+
+pub(crate) fn project_root_from_path(root_path: &Path) -> ProjectRootRecord {
     let root_path_string = root_path.to_string_lossy().to_string();
     let now = now_ms();
     ProjectRootRecord {
@@ -14,7 +16,7 @@ fn project_root_from_path(root_path: &Path) -> ProjectRootRecord {
     }
 }
 
-fn stable_project_root_id(root_path: &str) -> String {
+pub(crate) fn stable_project_root_id(root_path: &str) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in root_path.bytes() {
         hash ^= byte as u64;
@@ -23,7 +25,7 @@ fn stable_project_root_id(root_path: &str) -> String {
     format!("root-{hash:016x}")
 }
 
-trait WorkspaceDisplayName {
+pub(crate) trait WorkspaceDisplayName {
     fn display_name_or_workspace_name(&self) -> &str;
 }
 

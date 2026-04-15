@@ -1,18 +1,20 @@
+use super::*;
+
 #[derive(Clone)]
-struct BootstrapState {
-    status: String,
-    project_roots: Vec<ProjectRootRecord>,
-    workspaces: Vec<WorkspaceSummary>,
-    active_workspace_index: Option<usize>,
-    active_snapshot: Option<WorkspaceSnapshot>,
-    pane_activity: Vec<PaneActivity>,
+pub(crate) struct BootstrapState {
+    pub(crate) status: String,
+    pub(crate) project_roots: Vec<ProjectRootRecord>,
+    pub(crate) workspaces: Vec<WorkspaceSummary>,
+    pub(crate) active_workspace_index: Option<usize>,
+    pub(crate) active_snapshot: Option<WorkspaceSnapshot>,
+    pub(crate) pane_activity: Vec<PaneActivity>,
 }
 
-async fn load_bootstrap(auto_seed_current_repo: bool) -> anyhow::Result<BootstrapState> {
+pub(crate) async fn load_bootstrap(auto_seed_current_repo: bool) -> anyhow::Result<BootstrapState> {
     load_bootstrap_with_active(auto_seed_current_repo, None).await
 }
 
-async fn load_bootstrap_with_active(
+pub(crate) async fn load_bootstrap_with_active(
     auto_seed_current_repo: bool,
     active_workspace_id: Option<String>,
 ) -> anyhow::Result<BootstrapState> {
@@ -111,7 +113,7 @@ async fn load_bootstrap_with_active(
     })
 }
 
-async fn create_workspace_for_root_and_reload(
+pub(crate) async fn create_workspace_for_root_and_reload(
     store_path: PathBuf,
     root: ProjectRootRecord,
 ) -> anyhow::Result<BootstrapState> {
@@ -124,7 +126,7 @@ async fn create_workspace_for_root_and_reload(
     load_bootstrap_with_active(true, Some(workspace_id)).await
 }
 
-async fn add_project_root_and_reload(
+pub(crate) async fn add_project_root_and_reload(
     store_path: PathBuf,
     selected_path: PathBuf,
     active_workspace_id: Option<String>,
@@ -142,7 +144,7 @@ async fn add_project_root_and_reload(
     load_bootstrap_with_active(true, workspace_id).await
 }
 
-async fn rename_project_root_and_reload(
+pub(crate) async fn rename_project_root_and_reload(
     store_path: PathBuf,
     root_id: String,
     display_name: String,
@@ -158,7 +160,7 @@ async fn rename_project_root_and_reload(
     load_bootstrap_with_active(true, active_workspace_id).await
 }
 
-async fn rename_workspace_and_reload(
+pub(crate) async fn rename_workspace_and_reload(
     store_path: PathBuf,
     workspace_id: String,
     display_name: String,
@@ -171,7 +173,7 @@ async fn rename_workspace_and_reload(
     load_bootstrap_with_active(true, active_workspace_id).await
 }
 
-async fn remove_project_root_and_reload(
+pub(crate) async fn remove_project_root_and_reload(
     store_path: PathBuf,
     root_id: String,
     active_workspace_id: Option<String>,
@@ -181,7 +183,7 @@ async fn remove_project_root_and_reload(
     load_bootstrap_with_active(true, active_workspace_id).await
 }
 
-async fn forget_workspace_and_reload(
+pub(crate) async fn forget_workspace_and_reload(
     store_path: PathBuf,
     workspace: WorkspaceSummary,
     active_workspace_id: Option<String>,
@@ -196,7 +198,7 @@ async fn forget_workspace_and_reload(
     load_bootstrap_with_active(true, active_workspace_id).await
 }
 
-async fn next_workspace_defaults(
+pub(crate) async fn next_workspace_defaults(
     store: &TursoStore,
     root: &ProjectRootRecord,
 ) -> anyhow::Result<(String, String)> {
@@ -223,7 +225,7 @@ async fn next_workspace_defaults(
     );
 }
 
-fn default_workspace_directory(root: &ProjectRootRecord) -> PathBuf {
+pub(crate) fn default_workspace_directory(root: &ProjectRootRecord) -> PathBuf {
     let repo_name = Path::new(&root.root_path)
         .file_name()
         .and_then(|name| name.to_str())
@@ -235,7 +237,7 @@ fn default_workspace_directory(root: &ProjectRootRecord) -> PathBuf {
         .join(repo_name)
 }
 
-async fn delete_workspace_directory(workspace: &WorkspaceSummary) -> anyhow::Result<()> {
+pub(crate) async fn delete_workspace_directory(workspace: &WorkspaceSummary) -> anyhow::Result<()> {
     if !has_recorded_workspace_path(&workspace.workspace_path) {
         anyhow::bail!(
             "workspace {} was forgotten, but its directory path is not recorded",
@@ -258,11 +260,11 @@ async fn delete_workspace_directory(workspace: &WorkspaceSummary) -> anyhow::Res
     Ok(())
 }
 
-fn sanitize_display_name(input: &str) -> String {
+pub(crate) fn sanitize_display_name(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-async fn load_workspace_snapshot(
+pub(crate) async fn load_workspace_snapshot(
     store: &TursoStore,
     workspace: &WorkspaceSummary,
 ) -> anyhow::Result<WorkspaceSnapshot> {
@@ -277,7 +279,9 @@ async fn load_workspace_snapshot(
     Ok(snapshot)
 }
 
-async fn reconcile_pane_activity(store_path: PathBuf) -> anyhow::Result<Vec<PaneActivity>> {
+pub(crate) async fn reconcile_pane_activity(
+    store_path: PathBuf,
+) -> anyhow::Result<Vec<PaneActivity>> {
     let store = TursoStore::open(store_path).await?;
     let mut activity_by_pane = pane_activity_map(store.list_pane_activity().await?);
     let snapshots = store.list_snapshots().await?;

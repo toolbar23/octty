@@ -1,3 +1,5 @@
+use super::*;
+
 pub fn run() {
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("create tokio runtime"));
     if std::env::args().any(|arg| arg == "--headless-check") {
@@ -97,7 +99,7 @@ pub fn run() {
     });
 }
 
-async fn pane_persistence_check() -> anyhow::Result<usize> {
+pub(crate) async fn pane_persistence_check() -> anyhow::Result<usize> {
     let bootstrap = load_bootstrap(true).await?;
     let Some(index) = bootstrap.active_workspace_index else {
         anyhow::bail!("no active workspace");
@@ -117,7 +119,7 @@ async fn pane_persistence_check() -> anyhow::Result<usize> {
     Ok(saved.panes.len())
 }
 
-async fn shell_session_check() -> anyhow::Result<String> {
+pub(crate) async fn shell_session_check() -> anyhow::Result<String> {
     let bootstrap = load_bootstrap(true).await?;
     let Some(index) = bootstrap.active_workspace_index else {
         anyhow::bail!("no active workspace");
@@ -146,7 +148,7 @@ async fn shell_session_check() -> anyhow::Result<String> {
         .unwrap_or_default())
 }
 
-async fn terminal_io_check() -> anyhow::Result<String> {
+pub(crate) async fn terminal_io_check() -> anyhow::Result<String> {
     let bootstrap = load_bootstrap(true).await?;
     let Some(index) = bootstrap.active_workspace_index else {
         anyhow::bail!("no active workspace");
@@ -177,7 +179,7 @@ async fn terminal_io_check() -> anyhow::Result<String> {
     Ok(marker)
 }
 
-async fn live_terminal_check() -> anyhow::Result<String> {
+pub(crate) async fn live_terminal_check() -> anyhow::Result<String> {
     let marker = format!("octty-live-terminal-{}", now_ms());
     let pane_id = format!("pane-{}", now_ms());
     let spec = TerminalSessionSpec {
@@ -211,7 +213,7 @@ async fn live_terminal_check() -> anyhow::Result<String> {
     }
 }
 
-fn terminal_replay_record_args() -> Option<(PathBuf, u16, u16)> {
+pub(crate) fn terminal_replay_record_args() -> Option<(PathBuf, u16, u16)> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--terminal-replay-record" {
@@ -233,7 +235,7 @@ fn terminal_replay_record_args() -> Option<(PathBuf, u16, u16)> {
     None
 }
 
-fn terminal_replay_events_args() -> Option<(PathBuf, Option<PathBuf>)> {
+pub(crate) fn terminal_replay_events_args() -> Option<(PathBuf, Option<PathBuf>)> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--terminal-replay-events" {
@@ -247,7 +249,11 @@ fn terminal_replay_events_args() -> Option<(PathBuf, Option<PathBuf>)> {
     None
 }
 
-fn terminal_replay_record_check(path: PathBuf, cols: u16, rows: u16) -> anyhow::Result<String> {
+pub(crate) fn terminal_replay_record_check(
+    path: PathBuf,
+    cols: u16,
+    rows: u16,
+) -> anyhow::Result<String> {
     let bytes = std::fs::read(&path)?;
     let snapshot = replay_terminal_bytes("terminal-replay", &bytes, cols, rows)?;
     Ok(terminal_replay_summary(
@@ -259,20 +265,20 @@ fn terminal_replay_record_check(path: PathBuf, cols: u16, rows: u16) -> anyhow::
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct TerminalReplayEventsPlan {
-    output_path: PathBuf,
-    initial_cols: u16,
-    initial_rows: u16,
-    steps: Vec<TerminalReplayEventsStep>,
+pub(crate) struct TerminalReplayEventsPlan {
+    pub(crate) output_path: PathBuf,
+    pub(crate) initial_cols: u16,
+    pub(crate) initial_rows: u16,
+    pub(crate) steps: Vec<TerminalReplayEventsStep>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum TerminalReplayEventsStep {
+pub(crate) enum TerminalReplayEventsStep {
     Output { offset: usize, len: usize },
     Resize { cols: u16, rows: u16 },
 }
 
-fn terminal_replay_events_check(
+pub(crate) fn terminal_replay_events_check(
     events_path: PathBuf,
     output_path_override: Option<PathBuf>,
 ) -> anyhow::Result<String> {
@@ -316,7 +322,9 @@ fn terminal_replay_events_check(
     ))
 }
 
-fn parse_terminal_replay_events(events: &str) -> anyhow::Result<TerminalReplayEventsPlan> {
+pub(crate) fn parse_terminal_replay_events(
+    events: &str,
+) -> anyhow::Result<TerminalReplayEventsPlan> {
     let mut output_path = None;
     let mut initial_cols = None;
     let mut initial_rows = None;
@@ -370,21 +378,21 @@ fn parse_terminal_replay_events(events: &str) -> anyhow::Result<TerminalReplayEv
     })
 }
 
-fn terminal_trace_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn terminal_trace_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     let prefix = format!("{key}=");
     line.split_whitespace()
         .find_map(|part| part.strip_prefix(&prefix))
 }
 
-fn parse_u16(value: &str) -> Option<u16> {
+pub(crate) fn parse_u16(value: &str) -> Option<u16> {
     value.parse().ok()
 }
 
-fn parse_usize(value: &str) -> Option<usize> {
+pub(crate) fn parse_usize(value: &str) -> Option<usize> {
     value.parse().ok()
 }
 
-fn terminal_replay_summary(
+pub(crate) fn terminal_replay_summary(
     label: &str,
     path: &Path,
     bytes_len: usize,
@@ -409,7 +417,7 @@ fn terminal_replay_summary(
     )
 }
 
-fn terminal_replay_style_summary(snapshot: &TerminalGridSnapshot) -> String {
+pub(crate) fn terminal_replay_style_summary(snapshot: &TerminalGridSnapshot) -> String {
     let mut lines = Vec::new();
     for (row_index, row) in snapshot.rows_data.iter().enumerate() {
         let bg_runs = terminal_replay_bg_runs(row, snapshot.default_bg);
@@ -459,13 +467,13 @@ fn terminal_replay_style_summary(snapshot: &TerminalGridSnapshot) -> String {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct TerminalReplayBgRun {
-    color: TerminalRgb,
-    start_col: usize,
-    end_col: usize,
+pub(crate) struct TerminalReplayBgRun {
+    pub(crate) color: TerminalRgb,
+    pub(crate) start_col: usize,
+    pub(crate) end_col: usize,
 }
 
-fn terminal_replay_bg_runs(
+pub(crate) fn terminal_replay_bg_runs(
     row: &octty_term::live::TerminalRowSnapshot,
     default_bg: TerminalRgb,
 ) -> Vec<TerminalReplayBgRun> {
@@ -498,6 +506,6 @@ fn terminal_replay_bg_runs(
     runs
 }
 
-fn terminal_rgb_hex(color: TerminalRgb) -> String {
+pub(crate) fn terminal_rgb_hex(color: TerminalRgb) -> String {
     format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
 }

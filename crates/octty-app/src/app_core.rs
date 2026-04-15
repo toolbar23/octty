@@ -1,5 +1,11 @@
+use super::*;
+
 impl OcttyApp {
-    fn new(bootstrap: BootstrapState, focus_handle: FocusHandle, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        bootstrap: BootstrapState,
+        focus_handle: FocusHandle,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (terminal_snapshot_tx, terminal_snapshot_rx) = mpsc::unbounded();
         let pane_activity = pane_activity_map(bootstrap.pane_activity);
         let mut app = Self {
@@ -38,7 +44,7 @@ impl OcttyApp {
         app
     }
 
-    fn open_workspace(
+    pub(crate) fn open_workspace(
         &mut self,
         action: &OpenWorkspaceShortcut,
         _window: &mut Window,
@@ -103,7 +109,7 @@ impl OcttyApp {
         .detach();
     }
 
-    fn navigate_workspace(
+    pub(crate) fn navigate_workspace(
         &mut self,
         action: &NavigateWorkspace,
         window: &mut Window,
@@ -130,7 +136,12 @@ impl OcttyApp {
         self.open_workspace(&OpenWorkspaceShortcut { index: target }, window, cx);
     }
 
-    fn add_project_root(&mut self, _: &AddProjectRoot, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn add_project_root(
+        &mut self,
+        _: &AddProjectRoot,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let path_rx = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -178,7 +189,7 @@ impl OcttyApp {
         .detach();
     }
 
-    fn create_workspace_for_root(
+    pub(crate) fn create_workspace_for_root(
         &mut self,
         action: &CreateWorkspaceForRoot,
         _window: &mut Window,
@@ -200,7 +211,7 @@ impl OcttyApp {
         );
     }
 
-    fn rename_project_root(
+    pub(crate) fn rename_project_root(
         &mut self,
         action: &RenameProjectRoot,
         window: &mut Window,
@@ -222,7 +233,7 @@ impl OcttyApp {
         );
     }
 
-    fn remove_project_root(
+    pub(crate) fn remove_project_root(
         &mut self,
         action: &RemoveProjectRoot,
         window: &mut Window,
@@ -271,7 +282,7 @@ impl OcttyApp {
         .detach();
     }
 
-    fn rename_workspace(
+    pub(crate) fn rename_workspace(
         &mut self,
         action: &RenameWorkspace,
         window: &mut Window,
@@ -293,7 +304,7 @@ impl OcttyApp {
         );
     }
 
-    fn forget_workspace(
+    pub(crate) fn forget_workspace(
         &mut self,
         action: &ForgetWorkspace,
         window: &mut Window,
@@ -302,7 +313,7 @@ impl OcttyApp {
         self.confirm_and_forget_workspace(action.workspace_id.clone(), false, window, cx);
     }
 
-    fn delete_and_forget_workspace(
+    pub(crate) fn delete_and_forget_workspace(
         &mut self,
         action: &DeleteAndForgetWorkspace,
         window: &mut Window,
@@ -311,7 +322,7 @@ impl OcttyApp {
         self.confirm_and_forget_workspace(action.workspace_id.clone(), true, window, cx);
     }
 
-    fn show_sidebar_menu(
+    pub(crate) fn show_sidebar_menu(
         &mut self,
         entries: Vec<SidebarMenuEntry>,
         position: Point<Pixels>,
@@ -325,12 +336,12 @@ impl OcttyApp {
         cx.notify();
     }
 
-    fn dismiss_sidebar_menu(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn dismiss_sidebar_menu(&mut self, cx: &mut Context<Self>) {
         self.sidebar_menu = None;
         cx.notify();
     }
 
-    fn execute_sidebar_menu_action(
+    pub(crate) fn execute_sidebar_menu_action(
         &mut self,
         action: SidebarMenuAction,
         window: &mut Window,
@@ -363,7 +374,7 @@ impl OcttyApp {
         }
     }
 
-    fn project_root_menu_entries(root_id: &str) -> Vec<SidebarMenuEntry> {
+    pub(crate) fn project_root_menu_entries(root_id: &str) -> Vec<SidebarMenuEntry> {
         vec![
             SidebarMenuEntry::item(
                 "New Workspace",
@@ -381,7 +392,7 @@ impl OcttyApp {
         ]
     }
 
-    fn workspace_menu_entries(
+    pub(crate) fn workspace_menu_entries(
         workspace_id: &str,
         forget_disabled: bool,
         delete_disabled: bool,
@@ -405,7 +416,7 @@ impl OcttyApp {
         ]
     }
 
-    fn open_sidebar_rename_dialog(
+    pub(crate) fn open_sidebar_rename_dialog(
         &mut self,
         target: SidebarRenameTarget,
         value: String,
@@ -427,12 +438,12 @@ impl OcttyApp {
         cx.notify();
     }
 
-    fn cancel_sidebar_rename_dialog(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn cancel_sidebar_rename_dialog(&mut self, cx: &mut Context<Self>) {
         self.sidebar_rename_dialog = None;
         cx.notify();
     }
 
-    fn confirm_sidebar_rename_dialog(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_sidebar_rename_dialog(&mut self, cx: &mut Context<Self>) {
         let Some(dialog) = self.sidebar_rename_dialog.take() else {
             return;
         };
@@ -446,7 +457,7 @@ impl OcttyApp {
         self.rename_sidebar_target(dialog.target, display_name, cx);
     }
 
-    fn confirm_and_forget_workspace(
+    pub(crate) fn confirm_and_forget_workspace(
         &mut self,
         workspace_id: String,
         delete_directory: bool,
@@ -519,7 +530,7 @@ impl OcttyApp {
         .detach();
     }
 
-    fn rename_sidebar_target(
+    pub(crate) fn rename_sidebar_target(
         &mut self,
         target: SidebarRenameTarget,
         display_name: String,
@@ -563,7 +574,7 @@ impl OcttyApp {
         }
     }
 
-    fn run_navigation_operation<F>(
+    pub(crate) fn run_navigation_operation<F>(
         &mut self,
         pending_status: String,
         operation: F,
@@ -591,7 +602,7 @@ impl OcttyApp {
         .detach();
     }
 
-    fn apply_bootstrap(&mut self, bootstrap: BootstrapState, cx: &mut Context<Self>) {
+    pub(crate) fn apply_bootstrap(&mut self, bootstrap: BootstrapState, cx: &mut Context<Self>) {
         self.status = bootstrap.status.into();
         self.project_roots = bootstrap.project_roots;
         self.workspaces = bootstrap.workspaces;
@@ -604,7 +615,7 @@ impl OcttyApp {
         self.record_active_pane_seen(cx);
     }
 
-    fn show_error(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+    pub(crate) fn show_error(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
         let message = message.into();
         self.status = message.clone();
         let id = self.next_toast_id;
@@ -621,7 +632,7 @@ impl OcttyApp {
         cx.notify();
     }
 
-    fn dismiss_toast(&mut self, id: u64, cx: &mut Context<Self>) {
+    pub(crate) fn dismiss_toast(&mut self, id: u64, cx: &mut Context<Self>) {
         let before = self.toasts.len();
         self.toasts.retain(|toast| toast.id != id);
         if self.toasts.len() != before {

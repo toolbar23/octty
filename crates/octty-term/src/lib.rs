@@ -9,8 +9,8 @@ pub mod ghostty_vt;
 pub mod live;
 
 mod tmux;
-pub use tmux::*;
 pub(crate) use tmux::ensure_tmux_config;
+pub use tmux::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalSessionSpec {

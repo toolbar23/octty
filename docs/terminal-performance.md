@@ -79,7 +79,7 @@ Synthetic profile tests:
 
 ```bash
 cargo test -p octty-term --features ghostty-vt --lib picker_preview_vt_pipeline_profile -- --ignored --nocapture
-cargo test -p octty-app --bin octty terminal_picker_preview_paint_input_profile -- --ignored --nocapture
+cargo test -p octty-app --lib terminal_picker_preview_paint_input_profile -- --ignored --nocapture
 ```
 
 The first test exercises ANSI output into `libghostty-vt` and snapshot

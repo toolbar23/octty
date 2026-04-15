@@ -1,8 +1,12 @@
-fn terminal_paste_bytes(text: &str) -> Vec<u8> {
+use super::*;
+
+pub(crate) fn terminal_paste_bytes(text: &str) -> Vec<u8> {
     text.replace("\r\n", "\n").replace('\n', "\r").into_bytes()
 }
 
-fn terminal_clipboard_paste_text(clipboard: &ClipboardItem) -> anyhow::Result<Option<String>> {
+pub(crate) fn terminal_clipboard_paste_text(
+    clipboard: &ClipboardItem,
+) -> anyhow::Result<Option<String>> {
     if let Some(image) = clipboard.entries().iter().find_map(|entry| match entry {
         ClipboardEntry::Image(image) if !image.bytes.is_empty() => Some(image),
         _ => None,
@@ -16,7 +20,7 @@ fn terminal_clipboard_paste_text(clipboard: &ClipboardItem) -> anyhow::Result<Op
     Ok(clipboard.text())
 }
 
-fn write_clipboard_image_to_temp_file(image: &Image) -> anyhow::Result<PathBuf> {
+pub(crate) fn write_clipboard_image_to_temp_file(image: &Image) -> anyhow::Result<PathBuf> {
     static CLIPBOARD_IMAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let directory = std::env::temp_dir().join("octty-clipboard");
@@ -36,7 +40,7 @@ fn write_clipboard_image_to_temp_file(image: &Image) -> anyhow::Result<PathBuf> 
     Ok(file_path)
 }
 
-fn image_format_extension(format: ImageFormat) -> &'static str {
+pub(crate) fn image_format_extension(format: ImageFormat) -> &'static str {
     match format {
         ImageFormat::Png => "png",
         ImageFormat::Jpeg => "jpg",
@@ -48,7 +52,7 @@ fn image_format_extension(format: ImageFormat) -> &'static str {
     }
 }
 
-fn quote_terminal_path_for_paste(path: &str) -> String {
+pub(crate) fn quote_terminal_path_for_paste(path: &str) -> String {
     if path.chars().all(is_safe_shell_path_char) {
         return path.to_owned();
     }
@@ -56,7 +60,7 @@ fn quote_terminal_path_for_paste(path: &str) -> String {
     format!("'{}'", path.replace('\'', "'\\''"))
 }
 
-fn is_safe_shell_path_char(ch: char) -> bool {
+pub(crate) fn is_safe_shell_path_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric()
         || matches!(
             ch,
@@ -64,7 +68,7 @@ fn is_safe_shell_path_char(ch: char) -> bool {
         )
 }
 
-fn terminal_grid_point_from_mouse_position(
+pub(crate) fn terminal_grid_point_from_mouse_position(
     position: Point<Pixels>,
     interaction: &TerminalGridInteractionState,
     cols: u16,
@@ -81,7 +85,7 @@ fn terminal_grid_point_from_mouse_position(
     ))
 }
 
-fn terminal_grid_point_from_local_position(
+pub(crate) fn terminal_grid_point_from_local_position(
     position: Point<Pixels>,
     cols: u16,
     rows: u16,
@@ -93,14 +97,16 @@ fn terminal_grid_point_from_local_position(
     TerminalGridPoint { row, col }
 }
 
-fn terminal_selection_mode_from_modifiers(modifiers: Modifiers) -> TerminalSelectionMode {
+pub(crate) fn terminal_selection_mode_from_modifiers(
+    modifiers: Modifiers,
+) -> TerminalSelectionMode {
     TerminalSelectionMode {
         rectangular: modifiers.control,
         filter_indent: modifiers.shift,
     }
 }
 
-fn terminal_selection_runs(
+pub(crate) fn terminal_selection_runs(
     selection: &TerminalSelection,
     cols: u16,
     rows: u16,
@@ -132,7 +138,7 @@ fn terminal_selection_runs(
         .collect()
 }
 
-fn terminal_rectangular_selection_runs(
+pub(crate) fn terminal_rectangular_selection_runs(
     selection: &TerminalSelection,
     cols: u16,
     rows: u16,
@@ -160,7 +166,7 @@ fn terminal_rectangular_selection_runs(
         .collect()
 }
 
-fn terminal_selection_ordered_points(
+pub(crate) fn terminal_selection_ordered_points(
     selection: &TerminalSelection,
 ) -> (TerminalGridPoint, TerminalGridPoint) {
     let a = selection.anchor;
@@ -172,7 +178,7 @@ fn terminal_selection_ordered_points(
     }
 }
 
-fn terminal_selection_text(
+pub(crate) fn terminal_selection_text(
     snapshot: &TerminalGridSnapshot,
     selection: &TerminalSelection,
 ) -> String {
@@ -184,7 +190,7 @@ fn terminal_selection_text(
     }
 }
 
-fn terminal_selection_text_unfiltered(
+pub(crate) fn terminal_selection_text_unfiltered(
     snapshot: &TerminalGridSnapshot,
     selection: &TerminalSelection,
 ) -> String {
@@ -217,7 +223,7 @@ fn terminal_selection_text_unfiltered(
     lines.join("\n")
 }
 
-fn terminal_selection_text_remove_common_indent(text: &str) -> String {
+pub(crate) fn terminal_selection_text_remove_common_indent(text: &str) -> String {
     let lines = text.split('\n').collect::<Vec<_>>();
     let common_indent = lines
         .iter()
@@ -254,21 +260,21 @@ fn terminal_selection_text_remove_common_indent(text: &str) -> String {
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn write_terminal_primary_text(text: String, cx: &mut Context<OcttyApp>) {
+pub(crate) fn write_terminal_primary_text(text: String, cx: &mut Context<OcttyApp>) {
     if !text.is_empty() {
         cx.write_to_primary(ClipboardItem::new_string(text));
     }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-fn write_terminal_primary_text(_text: String, _cx: &mut Context<OcttyApp>) {}
+pub(crate) fn write_terminal_primary_text(_text: String, _cx: &mut Context<OcttyApp>) {}
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn read_terminal_primary_text(cx: &mut Context<OcttyApp>) -> Option<String> {
+pub(crate) fn read_terminal_primary_text(cx: &mut Context<OcttyApp>) -> Option<String> {
     cx.read_from_primary()?.text()
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-fn read_terminal_primary_text(_cx: &mut Context<OcttyApp>) -> Option<String> {
+pub(crate) fn read_terminal_primary_text(_cx: &mut Context<OcttyApp>) -> Option<String> {
     None
 }
