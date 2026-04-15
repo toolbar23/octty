@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -9,14 +9,15 @@ use futures::{StreamExt, channel::mpsc};
 use gpui::{
     Action, App, Application, Bounds, Context, FocusHandle, Font, FontFallbacks, FontFeatures,
     Hsla, IntoElement, KeyBinding, KeyDownEvent, Menu, MenuItem, MouseButton, Render, Rgba,
-    ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString, TextRun, UnderlineStyle, Window,
-    WindowBounds, WindowOptions, canvas, div, fill, font, point, prelude::*, px, rgb, size,
+    ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString, TextRun, Window, WindowBounds,
+    WindowOptions, canvas, div, fill, font, point, prelude::*, px, rgb, size,
 };
 use gpui_component::Root;
 use octty_core::{
     PanePayload, PaneState, PaneType, ProjectRootRecord, SessionSnapshot, SessionState,
     TerminalPanePayload, WorkspaceSnapshot, WorkspaceState, WorkspaceSummary, add_pane,
-    create_default_snapshot, create_pane_state, has_recorded_workspace_path, layout::now_ms,
+    create_default_snapshot, create_pane_state, has_recorded_workspace_path,
+    layout::{LAYOUT_VERSION, now_ms},
     remove_pane, workspace_shortcut_targets,
 };
 use octty_jj::{discover_workspaces, read_workspace_status, resolve_repo_root};
@@ -37,7 +38,13 @@ mod gpui_tokio;
 const TERMINAL_CELL_WIDTH: f32 = 8.0;
 const TERMINAL_CELL_HEIGHT: f32 = 18.0;
 const TERMINAL_FONT_SIZE: f32 = 14.0;
-const TERMINAL_PANE_CHROME_HEIGHT: f32 = 42.0;
+const TERMINAL_DEBUG_TIMER_FONT_SIZE: f32 = 10.0;
+const TERMINAL_DEBUG_TIMER_LINE_HEIGHT: f32 = 12.0;
+const TERMINAL_SURFACE_PADDING_Y: f32 = 16.0;
+const TERMINAL_SURFACE_DEBUG_TIMER_MARGIN_BOTTOM: f32 = 4.0;
+const TERMINAL_SURFACE_CHROME_HEIGHT: f32 = TERMINAL_SURFACE_PADDING_Y
+    + TERMINAL_DEBUG_TIMER_LINE_HEIGHT
+    + TERMINAL_SURFACE_DEBUG_TIMER_MARGIN_BOTTOM;
 const TERMINAL_TASKSPACE_VERTICAL_CHROME_HEIGHT: f32 = 176.0;
 const WORKSPACE_SIDEBAR_WIDTH: f32 = 280.0;
 const TASKSPACE_HORIZONTAL_PADDING: f32 = 48.0;
@@ -48,6 +55,7 @@ const MAX_COLUMN_WIDTH_PX: f64 = 1_600.0;
 const DEFAULT_TERMINAL_FONT_FAMILY: &str = "JetBrains Mono";
 const TERMINAL_FOCUSED_FRAME_INTERVAL: Duration = Duration::from_millis(8);
 const TERMINAL_BACKGROUND_FRAME_INTERVAL: Duration = Duration::from_millis(100);
+const TERMINAL_INTERACTIVE_SNAPSHOT_WINDOW: Duration = Duration::from_millis(150);
 const TERMINAL_LATENCY_SAMPLE_LIMIT: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Action)]
@@ -153,6 +161,10 @@ struct LiveTerminalPane {
 struct TerminalLatencyStats {
     key_to_snapshot_micros: VecDeque<u64>,
     pty_to_snapshot_micros: VecDeque<u64>,
+    pty_output_bytes: VecDeque<u64>,
+    vt_write_micros: VecDeque<u64>,
+    snapshot_update_micros: VecDeque<u64>,
+    snapshot_extract_micros: VecDeque<u64>,
     snapshot_build_micros: VecDeque<u64>,
 }
 
@@ -751,11 +763,17 @@ impl OcttyApp {
     }
 
     fn terminal_snapshot_coalesce_interval(&self) -> Duration {
-        if self.terminal_window_active {
-            TERMINAL_FOCUSED_FRAME_INTERVAL
-        } else {
-            TERMINAL_BACKGROUND_FRAME_INTERVAL
-        }
+        terminal_snapshot_coalesce_interval(
+            self.terminal_window_active,
+            self.has_recent_terminal_input(),
+        )
+    }
+
+    fn has_recent_terminal_input(&self) -> bool {
+        self.live_terminals.values().any(|live| {
+            live.last_input_at
+                .is_some_and(|input_at| input_at.elapsed() <= TERMINAL_INTERACTIVE_SNAPSHOT_WINDOW)
+        })
     }
 
     fn drain_live_terminal_snapshots(&mut self) -> bool {
@@ -771,6 +789,14 @@ impl OcttyApp {
                 }
                 live.latency
                     .record_pty_to_snapshot(snapshot.timing.pty_to_snapshot_micros);
+                live.latency
+                    .record_pty_output_bytes(snapshot.timing.pty_output_bytes);
+                live.latency
+                    .record_vt_write(snapshot.timing.vt_write_micros);
+                live.latency
+                    .record_snapshot_update(snapshot.timing.snapshot_update_micros);
+                live.latency
+                    .record_snapshot_extract(snapshot.timing.snapshot_extract_micros);
                 live.latency
                     .record_snapshot_build(snapshot.timing.snapshot_build_micros);
                 live.latest = Some(snapshot.clone());
@@ -855,6 +881,22 @@ impl TerminalLatencyStats {
         }
     }
 
+    fn record_pty_output_bytes(&mut self, bytes: u64) {
+        push_latency_sample(&mut self.pty_output_bytes, bytes);
+    }
+
+    fn record_vt_write(&mut self, micros: u64) {
+        push_latency_sample(&mut self.vt_write_micros, micros);
+    }
+
+    fn record_snapshot_update(&mut self, micros: u64) {
+        push_latency_sample(&mut self.snapshot_update_micros, micros);
+    }
+
+    fn record_snapshot_extract(&mut self, micros: u64) {
+        push_latency_sample(&mut self.snapshot_extract_micros, micros);
+    }
+
     fn record_snapshot_build(&mut self, micros: u64) {
         push_latency_sample(&mut self.snapshot_build_micros, micros);
     }
@@ -862,20 +904,50 @@ impl TerminalLatencyStats {
     fn summary_label(&self) -> Option<String> {
         let key = latency_summary(&self.key_to_snapshot_micros)?;
         let pty = latency_summary(&self.pty_to_snapshot_micros);
+        let output_bytes = count_summary(&self.pty_output_bytes);
+        let vt = latency_summary(&self.vt_write_micros);
+        let update = latency_summary(&self.snapshot_update_micros);
+        let extract = latency_summary(&self.snapshot_extract_micros);
         let build = latency_summary(&self.snapshot_build_micros);
-        Some(match (pty, build) {
-            (Some(pty), Some(build)) => {
-                format!("key {key} · pty {pty} · snap {build}")
-            }
-            (Some(pty), None) => format!("key {key} · pty {pty}"),
-            (None, Some(build)) => format!("key {key} · snap {build}"),
-            (None, None) => format!("key {key}"),
-        })
+        let render = terminal_render_profile_summary();
+        let mut parts = vec![format!("key {key}")];
+        if let Some(pty) = pty {
+            parts.push(format!("pty {pty}"));
+        }
+        if let Some(output_bytes) = output_bytes {
+            parts.push(format!("out {output_bytes}b"));
+        }
+        if let Some(vt) = vt {
+            parts.push(format!("vt {vt}"));
+        }
+        if let Some(update) = update {
+            parts.push(format!("upd {update}"));
+        }
+        if let Some(extract) = extract {
+            parts.push(format!("extract {extract}"));
+        }
+        if let Some(build) = build {
+            parts.push(format!("snap {build}"));
+        }
+        if let Some(render) = render {
+            parts.push(render);
+        }
+        Some(parts.join(" · "))
     }
 }
 
 fn drain_pending_terminal_notifications(notification_rx: &mut mpsc::UnboundedReceiver<()>) {
     while notification_rx.try_recv().is_ok() {}
+}
+
+fn terminal_snapshot_coalesce_interval(window_active: bool, has_recent_input: bool) -> Duration {
+    if window_active && has_recent_input {
+        Duration::ZERO
+    } else if window_active {
+        TERMINAL_FOCUSED_FRAME_INTERVAL
+    } else {
+        TERMINAL_BACKGROUND_FRAME_INTERVAL
+    }
 }
 
 impl Render for OcttyApp {
@@ -1197,10 +1269,15 @@ async fn load_workspace_snapshot(
     store: &TursoStore,
     workspace: &WorkspaceSummary,
 ) -> anyhow::Result<WorkspaceSnapshot> {
-    Ok(store
-        .get_snapshot(&workspace.id)
-        .await?
-        .unwrap_or_else(|| create_default_snapshot(workspace.id.clone())))
+    if let Some(snapshot) = store.get_snapshot(&workspace.id).await?
+        && snapshot.layout_version == LAYOUT_VERSION
+    {
+        return Ok(snapshot);
+    }
+
+    let snapshot = create_default_snapshot(workspace.id.clone());
+    store.save_snapshot(&snapshot).await?;
+    Ok(snapshot)
 }
 
 async fn pane_persistence_check() -> anyhow::Result<usize> {
@@ -2060,7 +2137,7 @@ fn render_pane(
     let pane_id = pane.id.clone();
     let scroll_workspace_id = workspace_id.to_owned();
     let scroll_pane_id = pane.id.clone();
-    div()
+    let mut pane_el = div()
         .flex()
         .flex_col()
         .flex_1()
@@ -2076,16 +2153,20 @@ fn render_pane(
         )
         .on_scroll_wheel(cx.listener(move |this, event, _window, cx| {
             this.scroll_live_terminal(&scroll_workspace_id, &scroll_pane_id, event, cx);
-        }))
-        .child(
+        }));
+
+    if !matches!(pane.payload, PanePayload::Terminal(_)) {
+        pane_el = pane_el.child(
             div()
                 .p_2()
                 .border_b_1()
                 .border_color(rgb(0x333333))
                 .text_sm()
                 .child(pane.title.clone()),
-        )
-        .child(render_pane_body(pane, active, terminal_live))
+        );
+    }
+
+    pane_el.child(render_pane_body(pane, active, terminal_live))
 }
 
 fn render_pane_body(
@@ -2126,31 +2207,29 @@ fn render_terminal_surface(
 
     let default_fg = terminal_rgb_to_rgba(snapshot.default_fg);
     let default_bg = terminal_rgb_to_rgba(snapshot.default_bg);
-    let mut terminal_meta = format!(
-        "{:?} · {}x{} · {}",
-        payload.kind, snapshot.cols, snapshot.rows, payload.cwd
-    );
-    if let Some(label) = terminal_live.and_then(|live| live.latency.summary_label()) {
-        terminal_meta.push_str(" · ");
-        terminal_meta.push_str(&label);
-    }
-    div()
+    let debug_timer_label = terminal_live.and_then(|live| live.latency.summary_label());
+    let mut surface = div()
         .flex_1()
         .overflow_hidden()
         .p_2()
         .bg(default_bg)
         .font(terminal_font())
         .text_size(px(TERMINAL_FONT_SIZE))
-        .line_height(px(TERMINAL_CELL_HEIGHT))
-        .child(
+        .line_height(px(TERMINAL_CELL_HEIGHT));
+
+    if let Some(label) = debug_timer_label {
+        surface = surface.child(
             div()
-                .text_xs()
-                .mb_1()
-                .text_color(rgb(if active { 0x8fd694 } else { 0x5f6b78 }))
+                .text_size(px(TERMINAL_DEBUG_TIMER_FONT_SIZE))
+                .line_height(px(TERMINAL_DEBUG_TIMER_LINE_HEIGHT))
+                .mb(px(TERMINAL_SURFACE_DEBUG_TIMER_MARGIN_BOTTOM))
+                .text_color(rgb(if active { 0x6fae74 } else { 0x4f5d68 }))
                 .truncate()
-                .child(terminal_meta),
-        )
-        .child(render_terminal_grid(snapshot, default_fg, default_bg))
+                .child(label),
+        );
+    }
+
+    surface.child(render_terminal_grid(snapshot, default_fg, default_bg))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2169,12 +2248,26 @@ struct TerminalGridPaintInput {
     rows: u16,
     default_bg: Rgba,
     rows_data: Vec<TerminalPaintRowInput>,
+    text_rows: Vec<TerminalPaintTextRow>,
 }
 
 struct TerminalPaintRowInput {
-    text: SharedString,
-    text_runs: Vec<TextRun>,
     background_runs: Vec<TerminalPaintBackgroundRun>,
+}
+
+struct TerminalPaintTextRow {
+    row_index: usize,
+    start_col: usize,
+    text: SharedString,
+    shape_style: TextRun,
+    foreground_runs: Vec<TerminalPaintForegroundRun>,
+    style_run_count: usize,
+}
+
+struct TerminalPaintForegroundRun {
+    start_byte: usize,
+    end_byte: usize,
+    color: Hsla,
 }
 
 struct TerminalPaintBackgroundRun {
@@ -2185,14 +2278,44 @@ struct TerminalPaintBackgroundRun {
 
 struct TerminalPaintSurface {
     input: TerminalGridPaintInput,
-    shaped_lines: Vec<ShapedLine>,
+    shaped_text_rows: Vec<TerminalShapedTextRow>,
+    shape_micros: u64,
+}
+
+struct TerminalShapedTextRow {
+    input_row_index: usize,
+    row_index: usize,
+    start_col: usize,
+    line: ShapedLine,
 }
 
 struct TerminalPaintFonts {
     normal: Font,
-    bold: Font,
-    italic: Font,
-    bold_italic: Font,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TerminalRenderProfileSample {
+    build_micros: u64,
+    shape_micros: u64,
+    paint_micros: u64,
+    rows: u16,
+    cols: u16,
+    text_rows: usize,
+    text_runs: usize,
+    background_runs: usize,
+    text_bytes: usize,
+}
+
+#[derive(Default)]
+struct TerminalRenderProfiler {
+    build_micros: VecDeque<u64>,
+    shape_micros: VecDeque<u64>,
+    paint_micros: VecDeque<u64>,
+    text_rows: VecDeque<u64>,
+    text_runs: VecDeque<u64>,
+    background_runs: VecDeque<u64>,
+    text_bytes: VecDeque<u64>,
+    last_report_at: Option<Instant>,
 }
 
 fn render_terminal_grid(
@@ -2200,31 +2323,47 @@ fn render_terminal_grid(
     default_fg: Rgba,
     default_bg: Rgba,
 ) -> impl IntoElement {
+    let build_started_at = Instant::now();
     let input = terminal_paint_input(snapshot, default_fg, default_bg);
+    let build_micros = duration_micros(build_started_at.elapsed());
     let width = TERMINAL_CELL_WIDTH * input.cols as f32;
     let height = TERMINAL_CELL_HEIGHT * input.rows as f32;
 
     canvas(
         move |_bounds, window, _cx| {
-            let shaped_lines = input
-                .rows_data
+            let shape_started_at = Instant::now();
+            let shaped_text_rows = input
+                .text_rows
                 .iter()
-                .map(|row| {
-                    window.text_system().shape_line(
+                .enumerate()
+                .map(|(input_row_index, row)| {
+                    let line = window.text_system().shape_line(
                         row.text.clone(),
                         px(TERMINAL_FONT_SIZE),
-                        &row.text_runs,
+                        std::slice::from_ref(&row.shape_style),
                         Some(px(TERMINAL_CELL_WIDTH)),
-                    )
+                    );
+                    TerminalShapedTextRow {
+                        input_row_index,
+                        row_index: row.row_index,
+                        start_col: row.start_col,
+                        line,
+                    }
                 })
                 .collect();
+            let shape_micros = duration_micros(shape_started_at.elapsed());
             TerminalPaintSurface {
                 input,
-                shaped_lines,
+                shaped_text_rows,
+                shape_micros,
             }
         },
         move |bounds, surface, window, cx| {
+            let mut sample = terminal_render_profile_sample(&surface, build_micros);
+            let paint_started_at = Instant::now();
             paint_terminal_surface(bounds, surface, window, cx);
+            sample.paint_micros = duration_micros(paint_started_at.elapsed());
+            record_terminal_render_profile(sample);
         },
     )
     .w(px(width))
@@ -2239,34 +2378,21 @@ fn terminal_paint_input(
 ) -> TerminalGridPaintInput {
     let normal_font = terminal_font();
     let fonts = TerminalPaintFonts {
-        normal: normal_font.clone(),
-        bold: normal_font.clone().bold(),
-        italic: normal_font.clone().italic(),
-        bold_italic: normal_font.bold().italic(),
+        normal: normal_font,
     };
     let mut rows_data = Vec::with_capacity(snapshot.rows_data.len());
+    let mut text_rows = Vec::new();
 
     for (row_index, row) in snapshot.rows_data.iter().enumerate() {
-        let mut text = String::with_capacity(row.cells.len());
-        let mut text_runs = Vec::new();
         let mut background_runs = Vec::new();
         let mut start_col = 0usize;
+        let runs = terminal_cell_runs(row_index as u16, row, snapshot);
 
-        for run in terminal_cell_runs(row_index as u16, row, snapshot) {
-            let run_len = run.text.len();
-            text.push_str(&run.text);
-            text_runs.push(TextRun {
-                len: run_len,
-                font: terminal_paint_font(&fonts, &run),
-                color: Hsla::from(run.fg.unwrap_or(default_fg)),
-                background_color: None,
-                underline: run.underline.then(|| UnderlineStyle {
-                    thickness: px(1.0),
-                    color: Some(Hsla::from(run.fg.unwrap_or(default_fg))),
-                    wavy: false,
-                }),
-                strikethrough: None,
-            });
+        if let Some(text_row) = terminal_text_row(row_index, &runs, &fonts, default_fg) {
+            text_rows.push(text_row);
+        }
+
+        for run in runs {
             if let Some(bg) = run.bg
                 && bg != default_bg
             {
@@ -2279,11 +2405,7 @@ fn terminal_paint_input(
             start_col += run.cell_count;
         }
 
-        rows_data.push(TerminalPaintRowInput {
-            text: SharedString::from(text),
-            text_runs,
-            background_runs,
-        });
+        rows_data.push(TerminalPaintRowInput { background_runs });
     }
 
     TerminalGridPaintInput {
@@ -2291,15 +2413,102 @@ fn terminal_paint_input(
         rows: snapshot.rows,
         default_bg,
         rows_data,
+        text_rows,
     }
 }
 
-fn terminal_paint_font(fonts: &TerminalPaintFonts, run: &TerminalCellRun) -> Font {
-    match (run.bold, run.italic) {
-        (true, true) => fonts.bold_italic.clone(),
-        (true, false) => fonts.bold.clone(),
-        (false, true) => fonts.italic.clone(),
-        (false, false) => fonts.normal.clone(),
+fn terminal_text_row(
+    row_index: usize,
+    runs: &[TerminalCellRun],
+    fonts: &TerminalPaintFonts,
+    default_fg: Rgba,
+) -> Option<TerminalPaintTextRow> {
+    let full_text: String = runs.iter().map(|run| run.text.as_str()).collect();
+    let (visible_start_cell, visible_end_cell) = terminal_visible_text_cell_range(&full_text)?;
+    let visible_text: String = full_text
+        .chars()
+        .skip(visible_start_cell)
+        .take(visible_end_cell - visible_start_cell)
+        .collect();
+    let mut foreground_runs: Vec<TerminalPaintForegroundRun> = Vec::new();
+    let mut style_run_count = 0usize;
+    let mut run_start_cell = 0usize;
+
+    for run in runs {
+        let run_end_cell = run_start_cell + run.text.chars().count();
+        let overlap_start = run_start_cell.max(visible_start_cell);
+        let overlap_end = run_end_cell.min(visible_end_cell);
+        if overlap_start < overlap_end {
+            let style_text: String = run
+                .text
+                .chars()
+                .skip(overlap_start - run_start_cell)
+                .take(overlap_end - overlap_start)
+                .collect();
+            if !style_text.is_empty() {
+                style_run_count += 1;
+                let skipped_visible_cells = overlap_start - visible_start_cell;
+                let start_byte = terminal_byte_index_for_cell(&visible_text, skipped_visible_cells);
+                let end_byte = start_byte + style_text.len();
+                let color = Hsla::from(run.fg.unwrap_or(default_fg));
+                if let Some(last) = foreground_runs.last_mut()
+                    && last.end_byte == start_byte
+                    && last.color == color
+                {
+                    last.end_byte = end_byte;
+                } else {
+                    foreground_runs.push(TerminalPaintForegroundRun {
+                        start_byte,
+                        end_byte,
+                        color,
+                    });
+                }
+            }
+        }
+        run_start_cell = run_end_cell;
+    }
+
+    if visible_text.is_empty() || foreground_runs.is_empty() {
+        return None;
+    }
+    let visible_text_len = visible_text.len();
+
+    Some(TerminalPaintTextRow {
+        row_index,
+        start_col: visible_start_cell,
+        text: SharedString::from(visible_text),
+        shape_style: terminal_text_style(visible_text_len, fonts, default_fg),
+        foreground_runs,
+        style_run_count,
+    })
+}
+
+fn terminal_byte_index_for_cell(text: &str, cell_index: usize) -> usize {
+    text.char_indices()
+        .nth(cell_index)
+        .map(|(byte_index, _)| byte_index)
+        .unwrap_or(text.len())
+}
+
+fn terminal_visible_text_cell_range(text: &str) -> Option<(usize, usize)> {
+    let start = text.chars().position(|ch| ch != ' ')?;
+    let mut end = start + 1;
+    for (index, ch) in text.chars().enumerate().skip(start + 1) {
+        if ch != ' ' {
+            end = index + 1;
+        }
+    }
+    Some((start, end))
+}
+
+fn terminal_text_style(len: usize, fonts: &TerminalPaintFonts, default_fg: Rgba) -> TextRun {
+    TextRun {
+        len,
+        font: fonts.normal.clone(),
+        color: Hsla::from(default_fg),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
     }
 }
 
@@ -2325,12 +2534,189 @@ fn paint_terminal_surface(
         }
     }
 
-    for (row_index, line) in surface.shaped_lines.iter().enumerate() {
+    for run in surface.shaped_text_rows.iter() {
         let origin = point(
-            bounds.origin.x,
-            bounds.origin.y + px(row_index as f32 * TERMINAL_CELL_HEIGHT),
+            bounds.origin.x + px(run.start_col as f32 * TERMINAL_CELL_WIDTH),
+            bounds.origin.y + px(run.row_index as f32 * TERMINAL_CELL_HEIGHT),
         );
-        let _ = line.paint(origin, px(TERMINAL_CELL_HEIGHT), window, cx);
+        let input_row = &surface.input.text_rows[run.input_row_index];
+        let _ = paint_terminal_text_row(origin, input_row, &run.line, window, cx);
+    }
+}
+
+fn paint_terminal_text_row(
+    origin: gpui::Point<gpui::Pixels>,
+    row: &TerminalPaintTextRow,
+    line: &ShapedLine,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::Result<()> {
+    let padding_top = (px(TERMINAL_CELL_HEIGHT) - line.ascent - line.descent) / 2.0;
+    let baseline_offset = point(px(0.0), padding_top + line.ascent);
+    let text_system = cx.text_system().clone();
+    let mut glyph_origin = origin;
+    let mut prev_glyph_position = gpui::Point::default();
+    let mut foreground_run_index = 0usize;
+
+    for run in &line.runs {
+        let max_glyph_size = text_system.bounding_box(run.font_id, line.font_size).size;
+        for glyph in &run.glyphs {
+            glyph_origin.x += glyph.position.x - prev_glyph_position.x;
+            prev_glyph_position = glyph.position;
+
+            while row
+                .foreground_runs
+                .get(foreground_run_index)
+                .is_some_and(|run| glyph.index >= run.end_byte)
+            {
+                foreground_run_index += 1;
+            }
+            let color = row
+                .foreground_runs
+                .get(foreground_run_index)
+                .filter(|run| glyph.index >= run.start_byte)
+                .map(|run| run.color)
+                .unwrap_or(row.shape_style.color);
+
+            let max_glyph_bounds = Bounds {
+                origin: glyph_origin,
+                size: max_glyph_size,
+            };
+            let content_mask = window.content_mask();
+            if !max_glyph_bounds.intersects(&content_mask.bounds) {
+                continue;
+            }
+
+            if glyph.is_emoji {
+                window.paint_emoji(
+                    glyph_origin + baseline_offset,
+                    run.font_id,
+                    glyph.id,
+                    line.font_size,
+                )?;
+            } else {
+                window.paint_glyph(
+                    glyph_origin + baseline_offset,
+                    run.font_id,
+                    glyph.id,
+                    line.font_size,
+                    color,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn terminal_render_profile_sample(
+    surface: &TerminalPaintSurface,
+    build_micros: u64,
+) -> TerminalRenderProfileSample {
+    TerminalRenderProfileSample {
+        build_micros,
+        shape_micros: surface.shape_micros,
+        paint_micros: 0,
+        rows: surface.input.rows,
+        cols: surface.input.cols,
+        text_rows: surface.input.text_rows.len(),
+        text_runs: surface
+            .input
+            .text_rows
+            .iter()
+            .map(|row| row.style_run_count)
+            .sum(),
+        background_runs: surface
+            .input
+            .rows_data
+            .iter()
+            .map(|row| row.background_runs.len())
+            .sum(),
+        text_bytes: surface
+            .input
+            .text_rows
+            .iter()
+            .map(|row| row.text.len())
+            .sum(),
+    }
+}
+
+fn record_terminal_render_profile(sample: TerminalRenderProfileSample) {
+    if !terminal_render_profile_enabled() {
+        return;
+    }
+
+    let profiler =
+        TERMINAL_RENDER_PROFILER.get_or_init(|| Mutex::new(TerminalRenderProfiler::default()));
+    let Ok(mut profiler) = profiler.lock() else {
+        return;
+    };
+    profiler.record(sample);
+    profiler.maybe_report(sample);
+}
+
+fn terminal_render_profile_summary() -> Option<String> {
+    if !terminal_render_profile_enabled() {
+        return None;
+    }
+
+    let profiler = TERMINAL_RENDER_PROFILER.get()?;
+    let profiler = profiler.lock().ok()?;
+    profiler.summary()
+}
+
+fn terminal_render_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("OCTTY_TERMINAL_PROFILE")
+            .ok()
+            .is_some_and(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+    })
+}
+
+static TERMINAL_RENDER_PROFILER: OnceLock<Mutex<TerminalRenderProfiler>> = OnceLock::new();
+
+impl TerminalRenderProfiler {
+    fn record(&mut self, sample: TerminalRenderProfileSample) {
+        push_latency_sample(&mut self.build_micros, sample.build_micros);
+        push_latency_sample(&mut self.shape_micros, sample.shape_micros);
+        push_latency_sample(&mut self.paint_micros, sample.paint_micros);
+        push_latency_sample(&mut self.text_rows, sample.text_rows as u64);
+        push_latency_sample(&mut self.text_runs, sample.text_runs as u64);
+        push_latency_sample(&mut self.background_runs, sample.background_runs as u64);
+        push_latency_sample(&mut self.text_bytes, sample.text_bytes as u64);
+    }
+
+    fn summary(&self) -> Option<String> {
+        let build = latency_summary(&self.build_micros)?;
+        let shape = latency_summary(&self.shape_micros)?;
+        let paint = latency_summary(&self.paint_micros)?;
+        Some(format!(
+            "render build {build} · shape {shape} · paint {paint}"
+        ))
+    }
+
+    fn maybe_report(&mut self, sample: TerminalRenderProfileSample) {
+        let now = Instant::now();
+        if self
+            .last_report_at
+            .is_some_and(|reported_at| now.duration_since(reported_at) < Duration::from_secs(1))
+        {
+            return;
+        }
+        self.last_report_at = Some(now);
+
+        let Some(summary) = self.summary() else {
+            return;
+        };
+        eprintln!(
+            "octty terminal render profile: {summary} · grid {}x{} · text rows {} · text runs {} · bg runs {} · text bytes {}",
+            sample.cols,
+            sample.rows,
+            count_summary(&self.text_rows).unwrap_or_else(|| "n/a".to_owned()),
+            count_summary(&self.text_runs).unwrap_or_else(|| "n/a".to_owned()),
+            count_summary(&self.background_runs).unwrap_or_else(|| "n/a".to_owned()),
+            count_summary(&self.text_bytes).unwrap_or_else(|| "n/a".to_owned())
+        );
     }
 }
 
@@ -2389,9 +2775,9 @@ fn pane_body_label(pane: &PaneState) -> String {
         PanePayload::Terminal(payload) => {
             let screen = terminal_screen_excerpt(&payload.restored_buffer);
             if screen.is_empty() {
-                format!("Terminal · kind={:?} · cwd={}", payload.kind, payload.cwd)
+                String::new()
             } else {
-                format!("Terminal · {:?} · {}\n{screen}", payload.kind, payload.cwd)
+                screen
             }
         }
         PanePayload::Note(payload) => format!(
@@ -2424,6 +2810,10 @@ fn push_latency_sample(samples: &mut VecDeque<u64>, micros: u64) {
     samples.push_back(micros);
 }
 
+fn duration_micros(duration: Duration) -> u64 {
+    duration.as_micros().min(u128::from(u64::MAX)) as u64
+}
+
 fn latency_summary(samples: &VecDeque<u64>) -> Option<String> {
     if samples.is_empty() {
         return None;
@@ -2439,6 +2829,18 @@ fn latency_summary(samples: &VecDeque<u64>) -> Option<String> {
         format_latency_micros(p95),
         format_latency_micros(max)
     ))
+}
+
+fn count_summary(samples: &VecDeque<u64>) -> Option<String> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<_> = samples.iter().copied().collect();
+    sorted.sort_unstable();
+    let p50 = latency_percentile(&sorted, 50);
+    let p95 = latency_percentile(&sorted, 95);
+    let max = *sorted.last().unwrap_or(&p95);
+    Some(format!("p50 {p50} p95 {p95} max {max}"))
 }
 
 fn latency_percentile(sorted_micros: &[u64], percentile: usize) -> u64 {
@@ -2558,7 +2960,8 @@ fn terminal_resize_requests(
         let pane_count = column.pane_ids.len().max(1);
         let pane_height =
             (taskspace_height - (pane_count.saturating_sub(1) as f32 * 12.0)) / pane_count as f32;
-        let terminal_height = (pane_height - TERMINAL_PANE_CHROME_HEIGHT).max(TERMINAL_CELL_HEIGHT);
+        let terminal_height =
+            (pane_height - TERMINAL_SURFACE_CHROME_HEIGHT).max(TERMINAL_CELL_HEIGHT);
         let cols = ((column.width_px as f32 - 24.0) / TERMINAL_CELL_WIDTH)
             .floor()
             .max(20.0) as u16;
@@ -2744,7 +3147,23 @@ mod tests {
     }
 
     #[test]
-    fn terminal_paint_input_keeps_fixed_width_cells() {
+    fn terminal_snapshot_coalesce_skips_delay_for_recent_focused_input() {
+        assert_eq!(
+            terminal_snapshot_coalesce_interval(true, true),
+            Duration::ZERO
+        );
+        assert_eq!(
+            terminal_snapshot_coalesce_interval(true, false),
+            TERMINAL_FOCUSED_FRAME_INTERVAL
+        );
+        assert_eq!(
+            terminal_snapshot_coalesce_interval(false, true),
+            TERMINAL_BACKGROUND_FRAME_INTERVAL
+        );
+    }
+
+    #[test]
+    fn terminal_paint_input_shapes_only_visible_text_cells() {
         let default_fg = TerminalRgb {
             r: 200,
             g: 200,
@@ -2799,14 +3218,80 @@ mod tests {
             terminal_rgb_to_rgba(default_bg),
         );
 
-        assert_eq!(input.rows_data[0].text.as_ref(), " a ");
-        assert_eq!(
-            input.rows_data[0]
-                .text_runs
-                .iter()
-                .map(|run| run.len)
-                .sum::<usize>(),
-            3
+        assert_eq!(input.text_rows.len(), 1);
+        assert_eq!(input.text_rows[0].start_col, 1);
+        assert_eq!(input.text_rows[0].text.as_ref(), "a");
+        assert_eq!(input.text_rows[0].shape_style.len, 1);
+        assert_eq!(input.text_rows[0].foreground_runs.len(), 1);
+        assert!(input.rows_data[0].background_runs.is_empty());
+    }
+
+    #[test]
+    fn terminal_picker_preview_workload_has_dense_runs_and_backgrounds() {
+        let snapshot = picker_preview_snapshot(7, 120, 40);
+        let input = terminal_paint_input(
+            &snapshot,
+            terminal_rgb_to_rgba(snapshot.default_fg),
+            terminal_rgb_to_rgba(snapshot.default_bg),
+        );
+        let background_runs: usize = input
+            .rows_data
+            .iter()
+            .map(|row| row.background_runs.len())
+            .sum();
+        let style_runs: usize = input.text_rows.iter().map(|row| row.style_run_count).sum();
+
+        assert_eq!(input.cols, 120);
+        assert_eq!(input.rows, 40);
+        assert!(input.text_rows.len() <= 40);
+        assert!(input.text_rows.len() > 30);
+        assert!(style_runs > 180);
+        assert!(background_runs > 40);
+    }
+
+    #[test]
+    #[ignore = "profiling workload; run with --ignored --nocapture"]
+    fn terminal_picker_preview_paint_input_profile() {
+        let mut samples = VecDeque::new();
+        let mut text_rows = VecDeque::new();
+        let mut text_runs = VecDeque::new();
+        let mut background_runs = VecDeque::new();
+
+        for frame in 0..240 {
+            let snapshot = picker_preview_snapshot(frame, 120, 40);
+            let started_at = Instant::now();
+            let input = terminal_paint_input(
+                &snapshot,
+                terminal_rgb_to_rgba(snapshot.default_fg),
+                terminal_rgb_to_rgba(snapshot.default_bg),
+            );
+            push_latency_sample(&mut samples, duration_micros(started_at.elapsed()));
+            push_latency_sample(&mut text_rows, input.text_rows.len() as u64);
+            push_latency_sample(
+                &mut text_runs,
+                input
+                    .text_rows
+                    .iter()
+                    .map(|row| row.style_run_count)
+                    .sum::<usize>() as u64,
+            );
+            push_latency_sample(
+                &mut background_runs,
+                input
+                    .rows_data
+                    .iter()
+                    .map(|row| row.background_runs.len())
+                    .sum::<usize>() as u64,
+            );
+            std::hint::black_box(input);
+        }
+
+        println!(
+            "picker preview paint-input: {} · text rows {} · text runs {} · background runs {}",
+            latency_summary(&samples).unwrap(),
+            count_summary(&text_rows).unwrap(),
+            count_summary(&text_runs).unwrap(),
+            count_summary(&background_runs).unwrap()
         );
     }
 
@@ -2853,6 +3338,20 @@ mod tests {
         snapshot = add_pane(snapshot, create_pane_state(PaneType::Diff, "/tmp", None));
 
         assert_eq!(taskspace_viewport_offset(&snapshot, 1_400.0), 0.0);
+    }
+
+    #[test]
+    fn terminal_resize_rows_subtract_all_visible_chrome() {
+        let snapshot = add_pane(
+            create_default_snapshot("workspace-1"),
+            create_pane_state(PaneType::Shell, "/tmp", None),
+        );
+
+        let requests = terminal_resize_requests(Some(&snapshot), 1_000.0);
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].2, 87);
+        assert_eq!(requests[0].3, 53);
     }
 
     #[test]
@@ -2912,5 +3411,213 @@ mod tests {
             pane_navigation_target(&snapshot, PaneNavigationDirection::Up).as_deref(),
             Some(first.as_str())
         );
+    }
+
+    fn picker_preview_snapshot(frame: usize, cols: u16, rows: u16) -> TerminalGridSnapshot {
+        let default_fg = TerminalRgb {
+            r: 210,
+            g: 216,
+            b: 222,
+        };
+        let default_bg = TerminalRgb {
+            r: 18,
+            g: 20,
+            b: 22,
+        };
+        let mut rows_data = Vec::with_capacity(rows as usize);
+        for row_index in 0..rows as usize {
+            let mut cells = vec![picker_cell("", None, None, false, false); cols as usize];
+            if row_index == 0 {
+                write_picker_text(
+                    &mut cells,
+                    0,
+                    "  Find files                                      Preview",
+                    Some(TerminalRgb {
+                        r: 240,
+                        g: 240,
+                        b: 240,
+                    }),
+                    Some(TerminalRgb {
+                        r: 42,
+                        g: 48,
+                        b: 56,
+                    }),
+                    true,
+                    false,
+                );
+            } else {
+                let selected = row_index == (frame % (rows as usize - 2)) + 1;
+                let file_name = format!(
+                    " crates/octty-app/src/{:03}_picker_case.rs ",
+                    (frame + row_index) % 173
+                );
+                write_picker_text(
+                    &mut cells,
+                    0,
+                    &format!("{file_name:40}"),
+                    Some(if selected {
+                        TerminalRgb {
+                            r: 245,
+                            g: 250,
+                            b: 255,
+                        }
+                    } else {
+                        TerminalRgb {
+                            r: 170,
+                            g: 184,
+                            b: 194,
+                        }
+                    }),
+                    selected.then_some(TerminalRgb {
+                        r: 28,
+                        g: 92,
+                        b: 72,
+                    }),
+                    selected,
+                    false,
+                );
+                write_picker_preview_line(&mut cells, row_index, frame, 43);
+            }
+            rows_data.push(octty_term::live::TerminalRowSnapshot { cells });
+        }
+
+        TerminalGridSnapshot {
+            session_id: "picker-preview-profile".to_owned(),
+            cols,
+            rows,
+            default_fg,
+            default_bg,
+            cursor: Some(octty_term::live::TerminalCursorSnapshot {
+                col: 2,
+                row: ((frame % (rows as usize - 2)) + 1) as u16,
+                visible: true,
+            }),
+            rows_data,
+            plain_text: String::new(),
+            timing: octty_term::live::TerminalSnapshotTiming::default(),
+        }
+    }
+
+    fn write_picker_preview_line(
+        cells: &mut [octty_term::live::TerminalCellSnapshot],
+        row_index: usize,
+        frame: usize,
+        start_col: usize,
+    ) {
+        let line_no = (row_index + frame) % 97;
+        write_picker_text(
+            cells,
+            start_col,
+            &format!("{line_no:>3} "),
+            Some(TerminalRgb {
+                r: 105,
+                g: 116,
+                b: 126,
+            }),
+            Some(TerminalRgb {
+                r: 30,
+                g: 34,
+                b: 38,
+            }),
+            false,
+            false,
+        );
+        let segments = [
+            (
+                "let ".to_owned(),
+                TerminalRgb {
+                    r: 235,
+                    g: 118,
+                    b: 135,
+                },
+                false,
+            ),
+            (
+                format!("preview_{line_no}"),
+                TerminalRgb {
+                    r: 132,
+                    g: 204,
+                    b: 244,
+                },
+                false,
+            ),
+            (
+                " = ".to_owned(),
+                TerminalRgb {
+                    r: 210,
+                    g: 216,
+                    b: 222,
+                },
+                false,
+            ),
+            (
+                format!("render_case({frame}, {row_index});"),
+                TerminalRgb {
+                    r: 166,
+                    g: 218,
+                    b: 149,
+                },
+                false,
+            ),
+        ];
+        let mut col = start_col + 4;
+        for (text, color, bold) in segments {
+            write_picker_text(cells, col, &text, Some(color), None, bold, false);
+            col += text.chars().count();
+        }
+        if row_index % 5 == 0 {
+            write_picker_text(
+                cells,
+                start_col + 5,
+                " changed ",
+                Some(TerminalRgb {
+                    r: 18,
+                    g: 20,
+                    b: 22,
+                }),
+                Some(TerminalRgb {
+                    r: 238,
+                    g: 212,
+                    b: 132,
+                }),
+                true,
+                false,
+            );
+        }
+    }
+
+    fn write_picker_text(
+        cells: &mut [octty_term::live::TerminalCellSnapshot],
+        start_col: usize,
+        text: &str,
+        fg: Option<TerminalRgb>,
+        bg: Option<TerminalRgb>,
+        bold: bool,
+        italic: bool,
+    ) {
+        for (offset, ch) in text.chars().enumerate() {
+            let Some(cell) = cells.get_mut(start_col + offset) else {
+                break;
+            };
+            *cell = picker_cell(&ch.to_string(), fg, bg, bold, italic);
+        }
+    }
+
+    fn picker_cell(
+        text: &str,
+        fg: Option<TerminalRgb>,
+        bg: Option<TerminalRgb>,
+        bold: bool,
+        italic: bool,
+    ) -> octty_term::live::TerminalCellSnapshot {
+        octty_term::live::TerminalCellSnapshot {
+            text: text.to_owned(),
+            fg,
+            bg,
+            bold,
+            italic,
+            underline: false,
+            inverse: false,
+        }
     }
 }

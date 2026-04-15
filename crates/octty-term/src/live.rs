@@ -18,7 +18,7 @@ use libghostty_vt::{
 };
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
-use crate::{TerminalError, TerminalSessionSpec, build_tmux_pty_launch};
+use crate::{TerminalError, TerminalSessionSpec, build_tmux_pty_launch, ensure_tmux_config};
 
 const DEFAULT_CELL_WIDTH: u16 = 8;
 const DEFAULT_CELL_HEIGHT: u16 = 18;
@@ -74,7 +74,13 @@ pub struct TerminalGridSnapshot {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TerminalSnapshotTiming {
     pub pty_to_snapshot_micros: Option<u64>,
+    pub vt_write_micros: u64,
+    pub pty_output_bytes: u64,
+    pub snapshot_update_micros: u64,
+    pub snapshot_extract_micros: u64,
     pub snapshot_build_micros: u64,
+    pub snapshot_cells: u32,
+    pub snapshot_text_cells: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -221,6 +227,7 @@ pub fn spawn_live_terminal_with_notifier(
     spec: TerminalSessionSpec,
     snapshot_notifier: LiveTerminalSnapshotNotifier,
 ) -> Result<LiveTerminalHandle, TerminalError> {
+    ensure_tmux_config()?;
     let launch = build_tmux_pty_launch(&spec);
     let session_id = launch.session_name.clone();
     let pty_system = native_pty_system();
@@ -354,6 +361,8 @@ impl LiveTerminalRuntime {
         let mut last_snapshot_at: Option<Instant> = None;
         let mut last_pty_output_at: Option<Instant> = None;
         let mut interactive_output_until: Option<Instant> = None;
+        let mut pending_vt_write_micros = 0u64;
+        let mut pending_pty_output_bytes = 0u64;
 
         loop {
             let mut processed_commands = 0usize;
@@ -389,6 +398,10 @@ impl LiveTerminalRuntime {
                 if effect.shutdown {
                     return Ok(());
                 }
+                pending_vt_write_micros =
+                    pending_vt_write_micros.saturating_add(effect.vt_write_micros);
+                pending_pty_output_bytes =
+                    pending_pty_output_bytes.saturating_add(effect.pty_output_bytes);
                 drain_pty_responses(&mut self.writer, &pty_responses)?;
                 if is_interactive_input {
                     interactive_output_until =
@@ -416,10 +429,17 @@ impl LiveTerminalRuntime {
             ) {
                 let snapshot_started_at = Instant::now();
                 let mut snapshot = renderer.snapshot(&self.session_id, &terminal)?;
+                let snapshot_finished_at = Instant::now();
                 snapshot.timing = TerminalSnapshotTiming {
                     pty_to_snapshot_micros: last_pty_output_at
                         .map(|output_at| micros_since(output_at, snapshot_started_at)),
-                    snapshot_build_micros: micros_since(snapshot_started_at, Instant::now()),
+                    vt_write_micros: pending_vt_write_micros,
+                    pty_output_bytes: pending_pty_output_bytes,
+                    snapshot_update_micros: snapshot.timing.snapshot_update_micros,
+                    snapshot_extract_micros: snapshot.timing.snapshot_extract_micros,
+                    snapshot_build_micros: micros_since(snapshot_started_at, snapshot_finished_at),
+                    snapshot_cells: snapshot.timing.snapshot_cells,
+                    snapshot_text_cells: snapshot.timing.snapshot_text_cells,
                 };
                 if self.snapshot_tx.send(snapshot).is_ok() {
                     self.snapshot_notifier.notify();
@@ -427,6 +447,8 @@ impl LiveTerminalRuntime {
                 terminal_changed = false;
                 force_snapshot = false;
                 last_pty_output_at = None;
+                pending_vt_write_micros = 0;
+                pending_pty_output_bytes = 0;
                 last_snapshot_at = Some(snapshot_started_at);
                 emitted_snapshots += 1;
                 if emitted_snapshots >= MAX_INITIAL_SNAPSHOTS {
@@ -462,8 +484,13 @@ impl LiveTerminalRuntime {
                 Ok(LiveTerminalCommandEffect::unchanged())
             }
             LiveTerminalCommand::Output(bytes) => {
+                let byte_count = bytes.len() as u64;
+                let vt_write_started_at = Instant::now();
                 terminal.vt_write(&bytes);
-                Ok(LiveTerminalCommandEffect::changed())
+                Ok(LiveTerminalCommandEffect::changed_with_vt_write(
+                    micros_since(vt_write_started_at, Instant::now()),
+                    byte_count,
+                ))
             }
             LiveTerminalCommand::Resize(resize) => {
                 let cols = resize.cols.max(1);
@@ -495,6 +522,8 @@ impl LiveTerminalRuntime {
                 terminal_changed: false,
                 force_snapshot: false,
                 shutdown: true,
+                vt_write_micros: 0,
+                pty_output_bytes: 0,
             }),
         }
     }
@@ -504,14 +533,18 @@ struct LiveTerminalCommandEffect {
     terminal_changed: bool,
     force_snapshot: bool,
     shutdown: bool,
+    vt_write_micros: u64,
+    pty_output_bytes: u64,
 }
 
 impl LiveTerminalCommandEffect {
-    fn changed() -> Self {
+    fn changed_with_vt_write(vt_write_micros: u64, pty_output_bytes: u64) -> Self {
         Self {
             terminal_changed: true,
             force_snapshot: false,
             shutdown: false,
+            vt_write_micros,
+            pty_output_bytes,
         }
     }
 
@@ -520,6 +553,8 @@ impl LiveTerminalCommandEffect {
             terminal_changed: true,
             force_snapshot: true,
             shutdown: false,
+            vt_write_micros: 0,
+            pty_output_bytes: 0,
         }
     }
 
@@ -528,6 +563,8 @@ impl LiveTerminalCommandEffect {
             terminal_changed: false,
             force_snapshot: false,
             shutdown: false,
+            vt_write_micros: 0,
+            pty_output_bytes: 0,
         }
     }
 }
@@ -648,7 +685,10 @@ impl<'alloc> SnapshotExtractor<'alloc> {
         session_id: &str,
         terminal: &Terminal<'alloc, '_>,
     ) -> Result<TerminalGridSnapshot, TerminalError> {
+        let update_started_at = Instant::now();
         let snapshot = self.render_state.update(terminal).map_err(renderer_error)?;
+        let snapshot_update_micros = micros_since(update_started_at, Instant::now());
+        let extract_started_at = Instant::now();
         let colors = snapshot.colors().map_err(renderer_error)?;
         let default_fg = terminal_rgb(colors.foreground);
         let default_bg = terminal_rgb(colors.background);
@@ -669,6 +709,8 @@ impl<'alloc> SnapshotExtractor<'alloc> {
         let mut rows_data = Vec::with_capacity(rows as usize);
         let mut plain_text = String::new();
         let mut row_iteration = self.row_iter.update(&snapshot).map_err(renderer_error)?;
+        let mut snapshot_cells = 0u32;
+        let mut snapshot_text_cells = 0u32;
 
         while let Some(row) = row_iteration.next() {
             let mut cells = Vec::with_capacity(cols as usize);
@@ -680,6 +722,10 @@ impl<'alloc> SnapshotExtractor<'alloc> {
                 let style = cell.style().map_err(renderer_error)?;
                 let fg = cell.fg_color().map_err(renderer_error)?.map(terminal_rgb);
                 let bg = cell.bg_color().map_err(renderer_error)?.map(terminal_rgb);
+                snapshot_cells = snapshot_cells.saturating_add(1);
+                if !text.is_empty() {
+                    snapshot_text_cells = snapshot_text_cells.saturating_add(1);
+                }
                 if text.is_empty() {
                     row_text.push(' ');
                 } else {
@@ -699,6 +745,7 @@ impl<'alloc> SnapshotExtractor<'alloc> {
             plain_text.push('\n');
             rows_data.push(TerminalRowSnapshot { cells });
         }
+        let snapshot_extract_micros = micros_since(extract_started_at, Instant::now());
 
         Ok(TerminalGridSnapshot {
             session_id: session_id.to_owned(),
@@ -709,7 +756,13 @@ impl<'alloc> SnapshotExtractor<'alloc> {
             cursor,
             rows_data,
             plain_text,
-            timing: TerminalSnapshotTiming::default(),
+            timing: TerminalSnapshotTiming {
+                snapshot_update_micros,
+                snapshot_extract_micros,
+                snapshot_cells,
+                snapshot_text_cells,
+                ..TerminalSnapshotTiming::default()
+            },
         })
     }
 
@@ -874,6 +927,7 @@ fn micros_since(start: Instant, end: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
 
     #[test]
     fn changed_terminal_waits_until_snapshot_interval() {
@@ -917,5 +971,187 @@ mod tests {
             ),
             LIVE_TERMINAL_IDLE_TIMEOUT
         );
+    }
+
+    #[test]
+    fn picker_preview_ansi_fixture_reaches_snapshot() {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 120,
+            rows: 40,
+            max_scrollback: 1_000,
+        })
+        .expect("terminal");
+        terminal
+            .resize(
+                120,
+                40,
+                u32::from(DEFAULT_CELL_WIDTH),
+                u32::from(DEFAULT_CELL_HEIGHT),
+            )
+            .expect("resize");
+        let bytes = picker_preview_ansi_frame(3, 120, 40);
+        terminal.vt_write(&bytes);
+
+        let mut renderer = SnapshotExtractor::new().expect("snapshot extractor");
+        let snapshot = renderer
+            .snapshot("picker-preview-test", &terminal)
+            .expect("snapshot");
+
+        assert_eq!(snapshot.cols, 120);
+        assert_eq!(snapshot.rows, 40);
+        assert!(snapshot.plain_text.contains("preview_"));
+        assert!(snapshot.timing.snapshot_cells >= 4_800);
+        assert!(snapshot.timing.snapshot_text_cells > 1_000);
+    }
+
+    #[test]
+    #[ignore = "profiling workload; run with --ignored --nocapture"]
+    fn picker_preview_vt_pipeline_profile() {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 120,
+            rows: 40,
+            max_scrollback: 10_000,
+        })
+        .expect("terminal");
+        terminal
+            .resize(
+                120,
+                40,
+                u32::from(DEFAULT_CELL_WIDTH),
+                u32::from(DEFAULT_CELL_HEIGHT),
+            )
+            .expect("resize");
+        let mut renderer = SnapshotExtractor::new().expect("snapshot extractor");
+        let mut vt_write = VecDeque::new();
+        let mut update = VecDeque::new();
+        let mut extract = VecDeque::new();
+        let mut build = VecDeque::new();
+        let mut bytes_per_frame = VecDeque::new();
+        let mut text_cells = VecDeque::new();
+
+        for frame in 0..180 {
+            let bytes = picker_preview_ansi_frame(frame, 120, 40);
+            push_test_sample(&mut bytes_per_frame, bytes.len() as u64);
+            let vt_started_at = Instant::now();
+            terminal.vt_write(&bytes);
+            push_test_sample(&mut vt_write, micros_since(vt_started_at, Instant::now()));
+
+            let snapshot_started_at = Instant::now();
+            let snapshot = renderer
+                .snapshot("picker-preview-profile", &terminal)
+                .expect("snapshot");
+            push_test_sample(
+                &mut build,
+                micros_since(snapshot_started_at, Instant::now()),
+            );
+            push_test_sample(&mut update, snapshot.timing.snapshot_update_micros);
+            push_test_sample(&mut extract, snapshot.timing.snapshot_extract_micros);
+            push_test_sample(
+                &mut text_cells,
+                u64::from(snapshot.timing.snapshot_text_cells),
+            );
+            std::hint::black_box(snapshot);
+        }
+
+        println!(
+            "picker preview VT pipeline: bytes {} · vt {} · update {} · extract {} · build {} · text cells {}",
+            test_count_summary(&bytes_per_frame),
+            test_summary(&vt_write),
+            test_summary(&update),
+            test_summary(&extract),
+            test_summary(&build),
+            test_count_summary(&text_cells)
+        );
+    }
+
+    fn picker_preview_ansi_frame(frame: usize, cols: u16, rows: u16) -> Vec<u8> {
+        let mut out = String::from("\x1b[?1049h\x1b[?25l\x1b[H");
+        let preview_start = 44usize;
+        for row in 0..rows as usize {
+            let _ = write!(out, "\x1b[{};1H\x1b[0m", row + 1);
+            if row == 0 {
+                let _ = write!(
+                    out,
+                    "\x1b[48;2;42;48;56m\x1b[38;2;240;240;240m{:width$}",
+                    "  Find files                                      Preview",
+                    width = cols as usize
+                );
+                continue;
+            }
+
+            let selected = row == (frame % (rows as usize - 2)) + 1;
+            if selected {
+                out.push_str("\x1b[48;2;28;92;72m\x1b[38;2;245;250;255m\x1b[1m");
+            } else {
+                out.push_str("\x1b[0m\x1b[38;2;170;184;194m");
+            }
+            let _ = write!(
+                out,
+                "{:<width$}",
+                format!(
+                    " crates/octty-app/src/{:03}_picker_case.rs ",
+                    (frame + row) % 173
+                ),
+                width = preview_start - 2
+            );
+            out.push_str("\x1b[0m  ");
+            let line_no = (row + frame) % 97;
+            let _ = write!(
+                out,
+                "\x1b[38;2;105;116;126m{line_no:>3} \
+                 \x1b[38;2;235;118;135mlet \
+                 \x1b[38;2;132;204;244mpreview_{line_no}\
+                 \x1b[38;2;210;216;222m = \
+                 \x1b[38;2;166;218;149mrender_case({frame}, {row});"
+            );
+            if row % 5 == 0 {
+                let _ = write!(
+                    out,
+                    "\x1b[{};{}H\x1b[48;2;238;212;132m\x1b[38;2;18;20;22m\x1b[1m changed ",
+                    row + 1,
+                    preview_start + 5
+                );
+            }
+            out.push_str("\x1b[0m");
+        }
+        out.into_bytes()
+    }
+
+    fn push_test_sample(samples: &mut VecDeque<u64>, micros: u64) {
+        if samples.len() == 512 {
+            samples.pop_front();
+        }
+        samples.push_back(micros);
+    }
+
+    fn test_summary(samples: &VecDeque<u64>) -> String {
+        let mut sorted: Vec<_> = samples.iter().copied().collect();
+        sorted.sort_unstable();
+        let p50 = sorted[(sorted.len().saturating_sub(1) * 50) / 100];
+        let p95 = sorted[(sorted.len().saturating_sub(1) * 95) / 100];
+        let max = sorted.last().copied().unwrap_or_default();
+        format!(
+            "p50 {} p95 {} max {}",
+            test_format_micros(p50),
+            test_format_micros(p95),
+            test_format_micros(max)
+        )
+    }
+
+    fn test_count_summary(samples: &VecDeque<u64>) -> String {
+        let mut sorted: Vec<_> = samples.iter().copied().collect();
+        sorted.sort_unstable();
+        let p50 = sorted[(sorted.len().saturating_sub(1) * 50) / 100];
+        let p95 = sorted[(sorted.len().saturating_sub(1) * 95) / 100];
+        let max = sorted.last().copied().unwrap_or_default();
+        format!("p50 {p50} p95 {p95} max {max}")
+    }
+
+    fn test_format_micros(micros: u64) -> String {
+        if micros >= 1_000 {
+            format!("{:.1}ms", micros as f64 / 1_000.0)
+        } else {
+            format!("{micros}us")
+        }
     }
 }

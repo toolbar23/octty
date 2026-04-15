@@ -13,7 +13,7 @@ const AGENT_TERMINAL_COLUMN_WIDTH_PX: f64 = 840.0;
 const NOTE_COLUMN_WIDTH_PX: f64 = 420.0;
 const BROWSER_COLUMN_WIDTH_PX: f64 = 960.0;
 const DIFF_COLUMN_WIDTH_PX: f64 = 900.0;
-const LAYOUT_VERSION: u32 = 1;
+pub const LAYOUT_VERSION: u32 = 2;
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -208,7 +208,7 @@ fn normalize_heights(column: &mut WorkspaceColumn) {
 
 fn next_id(prefix: &str) -> String {
     let id = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{prefix}-{id}")
+    format!("{prefix}-{}-{id}", now_ms())
 }
 
 pub fn now_ms() -> i64 {
@@ -277,6 +277,15 @@ mod tests {
                 BROWSER_COLUMN_WIDTH_PX
             ]
         );
+    }
+
+    #[test]
+    fn new_ids_include_time_and_counter() {
+        let first = create_pane_state(PaneType::Shell, "/tmp/ws", None);
+        let second = create_pane_state(PaneType::Shell, "/tmp/ws", None);
+
+        assert_ne!(first.id, second.id);
+        assert!(first.id.starts_with("pane-"));
     }
 
     #[test]

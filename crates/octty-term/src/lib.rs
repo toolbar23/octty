@@ -1,4 +1,7 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use octty_core::TerminalKind;
 use thiserror::Error;
@@ -27,6 +30,16 @@ pub struct TmuxLaunch {
     pub clean_env: BTreeMap<String, String>,
 }
 
+const OCTTY_TMUX_CONFIG: &str = r#"# Octty owns the outer UI chrome, so tmux should stay invisible and inert.
+set -g prefix None
+set -g prefix2 None
+set -g status off
+set -g pane-border-status off
+set -g mouse off
+unbind-key -a
+unbind-key -a -T root
+"#;
+
 #[derive(Debug, Error)]
 pub enum TerminalError {
     #[error("io error: {0}")]
@@ -43,9 +56,8 @@ pub fn build_tmux_launch(spec: &TerminalSessionSpec) -> TmuxLaunch {
     let socket_name = tmux_socket_name();
     let session_name = stable_tmux_session_name(spec);
     let command = terminal_command(&spec.kind);
-    let mut args = vec![
-        "-L".to_owned(),
-        socket_name.clone(),
+    let mut args = tmux_command_prefix_for_socket(&socket_name);
+    args.extend([
         "new-session".to_owned(),
         "-d".to_owned(),
         "-s".to_owned(),
@@ -56,7 +68,7 @@ pub fn build_tmux_launch(spec: &TerminalSessionSpec) -> TmuxLaunch {
         spec.rows.to_string(),
         "-c".to_owned(),
         spec.cwd.clone(),
-    ];
+    ]);
     if !command.is_empty() {
         args.push(command.to_owned());
     }
@@ -77,16 +89,15 @@ pub fn build_tmux_pty_launch(spec: &TerminalSessionSpec) -> TmuxLaunch {
     let socket_name = tmux_socket_name();
     let session_name = stable_tmux_session_name(spec);
     let command = terminal_command(&spec.kind);
-    let mut args = vec![
-        "-L".to_owned(),
-        socket_name.clone(),
+    let mut args = tmux_command_prefix_for_socket(&socket_name);
+    args.extend([
         "new-session".to_owned(),
         "-A".to_owned(),
         "-s".to_owned(),
         session_name.clone(),
         "-c".to_owned(),
         spec.cwd.clone(),
-    ];
+    ]);
     if !command.is_empty() {
         args.push(command.to_owned());
     }
@@ -114,14 +125,13 @@ pub async fn ensure_tmux_session(spec: &TerminalSessionSpec) -> Result<String, T
 
 pub async fn capture_tmux_pane(spec: &TerminalSessionSpec) -> Result<String, TerminalError> {
     let session_name = ensure_tmux_session(spec).await?;
-    let args = vec![
-        "-L".to_owned(),
-        tmux_socket_name(),
+    let mut args = tmux_command_prefix();
+    args.extend([
         "capture-pane".to_owned(),
         "-p".to_owned(),
         "-t".to_owned(),
         session_name,
-    ];
+    ]);
     let output = tmux_output(&args).await?;
     Ok(String::from_utf8_lossy(&output).to_string())
 }
@@ -135,15 +145,14 @@ pub async fn send_tmux_text_to_session(
     session_name: &str,
     text: &str,
 ) -> Result<(), TerminalError> {
-    let args = vec![
-        "-L".to_owned(),
-        tmux_socket_name(),
+    let mut args = tmux_command_prefix();
+    args.extend([
         "send-keys".to_owned(),
         "-t".to_owned(),
         session_name.to_owned(),
         "-l".to_owned(),
         text.to_owned(),
-    ];
+    ]);
     run_tmux(&args).await
 }
 
@@ -163,13 +172,12 @@ pub async fn send_tmux_keys_to_session(
     session_name: &str,
     keys: &[&str],
 ) -> Result<(), TerminalError> {
-    let mut args = vec![
-        "-L".to_owned(),
-        tmux_socket_name(),
+    let mut args = tmux_command_prefix();
+    args.extend([
         "send-keys".to_owned(),
         "-t".to_owned(),
         session_name.to_owned(),
-    ];
+    ]);
     args.extend(keys.iter().map(|key| (*key).to_owned()));
     run_tmux(&args).await
 }
@@ -180,9 +188,8 @@ pub async fn resize_tmux_session(
     rows: u16,
 ) -> Result<(), TerminalError> {
     let session_name = ensure_tmux_session(spec).await?;
-    let args = vec![
-        "-L".to_owned(),
-        tmux_socket_name(),
+    let mut args = tmux_command_prefix();
+    args.extend([
         "resize-window".to_owned(),
         "-t".to_owned(),
         session_name,
@@ -190,29 +197,28 @@ pub async fn resize_tmux_session(
         cols.to_string(),
         "-y".to_owned(),
         rows.to_string(),
-    ];
+    ]);
     run_tmux(&args).await
 }
 
 pub async fn kill_tmux_session(session_name: &str) -> Result<(), TerminalError> {
-    let args = vec![
-        "-L".to_owned(),
-        tmux_socket_name(),
+    let mut args = tmux_command_prefix();
+    args.extend([
         "kill-session".to_owned(),
         "-t".to_owned(),
         session_name.to_owned(),
-    ];
+    ]);
     run_tmux(&args).await
 }
 
 async fn tmux_has_session(launch: &TmuxLaunch) -> Result<bool, TerminalError> {
-    let args = vec![
-        "-L".to_owned(),
-        launch.socket_name.clone(),
+    let mut args = tmux_command_prefix_for_socket(&launch.socket_name);
+    args.extend([
         "has-session".to_owned(),
         "-t".to_owned(),
         launch.session_name.clone(),
-    ];
+    ]);
+    ensure_tmux_config()?;
     let output = Command::new("tmux")
         .args(&args)
         .env_remove("TMUX")
@@ -223,6 +229,7 @@ async fn tmux_has_session(launch: &TmuxLaunch) -> Result<bool, TerminalError> {
 }
 
 async fn run_tmux(args: &[String]) -> Result<(), TerminalError> {
+    ensure_tmux_config()?;
     let output = Command::new("tmux")
         .args(args)
         .env_remove("TMUX")
@@ -239,6 +246,7 @@ async fn run_tmux(args: &[String]) -> Result<(), TerminalError> {
 }
 
 async fn tmux_output(args: &[String]) -> Result<Vec<u8>, TerminalError> {
+    ensure_tmux_config()?;
     let output = Command::new("tmux")
         .args(args)
         .env_remove("TMUX")
@@ -266,6 +274,57 @@ pub fn terminal_command(kind: &TerminalKind) -> &'static str {
 
 pub fn tmux_socket_name() -> String {
     std::env::var("OCTTY_RS_TMUX_SOCKET").unwrap_or_else(|_| "octty-rs".to_owned())
+}
+
+fn tmux_command_prefix() -> Vec<String> {
+    tmux_command_prefix_for_socket(&tmux_socket_name())
+}
+
+fn tmux_command_prefix_for_socket(socket_name: &str) -> Vec<String> {
+    vec![
+        "-L".to_owned(),
+        socket_name.to_owned(),
+        "-f".to_owned(),
+        tmux_config_path().to_string_lossy().to_string(),
+    ]
+}
+
+pub(crate) fn ensure_tmux_config() -> Result<PathBuf, TerminalError> {
+    let config_path = tmux_config_path();
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&config_path, OCTTY_TMUX_CONFIG)?;
+    Ok(config_path)
+}
+
+fn tmux_config_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("OCTTY_RS_TMUX_CONFIG_PATH") {
+        return PathBuf::from(path);
+    }
+    tmux_cache_dir().join("tmux.conf")
+}
+
+fn tmux_cache_dir() -> PathBuf {
+    env_path("OCTTY_RS_CACHE_PATH")
+        .or_else(|| env_path("OCTTY_CACHE_PATH"))
+        .or_else(|| env_path("WORKSPACE_ORBIT_CACHE_PATH"))
+        .unwrap_or_else(|| {
+            home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".cache")
+                .join("octty")
+        })
+}
+
+fn env_path(key: &str) -> Option<PathBuf> {
+    let value = std::env::var_os(key)?;
+    let path = Path::new(&value);
+    (!path.as_os_str().is_empty()).then(|| path.to_path_buf())
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 pub fn stable_tmux_session_name(spec: &TerminalSessionSpec) -> String {
@@ -303,6 +362,8 @@ mod tests {
         assert!(launch.args.starts_with(&[
             "-L".to_owned(),
             tmux_socket_name(),
+            "-f".to_owned(),
+            tmux_config_path().to_string_lossy().to_string(),
             "new-session".to_owned()
         ]));
         assert!(launch.args.contains(&"-d".to_owned()));
@@ -310,6 +371,29 @@ mod tests {
         assert!(launch.args.contains(&"codex".to_owned()));
         assert!(launch.clean_env.contains_key("TMUX"));
         assert!(launch.clean_env.contains_key("TMUX_PANE"));
+    }
+
+    #[test]
+    fn tmux_pty_launch_uses_octty_config() {
+        let spec = TerminalSessionSpec {
+            workspace_id: "workspace-1".to_owned(),
+            pane_id: "pane-1".to_owned(),
+            kind: TerminalKind::Shell,
+            cwd: "/tmp/repo".to_owned(),
+            cols: 80,
+            rows: 24,
+        };
+
+        let launch = build_tmux_pty_launch(&spec);
+
+        assert!(launch.args.starts_with(&[
+            "-L".to_owned(),
+            tmux_socket_name(),
+            "-f".to_owned(),
+            tmux_config_path().to_string_lossy().to_string(),
+            "new-session".to_owned()
+        ]));
+        assert!(launch.args.contains(&"-A".to_owned()));
     }
 
     #[test]
