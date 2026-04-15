@@ -77,7 +77,7 @@ pub async fn discover_workspaces(
             .await
             .unwrap_or_else(|_| encode_missing_workspace_path(&entry.workspace_name));
         summaries.push(WorkspaceSummary {
-            id: stable_workspace_id(root_path, &entry.workspace_name),
+            id: workspace_id_for(root_path, &entry.workspace_name),
             root_id: root.id.clone(),
             root_path: root_path.to_owned(),
             project_display_name: root.display_name.clone(),
@@ -126,6 +126,44 @@ pub async fn read_workspace_status(
     })
 }
 
+pub async fn create_workspace(
+    root_path: impl AsRef<Path>,
+    destination_path: impl AsRef<Path>,
+    workspace_name: &str,
+) -> Result<(), JjError> {
+    let root_path = root_path.as_ref();
+    let root_path_str = path_str(root_path)?;
+    let destination_path_str = path_str(destination_path.as_ref())?;
+    run_jj(
+        root_path,
+        &[
+            "workspace",
+            "add",
+            "-R",
+            root_path_str,
+            "--name",
+            workspace_name,
+            destination_path_str,
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn forget_workspace(
+    root_path: impl AsRef<Path>,
+    workspace_name: &str,
+) -> Result<(), JjError> {
+    let root_path = root_path.as_ref();
+    let root_path_str = path_str(root_path)?;
+    run_jj(
+        root_path,
+        &["workspace", "forget", "-R", root_path_str, workspace_name],
+    )
+    .await?;
+    Ok(())
+}
+
 async fn workspace_path(root_path: &str, workspace_name: &str) -> Result<String, JjError> {
     let output = run_jj(
         root_path.as_ref(),
@@ -171,7 +209,7 @@ async fn run_jj(cwd: &Path, args: &[&str]) -> Result<String, JjError> {
     }
 }
 
-fn stable_workspace_id(root_path: &str, workspace_name: &str) -> String {
+pub fn workspace_id_for(root_path: &str, workspace_name: &str) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in root_path.bytes().chain([0]).chain(workspace_name.bytes()) {
         hash ^= byte as u64;

@@ -92,6 +92,34 @@ impl TursoStore {
         Ok(roots)
     }
 
+    pub async fn update_project_root_display_name(
+        &self,
+        root_id: &str,
+        display_name: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.connection().await?;
+        conn.execute(
+            "update project_roots
+             set label = ?2, updated_at = unixepoch() * 1000
+             where id = ?1",
+            params![root_id, display_name],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_project_root(&self, root_id: &str) -> Result<(), StoreError> {
+        let conn = self.connection().await?;
+        conn.execute("delete from session_state where workspace_id in (select id from workspaces where root_id = ?1)", [root_id]).await?;
+        conn.execute("delete from workspace_snapshots where workspace_id in (select id from workspaces where root_id = ?1)", [root_id]).await?;
+        conn.execute("delete from note_state where workspace_id in (select id from workspaces where root_id = ?1)", [root_id]).await?;
+        conn.execute("delete from workspaces where root_id = ?1", [root_id])
+            .await?;
+        conn.execute("delete from project_roots where id = ?1", [root_id])
+            .await?;
+        Ok(())
+    }
+
     pub async fn upsert_workspace(&self, workspace: &WorkspaceSummary) -> Result<(), StoreError> {
         let conn = self.connection().await?;
         let bookmarks_json = serde_json::to_string(&workspace.status.bookmarks)?;
@@ -144,6 +172,60 @@ impl TursoStore {
             ],
         )
         .await?;
+        Ok(())
+    }
+
+    pub async fn update_workspace_project_display_name(
+        &self,
+        root_id: &str,
+        display_name: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.connection().await?;
+        conn.execute(
+            "update workspaces
+             set project_label = ?2, updated_at = unixepoch() * 1000
+             where root_id = ?1",
+            params![root_id, display_name],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update_workspace_display_name(
+        &self,
+        workspace_id: &str,
+        display_name: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.connection().await?;
+        conn.execute(
+            "update workspaces
+             set display_name = ?2, updated_at = unixepoch() * 1000
+             where id = ?1",
+            params![workspace_id, display_name],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_workspace(&self, workspace_id: &str) -> Result<(), StoreError> {
+        let conn = self.connection().await?;
+        conn.execute(
+            "delete from session_state where workspace_id = ?1",
+            [workspace_id],
+        )
+        .await?;
+        conn.execute(
+            "delete from workspace_snapshots where workspace_id = ?1",
+            [workspace_id],
+        )
+        .await?;
+        conn.execute(
+            "delete from note_state where workspace_id = ?1",
+            [workspace_id],
+        )
+        .await?;
+        conn.execute("delete from workspaces where id = ?1", [workspace_id])
+            .await?;
         Ok(())
     }
 

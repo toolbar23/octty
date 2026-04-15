@@ -1,21 +1,31 @@
 use std::{
     cell::RefCell,
     collections::{BTreeSet, HashMap, VecDeque},
+    fs,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::{Arc, Mutex, OnceLock},
-    time::{Duration, Instant},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use futures::{StreamExt, channel::mpsc};
 use gpui::{
-    Action, AnyView, App, Application, Bounds, ClipboardItem, Context, Entity, FocusHandle, Font,
-    FontFallbacks, FontFeatures, Hsla, IntoElement, KeyBinding, KeyDownEvent, Menu, MenuItem,
-    Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
-    Rgba, ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString, TextRun, Window, WindowBounds,
-    WindowOptions, canvas, div, fill, font, point, prelude::*, px, rgb, rgba, size,
+    Action, AnyView, App, Application, Bounds, ClipboardEntry, ClipboardItem, Context, Corner,
+    Entity, FocusHandle, Font, FontFallbacks, FontFeatures, Hsla, Image, ImageFormat, IntoElement,
+    KeyBinding, KeyDownEvent, Menu, MenuItem, Modifiers, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, PromptLevel, Render, Rgba, ScrollDelta,
+    ScrollWheelEvent, ShapedLine, SharedString, TextRun, Window, WindowBounds, WindowOptions,
+    anchored, canvas, deferred, div, fill, font, point, prelude::*, px, rgb, rgba, size,
 };
-use gpui_component::{Root, Sizable, tag::Tag};
+use gpui_component::{
+    Root, Sizable, WindowExt,
+    dialog::DialogButtonProps,
+    input::{Input, InputState},
+    tag::Tag,
+};
 use octty_core::{
     PanePayload, PaneState, PaneType, ProjectRootRecord, SessionSnapshot, SessionState,
     TerminalPanePayload, WorkspaceBookmarkRelation, WorkspaceSnapshot, WorkspaceState,
@@ -24,7 +34,10 @@ use octty_core::{
     layout::{LAYOUT_VERSION, now_ms},
     remove_pane, workspace_shortcut_targets,
 };
-use octty_jj::{discover_workspaces, read_workspace_status, resolve_repo_root};
+use octty_jj::{
+    create_workspace as jj_create_workspace, discover_workspaces,
+    forget_workspace as jj_forget_workspace, read_workspace_status, resolve_repo_root,
+};
 use octty_store::{TursoStore, default_store_path};
 use octty_term::{
     TerminalSessionSpec, capture_tmux_pane, ensure_tmux_session, kill_tmux_session,
@@ -115,6 +128,58 @@ struct ResizeFocusedColumn {
     direction: ColumnResizeDirection,
 }
 
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
+struct CreateWorkspaceForRoot {
+    root_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
+struct RenameProjectRoot {
+    root_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
+struct RemoveProjectRoot {
+    root_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
+struct RenameWorkspace {
+    workspace_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
+struct ForgetWorkspace {
+    workspace_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
+struct DeleteAndForgetWorkspace {
+    workspace_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
+struct SidebarMenuSelectUp;
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
+struct SidebarMenuSelectDown;
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
+struct SidebarMenuConfirm;
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
+struct SidebarMenuCancel;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PaneNavigationDirection {
     Left,
@@ -140,6 +205,160 @@ struct BootstrapState {
     workspaces: Vec<WorkspaceSummary>,
     active_workspace_index: Option<usize>,
     active_snapshot: Option<WorkspaceSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SidebarRenameTarget {
+    ProjectRoot(String),
+    Workspace(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SidebarMenuAction {
+    CreateWorkspaceForRoot(String),
+    RenameProjectRoot(String),
+    RemoveProjectRoot(String),
+    RenameWorkspace(String),
+    ForgetWorkspace(String),
+    DeleteAndForgetWorkspace(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SidebarMenuEntry {
+    Item {
+        label: SharedString,
+        action: SidebarMenuAction,
+        disabled: bool,
+    },
+    Separator,
+}
+
+impl SidebarMenuEntry {
+    fn item(label: impl Into<SharedString>, action: SidebarMenuAction) -> Self {
+        Self::item_with_disabled(label, action, false)
+    }
+
+    fn item_with_disabled(
+        label: impl Into<SharedString>,
+        action: SidebarMenuAction,
+        disabled: bool,
+    ) -> Self {
+        Self::Item {
+            label: label.into(),
+            action,
+            disabled,
+        }
+    }
+
+    fn is_enabled_item(&self) -> bool {
+        matches!(
+            self,
+            Self::Item {
+                disabled: false,
+                ..
+            }
+        )
+    }
+
+    fn action(&self) -> Option<SidebarMenuAction> {
+        match self {
+            Self::Item {
+                action,
+                disabled: false,
+                ..
+            } => Some(action.clone()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SidebarMenuOverlay {
+    position: Point<Pixels>,
+    menu: Entity<SidebarMenuView>,
+}
+
+struct SidebarMenuView {
+    app: Entity<OcttyApp>,
+    focus_handle: FocusHandle,
+    entries: Vec<SidebarMenuEntry>,
+    selected_index: Option<usize>,
+}
+
+impl SidebarMenuView {
+    fn new(
+        app: Entity<OcttyApp>,
+        entries: Vec<SidebarMenuEntry>,
+        focus_handle: FocusHandle,
+    ) -> Self {
+        let selected_index = entries
+            .iter()
+            .enumerate()
+            .find_map(|(index, entry)| entry.is_enabled_item().then_some(index));
+        Self {
+            app,
+            focus_handle,
+            entries,
+            selected_index,
+        }
+    }
+
+    fn enabled_indices(&self) -> Vec<usize> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| entry.is_enabled_item().then_some(index))
+            .collect()
+    }
+
+    fn select_up(&mut self, _: &SidebarMenuSelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        let enabled = self.enabled_indices();
+        if enabled.is_empty() {
+            return;
+        }
+        let current = self.selected_index.unwrap_or(enabled[0]);
+        let position = enabled
+            .iter()
+            .position(|index| *index == current)
+            .unwrap_or(0);
+        let next_position = position.checked_sub(1).unwrap_or(enabled.len() - 1);
+        self.selected_index = Some(enabled[next_position]);
+        cx.notify();
+    }
+
+    fn select_down(&mut self, _: &SidebarMenuSelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        let enabled = self.enabled_indices();
+        if enabled.is_empty() {
+            return;
+        }
+        let current = self.selected_index.unwrap_or(enabled[0]);
+        let position = enabled
+            .iter()
+            .position(|index| *index == current)
+            .unwrap_or(0);
+        self.selected_index = Some(enabled[(position + 1) % enabled.len()]);
+        cx.notify();
+    }
+
+    fn confirm(&mut self, _: &SidebarMenuConfirm, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.selected_index else {
+            return;
+        };
+        self.execute_index(index, window, cx);
+    }
+
+    fn cancel(&mut self, _: &SidebarMenuCancel, _: &mut Window, cx: &mut Context<Self>) {
+        let _ = self.app.update(cx, |app, cx| app.dismiss_sidebar_menu(cx));
+    }
+
+    fn execute_index(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(action) = self.entries.get(index).and_then(SidebarMenuEntry::action) else {
+            return;
+        };
+        let _ = self.app.update(cx, |app, cx| {
+            app.execute_sidebar_menu_action(action, window, cx);
+        });
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,6 +395,7 @@ struct OcttyApp {
     terminal_last_snapshot_notify_at: Option<Instant>,
     terminal_glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
     terminal_render_cache: Rc<RefCell<TerminalRenderCache>>,
+    sidebar_menu: Option<SidebarMenuOverlay>,
 }
 
 struct LiveTerminalPane {
@@ -257,6 +477,7 @@ impl OcttyApp {
             terminal_last_snapshot_notify_at: None,
             terminal_glyph_cache: Rc::new(RefCell::new(TerminalGlyphLayoutCache::default())),
             terminal_render_cache: Rc::new(RefCell::new(TerminalRenderCache::default())),
+            sidebar_menu: None,
         };
         app.ensure_live_terminals_for_active_snapshot();
         app
@@ -272,6 +493,15 @@ impl OcttyApp {
             return;
         }
 
+        if self.active_workspace_index == Some(action.index) {
+            if self.sidebar_menu.is_some() {
+                self.sidebar_menu = None;
+                cx.notify();
+            }
+            return;
+        }
+
+        self.sidebar_menu = None;
         self.active_workspace_index = Some(action.index);
         let workspace = self.workspaces[action.index].clone();
         let workspace_id = workspace.id.clone();
@@ -342,6 +572,435 @@ impl OcttyApp {
         self.open_workspace(&OpenWorkspaceShortcut { index: target }, window, cx);
     }
 
+    fn create_workspace_for_root(
+        &mut self,
+        action: &CreateWorkspaceForRoot,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self
+            .project_roots
+            .iter()
+            .find(|root| root.id == action.root_id)
+            .cloned()
+        else {
+            return;
+        };
+        let store_path = self.store_path.clone();
+        self.run_navigation_operation(
+            format!("Creating workspace in {}...", root.display_name),
+            async move { create_workspace_for_root_and_reload(store_path, root).await },
+            cx,
+        );
+    }
+
+    fn rename_project_root(
+        &mut self,
+        action: &RenameProjectRoot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self
+            .project_roots
+            .iter()
+            .find(|root| root.id == action.root_id)
+            .cloned()
+        else {
+            return;
+        };
+        self.open_sidebar_rename_dialog(
+            SidebarRenameTarget::ProjectRoot(root.id),
+            root.display_name,
+            window,
+            cx,
+        );
+    }
+
+    fn remove_project_root(
+        &mut self,
+        action: &RemoveProjectRoot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self
+            .project_roots
+            .iter()
+            .find(|root| root.id == action.root_id)
+            .cloned()
+        else {
+            return;
+        };
+        let active_workspace_id = self
+            .active_workspace()
+            .filter(|workspace| workspace.root_id != root.id)
+            .map(|workspace| workspace.id.clone());
+        let store_path = self.store_path.clone();
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Remove this project root from Octty?",
+            Some(root.root_path.as_str()),
+            &["Remove", "Cancel"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
+                remove_project_root_and_reload(store_path, root.id, active_workspace_id).await
+            }) {
+                Ok(task) => task.await,
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |app, cx| {
+                match result {
+                    Ok(bootstrap) => app.apply_bootstrap(bootstrap, cx),
+                    Err(error) => {
+                        app.status = format!("Failed to remove project root: {error:#}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn rename_workspace(
+        &mut self,
+        action: &RenameWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == action.workspace_id)
+            .cloned()
+        else {
+            return;
+        };
+        self.open_sidebar_rename_dialog(
+            SidebarRenameTarget::Workspace(workspace.id.clone()),
+            workspace.display_name_or_workspace_name().to_owned(),
+            window,
+            cx,
+        );
+    }
+
+    fn forget_workspace(
+        &mut self,
+        action: &ForgetWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.confirm_and_forget_workspace(action.workspace_id.clone(), false, window, cx);
+    }
+
+    fn delete_and_forget_workspace(
+        &mut self,
+        action: &DeleteAndForgetWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.confirm_and_forget_workspace(action.workspace_id.clone(), true, window, cx);
+    }
+
+    fn show_sidebar_menu(
+        &mut self,
+        entries: Vec<SidebarMenuEntry>,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let app_entity = cx.entity();
+        let menu = cx.new(|cx| SidebarMenuView::new(app_entity, entries, cx.focus_handle()));
+        menu.update(cx, |menu, _| menu.focus_handle.focus(window));
+        self.sidebar_menu = Some(SidebarMenuOverlay { position, menu });
+        cx.notify();
+    }
+
+    fn dismiss_sidebar_menu(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_menu = None;
+        cx.notify();
+    }
+
+    fn execute_sidebar_menu_action(
+        &mut self,
+        action: SidebarMenuAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar_menu = None;
+        match action {
+            SidebarMenuAction::CreateWorkspaceForRoot(root_id) => {
+                self.create_workspace_for_root(&CreateWorkspaceForRoot { root_id }, window, cx);
+            }
+            SidebarMenuAction::RenameProjectRoot(root_id) => {
+                self.rename_project_root(&RenameProjectRoot { root_id }, window, cx);
+            }
+            SidebarMenuAction::RemoveProjectRoot(root_id) => {
+                self.remove_project_root(&RemoveProjectRoot { root_id }, window, cx);
+            }
+            SidebarMenuAction::RenameWorkspace(workspace_id) => {
+                self.rename_workspace(&RenameWorkspace { workspace_id }, window, cx);
+            }
+            SidebarMenuAction::ForgetWorkspace(workspace_id) => {
+                self.forget_workspace(&ForgetWorkspace { workspace_id }, window, cx);
+            }
+            SidebarMenuAction::DeleteAndForgetWorkspace(workspace_id) => {
+                self.delete_and_forget_workspace(
+                    &DeleteAndForgetWorkspace { workspace_id },
+                    window,
+                    cx,
+                );
+            }
+        }
+    }
+
+    fn project_root_menu_entries(root_id: &str) -> Vec<SidebarMenuEntry> {
+        vec![
+            SidebarMenuEntry::item(
+                "New Workspace",
+                SidebarMenuAction::CreateWorkspaceForRoot(root_id.to_owned()),
+            ),
+            SidebarMenuEntry::item(
+                "Rename",
+                SidebarMenuAction::RenameProjectRoot(root_id.to_owned()),
+            ),
+            SidebarMenuEntry::Separator,
+            SidebarMenuEntry::item(
+                "Remove",
+                SidebarMenuAction::RemoveProjectRoot(root_id.to_owned()),
+            ),
+        ]
+    }
+
+    fn workspace_menu_entries(
+        workspace_id: &str,
+        forget_disabled: bool,
+        delete_disabled: bool,
+    ) -> Vec<SidebarMenuEntry> {
+        vec![
+            SidebarMenuEntry::item(
+                "Rename",
+                SidebarMenuAction::RenameWorkspace(workspace_id.to_owned()),
+            ),
+            SidebarMenuEntry::Separator,
+            SidebarMenuEntry::item_with_disabled(
+                "Forget",
+                SidebarMenuAction::ForgetWorkspace(workspace_id.to_owned()),
+                forget_disabled,
+            ),
+            SidebarMenuEntry::item_with_disabled(
+                "Delete and forget",
+                SidebarMenuAction::DeleteAndForgetWorkspace(workspace_id.to_owned()),
+                delete_disabled,
+            ),
+        ]
+    }
+
+    fn open_sidebar_rename_dialog(
+        &mut self,
+        target: SidebarRenameTarget,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = match target {
+            SidebarRenameTarget::ProjectRoot(_) => "Rename repo",
+            SidebarRenameTarget::Workspace(_) => "Rename workspace",
+        };
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
+        let app_entity = cx.entity();
+        window.open_dialog(cx, {
+            let input = input.clone();
+            move |dialog, _, _| {
+                dialog
+                    .title(title)
+                    .confirm()
+                    .button_props(DialogButtonProps::default().ok_text("Rename"))
+                    .child(Input::new(&input).appearance(false).bordered(true))
+                    .on_ok({
+                        let input = input.clone();
+                        let app_entity = app_entity.clone();
+                        let target = target.clone();
+                        move |_, _window, cx| {
+                            let display_name =
+                                sanitize_display_name(&input.read(cx).value().to_string());
+                            if display_name.is_empty() {
+                                let _ = app_entity.update(cx, |app, cx| {
+                                    app.status = "Display name cannot be empty.".into();
+                                    cx.notify();
+                                });
+                                return false;
+                            }
+                            let _ = app_entity.update(cx, |app, cx| {
+                                app.rename_sidebar_target(target.clone(), display_name, cx);
+                            });
+                            true
+                        }
+                    })
+            }
+        });
+        input.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    fn confirm_and_forget_workspace(
+        &mut self,
+        workspace_id: String,
+        delete_directory: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .cloned()
+        else {
+            return;
+        };
+        if workspace.workspace_name == "default" {
+            self.status = "The default workspace cannot be forgotten.".into();
+            cx.notify();
+            return;
+        }
+        let active_workspace_id = self
+            .active_workspace()
+            .filter(|active| active.id != workspace.id)
+            .map(|active| active.id.clone());
+        let store_path = self.store_path.clone();
+        let message = if delete_directory {
+            format!(
+                "Delete the workspace directory and forget {}?",
+                workspace.display_name_or_workspace_name()
+            )
+        } else {
+            format!(
+                "Forget {} from JJ and Octty?",
+                workspace.display_name_or_workspace_name()
+            )
+        };
+        let detail = delete_directory.then_some(workspace.workspace_path.as_str());
+        let confirm_label = if delete_directory { "Delete" } else { "Forget" };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            message.as_str(),
+            detail,
+            &[confirm_label, "Cancel"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
+                forget_workspace_and_reload(
+                    store_path,
+                    workspace,
+                    active_workspace_id,
+                    delete_directory,
+                )
+                .await
+            }) {
+                Ok(task) => task.await,
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |app, cx| {
+                match result {
+                    Ok(bootstrap) => app.apply_bootstrap(bootstrap, cx),
+                    Err(error) => {
+                        app.status = format!("Failed to forget workspace: {error:#}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn rename_sidebar_target(
+        &mut self,
+        target: SidebarRenameTarget,
+        display_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let store_path = self.store_path.clone();
+        let active_workspace_id = self
+            .active_workspace()
+            .map(|workspace| workspace.id.clone());
+        match target {
+            SidebarRenameTarget::ProjectRoot(root_id) => {
+                self.run_navigation_operation(
+                    format!("Renaming repo to {display_name}..."),
+                    async move {
+                        rename_project_root_and_reload(
+                            store_path,
+                            root_id,
+                            display_name,
+                            active_workspace_id,
+                        )
+                        .await
+                    },
+                    cx,
+                );
+            }
+            SidebarRenameTarget::Workspace(workspace_id) => {
+                self.run_navigation_operation(
+                    format!("Renaming workspace to {display_name}..."),
+                    async move {
+                        rename_workspace_and_reload(
+                            store_path,
+                            workspace_id,
+                            display_name,
+                            active_workspace_id,
+                        )
+                        .await
+                    },
+                    cx,
+                );
+            }
+        }
+    }
+
+    fn run_navigation_operation<F>(
+        &mut self,
+        pending_status: String,
+        operation: F,
+        cx: &mut Context<Self>,
+    ) where
+        F: std::future::Future<Output = anyhow::Result<BootstrapState>> + Send + 'static,
+    {
+        self.status = pending_status.into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = match gpui_tokio::Tokio::spawn_result(cx, operation) {
+                Ok(task) => task.await,
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |app, cx| {
+                match result {
+                    Ok(bootstrap) => app.apply_bootstrap(bootstrap, cx),
+                    Err(error) => {
+                        app.status = format!("Navigation action failed: {error:#}").into()
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn apply_bootstrap(&mut self, bootstrap: BootstrapState, cx: &mut Context<Self>) {
+        self.status = bootstrap.status.into();
+        self.project_roots = bootstrap.project_roots;
+        self.workspaces = bootstrap.workspaces;
+        self.active_workspace_index = bootstrap.active_workspace_index;
+        self.active_snapshot = bootstrap.active_snapshot;
+        self.ensure_live_terminals_for_active_snapshot();
+        self.schedule_terminal_snapshot_notifications(cx);
+    }
+
     fn add_shell_pane(&mut self, _: &AddShellPane, _: &mut Window, cx: &mut Context<Self>) {
         self.add_pane(PaneType::Shell, cx);
     }
@@ -360,10 +1019,17 @@ impl OcttyApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(clipboard) = cx.read_from_clipboard()
-            && let Some(text) = clipboard.text()
-        {
-            self.send_bytes_to_active_terminal(terminal_paste_bytes(&text), cx);
+        if let Some(clipboard) = cx.read_from_clipboard() {
+            match terminal_clipboard_paste_text(&clipboard) {
+                Ok(Some(text)) => {
+                    self.send_bytes_to_active_terminal(terminal_paste_bytes(&text), cx);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.status = format!("Clipboard paste failed: {error:#}").into();
+                    cx.notify();
+                }
+            }
         }
         cx.stop_propagation();
     }
@@ -1443,7 +2109,7 @@ fn render_workspace_sidebar(
     shortcut_labels: &HashMap<String, String>,
     cx: &mut Context<OcttyApp>,
 ) -> gpui::Div {
-    let mut list = div().mt_3().px_4().flex().flex_col();
+    let mut list = div().pt_3().px_4().flex().flex_col();
     if workspaces.is_empty() {
         return list.child(
             div()
@@ -1477,37 +2143,32 @@ fn render_sidebar_project_group(
     is_last: bool,
     cx: &mut Context<OcttyApp>,
 ) -> gpui::Div {
-    let (title, fallback_path) = match &group.root {
-        Some(root) => (root.display_name.clone(), root.root_path.clone()),
-        None => (
-            "Other repos".to_owned(),
-            "Workspaces without a current repo root".to_owned(),
-        ),
+    let (title, root_id) = match &group.root {
+        Some(root) => (root.display_name.clone(), Some(root.id.clone())),
+        None => ("Other repos".to_owned(), None),
     };
     let mut section = div().pb_3();
     if !is_last {
         section = section.border_b_1().border_color(rgb(0x4d545f));
     }
 
-    let header = div()
-        .py_2()
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .text_sm()
-                .font_weight(gpui::FontWeight::BOLD)
-                .truncate()
-                .child(title),
-        )
-        .child(
-            div()
-                .mt_1()
-                .text_xs()
-                .text_color(rgb(0x98a1ad))
-                .truncate()
-                .child(fallback_path),
+    let mut title_row = div()
+        .text_lg()
+        .font_weight(gpui::FontWeight::BOLD)
+        .truncate();
+    title_row = title_row.child(title);
+    let mut header = div().py_2().child(title_row);
+    if let Some(root_id) = root_id.clone() {
+        let entries = OcttyApp::project_root_menu_entries(&root_id);
+        header = header.on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                this.show_sidebar_menu(entries.clone(), event.position, window, cx);
+            }),
         );
+    }
 
     let mut workspace_list = div().flex().flex_col().gap_1();
     if group.workspace_indices.is_empty() {
@@ -1531,7 +2192,8 @@ fn render_sidebar_project_group(
         ));
     }
 
-    section.child(header).child(workspace_list)
+    section = section.child(header);
+    section.child(workspace_list)
 }
 
 fn render_sidebar_workspace_row(
@@ -1540,7 +2202,7 @@ fn render_sidebar_workspace_row(
     active: bool,
     shortcut_label: Option<&str>,
     cx: &mut Context<OcttyApp>,
-) -> gpui::Div {
+) -> impl IntoElement {
     let bookmark_label = workspace_bookmark_label(workspace);
     let has_meta_row = bookmark_label.is_some() || shortcut_label.is_some();
     let missing_path = !has_recorded_workspace_path(&workspace.workspace_path);
@@ -1572,10 +2234,26 @@ fn render_sidebar_workspace_row(
         );
     }
 
+    let workspace_id = workspace.id.clone();
+    let can_forget = workspace.workspace_name != "default";
+    let can_delete = can_forget && has_recorded_workspace_path(&workspace.workspace_path);
     let mut row = div().relative().py_2().on_mouse_up(
         MouseButton::Left,
         cx.listener(move |this, _, window, cx| {
             this.open_workspace(&OpenWorkspaceShortcut { index }, window, cx);
+        }),
+    );
+    row = row.on_mouse_down(
+        MouseButton::Right,
+        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+            this.focus_handle.focus(window);
+            if this.active_workspace_index != Some(index) {
+                this.open_workspace(&OpenWorkspaceShortcut { index }, window, cx);
+            }
+            let entries = OcttyApp::workspace_menu_entries(&workspace_id, !can_forget, !can_delete);
+            this.show_sidebar_menu(entries, event.position, window, cx);
         }),
     );
     if active {
@@ -1592,25 +2270,20 @@ fn render_sidebar_workspace_row(
                 .bg(rgb(0x3c424d)),
         );
     }
-    row = row.child(
-        div()
-            .relative()
-            .flex()
-            .gap_2()
-            .child(
-                div()
-                    .flex_1()
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(if active { rgb(0x4e86d8) } else { rgb(0xd7dce4) })
-                    .truncate()
-                    .child(workspace.display_name_or_workspace_name().to_owned()),
-            )
-            .child(render_workspace_status_tag(
-                &workspace.status.workspace_state,
-                workspace.status.has_working_copy_changes,
-            )),
-    );
+    let mut workspace_name = div()
+        .flex_1()
+        .text_sm()
+        .font_weight(gpui::FontWeight::BOLD)
+        .text_color(if active { rgb(0x4e86d8) } else { rgb(0xd7dce4) })
+        .truncate();
+    workspace_name = workspace_name.child(workspace.display_name_or_workspace_name().to_owned());
+
+    row = row.child(div().relative().flex().gap_2().child(workspace_name).child(
+        render_workspace_status_tag(
+            &workspace.status.workspace_state,
+            workspace.status.has_working_copy_changes,
+        ),
+    ));
     if has_meta_row {
         row = row.child(meta_row.relative());
     }
@@ -1649,6 +2322,81 @@ fn workspace_bookmark_label(workspace: &WorkspaceSummary) -> Option<String> {
     Some(label)
 }
 
+impl Render for SidebarMenuView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("octty-sidebar-menu")
+            .key_context("OcttySidebarMenu")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::select_up))
+            .on_action(cx.listener(Self::select_down))
+            .on_action(cx.listener(Self::confirm))
+            .on_action(cx.listener(Self::cancel))
+            .w(px(190.0))
+            .p_1()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(0x4d545f))
+            .bg(rgb(0x23272f))
+            .shadow_lg()
+            .text_sm()
+            .text_color(rgb(0xd7dce4))
+            .children(
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, entry)| {
+                        !matches!(entry, SidebarMenuEntry::Separator)
+                            || self
+                                .entries
+                                .get(index + 1)
+                                .is_some_and(|next| !matches!(next, SidebarMenuEntry::Separator))
+                    })
+                    .map(|(index, entry)| match entry {
+                        SidebarMenuEntry::Separator => div()
+                            .id(("sidebar-menu-separator", index))
+                            .my_1()
+                            .h(px(1.0))
+                            .bg(rgb(0x4d545f))
+                            .into_any_element(),
+                        SidebarMenuEntry::Item {
+                            label, disabled, ..
+                        } => {
+                            let selected = self.selected_index == Some(index);
+                            div()
+                                .id(("sidebar-menu-item", index))
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .when(selected && !disabled, |this| {
+                                    this.bg(rgb(0x3c424d)).text_color(rgb(0xffffff))
+                                })
+                                .when(*disabled, |this| this.text_color(rgb(0x707987)))
+                                .when(!disabled, |this| {
+                                    this.cursor_pointer()
+                                        .on_hover(cx.listener(move |this, hovered, _, cx| {
+                                            if *hovered {
+                                                this.selected_index = Some(index);
+                                                cx.notify();
+                                            }
+                                        }))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, window, cx| {
+                                                window.prevent_default();
+                                                cx.stop_propagation();
+                                                this.execute_index(index, window, cx);
+                                            }),
+                                        )
+                                })
+                                .child(label.clone())
+                                .into_any_element()
+                        }
+                    }),
+            )
+    }
+}
+
 impl Render for OcttyApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_live_terminals_for_active_snapshot();
@@ -1683,6 +2431,9 @@ impl Render for OcttyApp {
             taskspace_width,
             cx,
         );
+        let sidebar_menu = self.sidebar_menu.clone();
+        let outside_menu_width =
+            (window.viewport_size().width - px(WORKSPACE_SIDEBAR_WIDTH)).max(px(0.0));
 
         div()
             .id("octty-rs-root")
@@ -1699,6 +2450,12 @@ impl Render for OcttyApp {
             .on_action(cx.listener(Self::navigate_pane))
             .on_action(cx.listener(Self::close_active_pane))
             .on_action(cx.listener(Self::resize_focused_column))
+            .on_action(cx.listener(Self::create_workspace_for_root))
+            .on_action(cx.listener(Self::rename_project_root))
+            .on_action(cx.listener(Self::remove_project_root))
+            .on_action(cx.listener(Self::rename_workspace))
+            .on_action(cx.listener(Self::forget_workspace))
+            .on_action(cx.listener(Self::delete_and_forget_workspace))
             .on_key_down(cx.listener(Self::handle_key_down))
             .flex()
             .size_full()
@@ -1712,20 +2469,6 @@ impl Render for OcttyApp {
                     .border_color(rgb(0x4d545f))
                     .bg(rgb(0x323640))
                     .text_color(rgb(0xd7dce4))
-                    .child(
-                        div()
-                            .p_4()
-                            .text_lg()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("Octty"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .text_xs()
-                            .text_color(rgb(0x98a1ad))
-                            .child("Repos"),
-                    )
                     .child(workspace_list),
             )
             .child(
@@ -1736,10 +2479,8 @@ impl Render for OcttyApp {
                     .flex_col()
                     .overflow_hidden()
                     .p_6()
-                    .child(div().text_xl().child("Taskspace"))
                     .child(
                         div()
-                            .mt_3()
                             .text_sm()
                             .text_color(rgb(0xb8b8b8))
                             .child(self.status.clone()),
@@ -1770,6 +2511,41 @@ impl Render for OcttyApp {
                     )
                     .child(taskspace),
             )
+            .when_some(sidebar_menu, |this, overlay| {
+                this.child(deferred(
+                    anchored()
+                        .anchor(Corner::TopLeft)
+                        .position(point(px(0.0), px(0.0)))
+                        .snap_to_window_with_margin(px(8.0))
+                        .child(
+                            div()
+                                .w(window.viewport_size().width)
+                                .h(window.viewport_size().height)
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(WORKSPACE_SIDEBAR_WIDTH))
+                                        .top_0()
+                                        .w(outside_menu_width)
+                                        .h(window.viewport_size().height)
+                                        .occlude()
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _window, cx| {
+                                                this.dismiss_sidebar_menu(cx);
+                                            }),
+                                        ),
+                                )
+                                .child(
+                                    anchored()
+                                        .anchor(Corner::TopLeft)
+                                        .position(overlay.position)
+                                        .snap_to_window_with_margin(px(8.0))
+                                        .child(div().occlude().child(overlay.menu)),
+                                ),
+                        ),
+                ))
+            })
     }
 }
 
@@ -1872,6 +2648,13 @@ fn main() {
 }
 
 async fn load_bootstrap(auto_seed_current_repo: bool) -> anyhow::Result<BootstrapState> {
+    load_bootstrap_with_active(auto_seed_current_repo, None).await
+}
+
+async fn load_bootstrap_with_active(
+    auto_seed_current_repo: bool,
+    active_workspace_id: Option<String>,
+) -> anyhow::Result<BootstrapState> {
     let store = TursoStore::open(default_store_path()).await?;
     let mut roots = store.list_project_roots().await?;
     if roots.is_empty() && auto_seed_current_repo {
@@ -1884,12 +2667,22 @@ async fn load_bootstrap(auto_seed_current_repo: bool) -> anyhow::Result<Bootstra
 
     let mut errors = Vec::new();
     let mut workspaces = Vec::new();
+    let existing_workspaces = store
+        .list_workspaces()
+        .await?
+        .into_iter()
+        .map(|workspace| (workspace.id.clone(), workspace))
+        .collect::<HashMap<_, _>>();
     for root in &roots {
         match discover_workspaces(root).await {
             Ok(discovered) => {
                 for mut workspace in discovered {
                     let now = now_ms();
-                    if workspace.created_at == 0 {
+                    if let Some(existing) = existing_workspaces.get(&workspace.id) {
+                        workspace.display_name = existing.display_name.clone();
+                        workspace.created_at = existing.created_at;
+                        workspace.last_opened_at = existing.last_opened_at;
+                    } else if workspace.created_at == 0 {
                         workspace.created_at = now;
                     }
                     workspace.updated_at = now;
@@ -1917,7 +2710,18 @@ async fn load_bootstrap(auto_seed_current_repo: bool) -> anyhow::Result<Bootstra
         workspaces = store.list_workspaces().await?;
     }
 
-    let active_workspace_index = if workspaces.is_empty() { None } else { Some(0) };
+    let active_workspace_index = if workspaces.is_empty() {
+        None
+    } else {
+        active_workspace_id
+            .as_deref()
+            .and_then(|workspace_id| {
+                workspaces
+                    .iter()
+                    .position(|workspace| workspace.id == workspace_id)
+            })
+            .or(Some(0))
+    };
     let active_snapshot = match active_workspace_index {
         Some(index) => Some(load_workspace_snapshot(&store, &workspaces[index]).await?),
         None => None,
@@ -1942,6 +2746,139 @@ async fn load_bootstrap(auto_seed_current_repo: bool) -> anyhow::Result<Bootstra
         active_workspace_index,
         active_snapshot,
     })
+}
+
+async fn create_workspace_for_root_and_reload(
+    store_path: PathBuf,
+    root: ProjectRootRecord,
+) -> anyhow::Result<BootstrapState> {
+    let store = TursoStore::open(store_path).await?;
+    let (workspace_name, destination_path) = next_workspace_defaults(&store, &root).await?;
+    jj_create_workspace(&root.root_path, &destination_path, &workspace_name).await?;
+    let root_path = tokio::fs::canonicalize(&root.root_path).await?;
+    let workspace_id =
+        octty_jj::workspace_id_for(&root_path.to_string_lossy(), workspace_name.as_str());
+    load_bootstrap_with_active(true, Some(workspace_id)).await
+}
+
+async fn rename_project_root_and_reload(
+    store_path: PathBuf,
+    root_id: String,
+    display_name: String,
+    active_workspace_id: Option<String>,
+) -> anyhow::Result<BootstrapState> {
+    let store = TursoStore::open(store_path).await?;
+    store
+        .update_project_root_display_name(&root_id, &display_name)
+        .await?;
+    store
+        .update_workspace_project_display_name(&root_id, &display_name)
+        .await?;
+    load_bootstrap_with_active(true, active_workspace_id).await
+}
+
+async fn rename_workspace_and_reload(
+    store_path: PathBuf,
+    workspace_id: String,
+    display_name: String,
+    active_workspace_id: Option<String>,
+) -> anyhow::Result<BootstrapState> {
+    let store = TursoStore::open(store_path).await?;
+    store
+        .update_workspace_display_name(&workspace_id, &display_name)
+        .await?;
+    load_bootstrap_with_active(true, active_workspace_id).await
+}
+
+async fn remove_project_root_and_reload(
+    store_path: PathBuf,
+    root_id: String,
+    active_workspace_id: Option<String>,
+) -> anyhow::Result<BootstrapState> {
+    let store = TursoStore::open(store_path).await?;
+    store.delete_project_root(&root_id).await?;
+    load_bootstrap_with_active(true, active_workspace_id).await
+}
+
+async fn forget_workspace_and_reload(
+    store_path: PathBuf,
+    workspace: WorkspaceSummary,
+    active_workspace_id: Option<String>,
+    delete_directory: bool,
+) -> anyhow::Result<BootstrapState> {
+    jj_forget_workspace(&workspace.root_path, &workspace.workspace_name).await?;
+    if delete_directory {
+        delete_workspace_directory(&workspace).await?;
+    }
+    let store = TursoStore::open(store_path).await?;
+    store.delete_workspace(&workspace.id).await?;
+    load_bootstrap_with_active(true, active_workspace_id).await
+}
+
+async fn next_workspace_defaults(
+    store: &TursoStore,
+    root: &ProjectRootRecord,
+) -> anyhow::Result<(String, String)> {
+    let base_directory = default_workspace_directory(root);
+    tokio::fs::create_dir_all(&base_directory).await?;
+    let existing = store
+        .list_workspaces()
+        .await?
+        .into_iter()
+        .filter(|workspace| workspace.root_id == root.id)
+        .map(|workspace| workspace.workspace_name)
+        .collect::<BTreeSet<_>>();
+    for attempt in 1..=200 {
+        let workspace_name = format!("workspace-{attempt}");
+        let destination = base_directory.join(&workspace_name);
+        if existing.contains(&workspace_name) || tokio::fs::try_exists(&destination).await? {
+            continue;
+        }
+        return Ok((workspace_name, destination.to_string_lossy().to_string()));
+    }
+    anyhow::bail!(
+        "could not find an unused workspace name under {}",
+        base_directory.display()
+    );
+}
+
+fn default_workspace_directory(root: &ProjectRootRecord) -> PathBuf {
+    let repo_name = Path::new(&root.root_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("repo");
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("workspaces")
+        .join(repo_name)
+}
+
+async fn delete_workspace_directory(workspace: &WorkspaceSummary) -> anyhow::Result<()> {
+    if !has_recorded_workspace_path(&workspace.workspace_path) {
+        anyhow::bail!(
+            "workspace {} was forgotten, but its directory path is not recorded",
+            workspace.workspace_name
+        );
+    }
+    let workspace_path = tokio::fs::canonicalize(&workspace.workspace_path)
+        .await
+        .unwrap_or_else(|_| PathBuf::from(&workspace.workspace_path));
+    let root_path = tokio::fs::canonicalize(&workspace.root_path)
+        .await
+        .unwrap_or_else(|_| PathBuf::from(&workspace.root_path));
+    if workspace_path == root_path {
+        anyhow::bail!(
+            "refusing to delete the repo root for workspace {}",
+            workspace.workspace_name
+        );
+    }
+    tokio::fs::remove_dir_all(workspace_path).await?;
+    Ok(())
+}
+
+fn sanitize_display_name(input: &str) -> String {
+    input.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 async fn load_workspace_snapshot(
@@ -2690,6 +3627,10 @@ fn workspace_key_bindings() -> Vec<KeyBinding> {
             None,
         ),
         KeyBinding::new("ctrl-shift-w", CloseActivePane, None),
+        KeyBinding::new("up", SidebarMenuSelectUp, Some("OcttySidebarMenu")),
+        KeyBinding::new("down", SidebarMenuSelectDown, Some("OcttySidebarMenu")),
+        KeyBinding::new("enter", SidebarMenuConfirm, Some("OcttySidebarMenu")),
+        KeyBinding::new("escape", SidebarMenuCancel, Some("OcttySidebarMenu")),
         KeyBinding::new(
             "ctrl-alt-left",
             ResizeFocusedColumn {
@@ -4643,6 +5584,68 @@ fn terminal_paste_bytes(text: &str) -> Vec<u8> {
     text.replace("\r\n", "\n").replace('\n', "\r").into_bytes()
 }
 
+fn terminal_clipboard_paste_text(clipboard: &ClipboardItem) -> anyhow::Result<Option<String>> {
+    if let Some(image) = clipboard.entries().iter().find_map(|entry| match entry {
+        ClipboardEntry::Image(image) if !image.bytes.is_empty() => Some(image),
+        _ => None,
+    }) {
+        let path = write_clipboard_image_to_temp_file(image)?;
+        return Ok(Some(quote_terminal_path_for_paste(
+            path.to_string_lossy().as_ref(),
+        )));
+    }
+
+    Ok(clipboard.text())
+}
+
+fn write_clipboard_image_to_temp_file(image: &Image) -> anyhow::Result<PathBuf> {
+    static CLIPBOARD_IMAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let directory = std::env::temp_dir().join("octty-clipboard");
+    fs::create_dir_all(&directory)?;
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let counter = CLIPBOARD_IMAGE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let extension = image_format_extension(image.format);
+    let file_path = directory.join(format!(
+        "clipboard-image-{now_ms}-{}-{counter}.{extension}",
+        std::process::id()
+    ));
+    fs::write(&file_path, &image.bytes)?;
+    Ok(file_path)
+}
+
+fn image_format_extension(format: ImageFormat) -> &'static str {
+    match format {
+        ImageFormat::Png => "png",
+        ImageFormat::Jpeg => "jpg",
+        ImageFormat::Webp => "webp",
+        ImageFormat::Gif => "gif",
+        ImageFormat::Svg => "svg",
+        ImageFormat::Bmp => "bmp",
+        ImageFormat::Tiff => "tiff",
+    }
+}
+
+fn quote_terminal_path_for_paste(path: &str) -> String {
+    if path.chars().all(is_safe_shell_path_char) {
+        return path.to_owned();
+    }
+
+    format!("'{}'", path.replace('\'', "'\\''"))
+}
+
+fn is_safe_shell_path_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric()
+        || matches!(
+            ch,
+            '_' | '.' | '/' | ':' | '@' | '%' | '+' | '=' | ',' | '-'
+        )
+}
+
 fn terminal_grid_point_from_mouse_position(
     position: Point<Pixels>,
     interaction: &TerminalGridInteractionState,
@@ -5357,6 +6360,38 @@ mod tests {
             terminal_paste_bytes("one\ntwo\r\nthree"),
             b"one\rtwo\rthree"
         );
+    }
+
+    #[test]
+    fn terminal_clipboard_paste_quotes_image_path_like_electron() {
+        assert_eq!(
+            quote_terminal_path_for_paste("/tmp/screenshot.png"),
+            "/tmp/screenshot.png"
+        );
+        assert_eq!(
+            quote_terminal_path_for_paste("/tmp/screen shot.png"),
+            "'/tmp/screen shot.png'"
+        );
+        assert_eq!(
+            quote_terminal_path_for_paste("/tmp/it's.png"),
+            "'/tmp/it'\\''s.png'"
+        );
+    }
+
+    #[test]
+    fn terminal_clipboard_paste_writes_image_to_temp_file() {
+        let image = Image::from_bytes(ImageFormat::Png, vec![1, 2, 3, 4]);
+        let clipboard = ClipboardItem::new_image(&image);
+
+        let paste = terminal_clipboard_paste_text(&clipboard)
+            .expect("image clipboard paste")
+            .expect("paste text");
+        let path = PathBuf::from(paste.trim_matches('\''));
+
+        assert!(path.is_absolute());
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("png"));
+        assert_eq!(fs::read(&path).expect("read temp image"), vec![1, 2, 3, 4]);
+        let _ = fs::remove_file(path);
     }
 
     #[test]
