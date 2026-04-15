@@ -167,10 +167,43 @@ pub(crate) async fn rename_workspace_and_reload(
     active_workspace_id: Option<String>,
 ) -> anyhow::Result<BootstrapState> {
     let store = TursoStore::open(store_path).await?;
+    let workspace = store
+        .list_workspaces()
+        .await?
+        .into_iter()
+        .find(|workspace| workspace.id == workspace_id)
+        .ok_or_else(|| anyhow::anyhow!("Workspace not found"))?;
+    if !has_recorded_workspace_path(&workspace.workspace_path) {
+        anyhow::bail!("Workspace path is not available; cannot rename JJ workspace");
+    }
+    let next_workspace_id = octty_jj::workspace_id_for(&workspace.root_path, &display_name);
+    if store
+        .list_workspaces()
+        .await?
+        .into_iter()
+        .any(|workspace| workspace.id == next_workspace_id && workspace.id != workspace_id)
+    {
+        anyhow::bail!("Workspace \"{display_name}\" already exists");
+    }
+    if display_name != workspace.workspace_name {
+        jj_rename_workspace(&workspace.workspace_path, &display_name).await?;
+    }
     store
-        .update_workspace_display_name(&workspace_id, &display_name)
+        .rename_workspace(
+            &workspace_id,
+            &next_workspace_id,
+            &display_name,
+            &display_name,
+        )
         .await?;
-    load_bootstrap_with_active(true, active_workspace_id).await
+    let next_active_workspace_id = active_workspace_id.map(|active_id| {
+        if active_id == workspace_id {
+            next_workspace_id
+        } else {
+            active_id
+        }
+    });
+    load_bootstrap_with_active(true, next_active_workspace_id).await
 }
 
 pub(crate) async fn remove_project_root_and_reload(

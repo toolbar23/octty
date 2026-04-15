@@ -37,7 +37,8 @@ use octty_core::{
 };
 use octty_jj::{
     create_workspace as jj_create_workspace, discover_workspaces,
-    forget_workspace as jj_forget_workspace, read_workspace_status, resolve_repo_root,
+    forget_workspace as jj_forget_workspace, read_workspace_status,
+    rename_workspace as jj_rename_workspace, resolve_repo_root,
 };
 use octty_store::{TursoStore, default_store_path};
 use octty_term::{

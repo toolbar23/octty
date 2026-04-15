@@ -53,7 +53,9 @@ import {
   discoverWorkspaces,
   forgetWorkspace as jjForgetWorkspace,
   readWorkspaceStatus,
+  renameWorkspace as jjRenameWorkspace,
   resolveRepoRoot,
+  workspaceIdFor,
 } from "./jj";
 import { shouldIgnoreWorkspaceWatchPath } from "./workspace-watch";
 import { PtySidecar } from "./pty-sidecar";
@@ -1083,8 +1085,45 @@ export class WorkspaceService {
       throw new Error("Display name cannot be empty");
     }
 
-    this.db.updateWorkspaceDisplayName(workspaceId, displayName);
-    const updated = this.db.listWorkspaces().find((item) => item.id === workspaceId);
+    if (!hasRecordedWorkspacePath(workspace.workspacePath)) {
+      throw new Error("Workspace path is not available; cannot rename JJ workspace");
+    }
+
+    const nextWorkspaceId = workspaceIdFor(workspace.rootPath, displayName);
+    const existingTarget = this.db
+      .listWorkspaces()
+      .find((item) => item.id === nextWorkspaceId && item.id !== workspaceId);
+    if (existingTarget) {
+      throw new Error(`Workspace "${displayName}" already exists`);
+    }
+
+    if (displayName !== workspace.workspaceName) {
+      await jjRenameWorkspace(workspace.workspacePath, displayName);
+    }
+    this.db.renameWorkspace(workspaceId, nextWorkspaceId, displayName, displayName);
+    this.ptySidecar.renameWorkspace(workspaceId, nextWorkspaceId);
+
+    const runtime = this.runtimes.get(workspaceId);
+    if (runtime) {
+      this.runtimes.delete(workspaceId);
+      runtime.workspaceId = nextWorkspaceId;
+      this.runtimes.set(nextWorkspaceId, runtime);
+    }
+
+    const refreshTimer = this.refreshTimers.get(workspaceId);
+    if (refreshTimer) {
+      clearTimeout(refreshTimer);
+      this.refreshTimers.delete(workspaceId);
+    }
+
+    const watcher = this.watchers.get(workspaceId);
+    if (watcher) {
+      await watcher.close();
+      this.watchers.delete(workspaceId);
+    }
+    await this.syncProjectRoot(workspace.rootId, workspace.rootPath);
+
+    const updated = this.db.listWorkspaces().find((item) => item.id === nextWorkspaceId);
     if (!updated) {
       throw new Error("Workspace not found after update");
     }

@@ -64,7 +64,7 @@ export async function withStaleWorkspaceRetry<T>(
   }
 }
 
-function hashWorkspace(rootPath: string, workspaceName: string): string {
+export function workspaceIdFor(rootPath: string, workspaceName: string): string {
   return createHash("sha1")
     .update(`${rootPath}\0${workspaceName}`)
     .digest("hex")
@@ -196,13 +196,13 @@ export async function discoverWorkspaces(rootPath: string): Promise<DiscoveredWo
         ).trim();
 
         return {
-          id: hashWorkspace(resolvedRootPath, workspaceName),
+          id: workspaceIdFor(resolvedRootPath, workspaceName),
           workspaceName,
           workspacePath: await realpath(workspacePath),
         };
       } catch {
         return {
-          id: hashWorkspace(resolvedRootPath, workspaceName),
+          id: workspaceIdFor(resolvedRootPath, workspaceName),
           workspaceName,
           workspacePath: fallbackWorkspacePath(
             resolvedRootPath,
@@ -230,6 +230,15 @@ export async function createWorkspace(
   }
   cmd.push(destinationPath);
   await runCheckedCommand(cmd);
+}
+
+export async function renameWorkspace(
+  workspacePath: string,
+  workspaceName: string,
+): Promise<void> {
+  await withStaleWorkspaceRetry(workspacePath, () =>
+    runCheckedCommand(["jj", "workspace", "rename", workspaceName], workspacePath),
+  );
 }
 
 export async function forgetWorkspace(

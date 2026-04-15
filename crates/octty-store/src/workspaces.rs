@@ -1,4 +1,4 @@
-use octty_core::{WorkspaceStatus, WorkspaceSummary};
+use octty_core::{WorkspaceSnapshot, WorkspaceStatus, WorkspaceSummary};
 use turso::params;
 
 use crate::{
@@ -96,6 +96,98 @@ impl TursoStore {
         )
         .await?;
         Ok(())
+    }
+
+    pub async fn rename_workspace(
+        &self,
+        workspace_id: &str,
+        next_workspace_id: &str,
+        workspace_name: &str,
+        display_name: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.connection().await?;
+        let mut snapshot_rows = conn
+            .query(
+                "select snapshot_json from workspace_snapshots where workspace_id = ?1",
+                [workspace_id],
+            )
+            .await?;
+        let snapshot_json = if let Some(row) = snapshot_rows.next().await? {
+            let mut snapshot: WorkspaceSnapshot =
+                serde_json::from_str(&text(row.get_value(0)?, "snapshot_json")?)?;
+            snapshot.workspace_id = next_workspace_id.to_owned();
+            Some(serde_json::to_string(&snapshot)?)
+        } else {
+            None
+        };
+        drop(snapshot_rows);
+
+        conn.execute("begin", ()).await?;
+        let result = async {
+            conn.execute(
+                "update workspaces
+                 set id = ?2,
+                     workspace_name = ?3,
+                     display_name = ?4,
+                     updated_at = unixepoch() * 1000
+                 where id = ?1",
+                params![
+                    workspace_id,
+                    next_workspace_id,
+                    workspace_name,
+                    display_name
+                ],
+            )
+            .await?;
+            if let Some(snapshot_json) = snapshot_json.as_deref() {
+                conn.execute(
+                    "update workspace_snapshots
+                     set workspace_id = ?2,
+                         snapshot_json = ?3,
+                         updated_at = unixepoch() * 1000
+                     where workspace_id = ?1",
+                    params![workspace_id, next_workspace_id, snapshot_json],
+                )
+                .await?;
+            } else {
+                conn.execute(
+                    "update workspace_snapshots
+                     set workspace_id = ?2,
+                         updated_at = unixepoch() * 1000
+                     where workspace_id = ?1",
+                    params![workspace_id, next_workspace_id],
+                )
+                .await?;
+            }
+            conn.execute(
+                "update note_state set workspace_id = ?2 where workspace_id = ?1",
+                params![workspace_id, next_workspace_id],
+            )
+            .await?;
+            conn.execute(
+                "update session_state set workspace_id = ?2 where workspace_id = ?1",
+                params![workspace_id, next_workspace_id],
+            )
+            .await?;
+            conn.execute(
+                "update pane_activity set workspace_id = ?2 where workspace_id = ?1",
+                params![workspace_id, next_workspace_id],
+            )
+            .await?;
+            Ok::<(), StoreError>(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => {
+                conn.execute("commit", ()).await?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = conn.execute("rollback", ()).await;
+                Err(error)
+            }
+        }
     }
 
     pub async fn delete_workspace(&self, workspace_id: &str) -> Result<(), StoreError> {

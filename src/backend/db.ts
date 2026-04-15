@@ -453,6 +453,58 @@ export class AppDatabase {
       .run(displayName, Date.now(), workspaceId);
   }
 
+  renameWorkspace(
+    workspaceId: string,
+    nextWorkspaceId: string,
+    workspaceName: string,
+    displayName: string,
+  ): void {
+    const updatedAt = Date.now();
+    const snapshotRow = this.db
+      .prepare("select snapshot_json as snapshotJson from workspace_snapshots where workspace_id = ?")
+      .get(workspaceId) as { snapshotJson: string } | undefined;
+    const snapshotJson = snapshotRow
+      ? JSON.stringify({
+          ...(JSON.parse(snapshotRow.snapshotJson) as WorkspaceSnapshot),
+          workspaceId: nextWorkspaceId,
+        })
+      : null;
+
+    this.db.exec("begin");
+    try {
+      this.db.exec("pragma defer_foreign_keys = ON");
+      this.db
+        .prepare(
+          "update workspaces set id = ?, workspace_name = ?, display_name = ?, updated_at = ? where id = ?",
+        )
+        .run(nextWorkspaceId, workspaceName, displayName, updatedAt, workspaceId);
+      if (snapshotJson) {
+        this.db
+          .prepare(
+            "update workspace_snapshots set workspace_id = ?, snapshot_json = ?, updated_at = ? where workspace_id = ?",
+          )
+          .run(nextWorkspaceId, snapshotJson, updatedAt, workspaceId);
+      } else {
+        this.db
+          .prepare("update workspace_snapshots set workspace_id = ?, updated_at = ? where workspace_id = ?")
+          .run(nextWorkspaceId, updatedAt, workspaceId);
+      }
+      this.db
+        .prepare("update note_state set workspace_id = ? where workspace_id = ?")
+        .run(nextWorkspaceId, workspaceId);
+      this.db
+        .prepare("update browser_refs set workspace_id = ? where workspace_id = ?")
+        .run(nextWorkspaceId, workspaceId);
+      this.db
+        .prepare("update session_state set workspace_id = ? where workspace_id = ?")
+        .run(nextWorkspaceId, workspaceId);
+      this.db.exec("commit");
+    } catch (error) {
+      this.db.exec("rollback");
+      throw error;
+    }
+  }
+
   updateWorkspaceProjectDisplayName(rootId: string, projectDisplayName: string): void {
     this.db
       .prepare("update workspaces set project_label = ?, updated_at = ? where root_id = ?")

@@ -1118,6 +1118,15 @@ function mergeWorkspace(
   return next.some((item) => item.id === workspace.id) ? next : [...next, workspace];
 }
 
+function replaceWorkspace(
+  workspaces: WorkspaceSummary[],
+  previousWorkspaceId: string,
+  workspace: WorkspaceSummary,
+): WorkspaceSummary[] {
+  const withoutPrevious = workspaces.filter((item) => item.id !== previousWorkspaceId);
+  return mergeWorkspace(withoutPrevious, workspace);
+}
+
 function mergeProjectRoot(
   roots: BootstrapPayload["projectRoots"],
   root: BootstrapPayload["projectRoots"][number],
@@ -1563,18 +1572,26 @@ function App(): React.ReactElement {
       const workspace = await desktop().updateWorkspaceDisplayName(workspaceId, nextDisplayName);
       setBootstrap((current) => ({
         ...current,
-        workspaces: mergeWorkspace(current.workspaces, workspace),
+        workspaces: replaceWorkspace(current.workspaces, workspaceId, workspace),
       }));
+      if (activeWorkspaceIdRef.current === workspaceId) {
+        setActiveWorkspaceId(workspace.id);
+      }
       setDetails((current) => {
         const detail = current[workspaceId];
         if (!detail) {
           return current;
         }
+        const { [workspaceId]: _previousDetail, ...rest } = current;
         return {
-          ...current,
-          [workspaceId]: {
+          ...rest,
+          [workspace.id]: {
             ...detail,
             workspace,
+            snapshot: {
+              ...detail.snapshot,
+              workspaceId: workspace.id,
+            },
           },
         };
       });
