@@ -2,34 +2,37 @@
 
 ## High-level structure
 
-Octty has three main layers:
+Octty is a Rust-only workspace. The application is split into focused Cargo crates:
 
-1. Electron-backed desktop application logic
-2. React renderer for the main view
-3. PTY sidecar process for terminal I/O
+- `octty-app`: GPUI application shell, taskspace UI, input handling, workspace watching, and live terminal orchestration
+- `octty-core`: domain types, pane/layout state, activity state, and shortcut assignment
+- `octty-store`: local Turso persistence and migrations
+- `octty-jj`: JJ workspace discovery and status calculation
+- `octty-term`: tmux launch/control, PTY-backed live terminal sessions, and `libghostty-vt` terminal state extraction
 
 Supporting those are:
 
-- SQLite for persisted app state
+- Turso/SQLite for persisted app state
 - tmux for durable terminal sessions
-- JJ and filesystem watchers for workspace status
+- JJ and filesystem watchers for workspace status refresh
 
 ## Process model
 
-### Electron main process
+### GPUI application
 
-Entrypoint: [main.ts](/home/pm/dev/workspac/src/electron/main.ts)
+Entrypoint: [crates/octty-app/src/main.rs](/home/pm/dev/workspac/crates/octty-app/src/main.rs)
 
 Responsibilities:
 
-- create the main `BrowserWindow`
-- own the preload bridge and IPC surface
-- forward backend events into renderer windows
-- handle desktop concerns such as dialogs and external URLs
+- start the Tokio runtime used by async app work
+- load bootstrap state from the store and JJ
+- create the GPUI window and root view
+- bind application actions, menus, and keyboard shortcuts
+- own the rendered taskspace state and live terminal handles
 
-### Workspace service
+### App coordination
 
-Core implementation: [service.ts](/home/pm/dev/workspac/src/backend/service.ts)
+Core implementation: [crates/octty-app/src/lib.rs](/home/pm/dev/workspac/crates/octty-app/src/lib.rs)
 
 Responsibilities:
 
@@ -38,27 +41,29 @@ Responsibilities:
 - maintain workspace summaries
 - load and save workspace snapshots
 - manage note files and note metadata
-- create, restore, detach, and close terminal sessions
-- broadcast updates to renderer clients over Electron IPC
+- create, restore, and close terminal sessions
+- reconcile pane activity and terminal attention state
+- refresh UI state after filesystem and JJ changes
 
-This is the main application coordinator.
+This is the main application coordinator. There is no separate JavaScript backend or IPC bridge.
 
-### PTY sidecar
+### Terminal runtime
 
-Entrypoint: [src/pty-host/index.mjs](/home/pm/dev/workspac/src/pty-host/index.mjs)  
-Controller: [pty-sidecar.ts](/home/pm/dev/workspac/src/backend/pty-sidecar.ts)
+Core implementation: [crates/octty-term/src/lib.rs](/home/pm/dev/workspac/crates/octty-term/src/lib.rs)
 
 Responsibilities:
 
-- spawn terminal processes through `node-pty`
-- stream terminal output back to the workspace service
-- accept input, resize, and kill commands
+- start and reuse tmux sessions for durable panes
+- run live PTY-backed terminal sessions
+- feed terminal bytes into `libghostty-vt`
+- expose grid snapshots, dirty rows, cursor state, and notifications to `octty-app`
+- accept input, resize, capture, and kill commands
 
-The sidecar exists so terminal I/O is separated from the rest of the app runtime.
+Terminal I/O is native Rust code. The old Node sidecar has been removed.
 
 ## Terminal architecture
 
-The terminal stack has three distinct responsibilities:
+The terminal stack has four distinct responsibilities:
 
 ### 1. Process durability: tmux
 
@@ -72,38 +77,36 @@ Important details:
 
 This prevents the app from accidentally inheriting or mutating the user's normal tmux environment.
 
-### 2. PTY transport: node-pty sidecar
+### 2. PTY transport: Rust live terminal runtime
 
-The PTY sidecar launches tmux and forwards:
+The Rust terminal runtime launches tmux inside a PTY and forwards:
 
 - output
 - input
 - resize events
 - exit events
 
-### 3. Rendering: ghostty-web
+### 3. Terminal model: libghostty-vt
 
-Renderer-side terminal panes use ghostty-web to display terminal state and handle input.
+Terminal output bytes are parsed by `libghostty-vt`. Octty extracts structured terminal snapshots with rows, cells, dirty-row information, cursor state, and colors.
+
+### 4. Rendering: GPUI
 
 This means:
 
 - tmux owns the durable shell session
-- the PTY sidecar owns I/O transport
-- ghostty-web owns terminal rendering in the pane
+- `octty-term` owns I/O transport and terminal state extraction
+- `octty-app` owns the GPUI paint model and taskspace layout
 
-Keeping those concerns separate is important. Replaying full shell history into a frontend renderer is not a good durability model.
+Keeping those concerns separate is important. Replaying full shell history into the UI is not a good durability model.
 
 ## Persistence model
 
-SQLite implementation: [db.ts](/home/pm/dev/workspac/src/backend/db.ts)
+Store implementation: [crates/octty-store/src/lib.rs](/home/pm/dev/workspac/crates/octty-store/src/lib.rs)
 
 Default DB path:
 
-- `~/.local/share/octty/state.sqlite`
-
-Legacy fallback:
-
-- `~/.local/share/workspace-orbit/state.sqlite`
+- `~/.local/share/octty-rs/state.turso`
 
 Main tables:
 
@@ -111,8 +114,8 @@ Main tables:
 - `workspaces`
 - `workspace_snapshots`
 - `note_state`
-- `browser_refs`
 - `session_state`
+- `pane_activity`
 
 ### What is persisted
 
@@ -135,9 +138,9 @@ Main tables:
 - exit code
 - buffered transcript
 
-`browser_refs` stores per-pane browser references.
-
 `note_state` stores note read state and note metadata, while note content itself stays on disk as markdown files.
+
+`pane_activity` stores activity markers used to tell whether terminal panes and workspaces have new unseen output.
 
 ## Filesystem model
 
@@ -159,9 +162,9 @@ That keeps Octty aligned with the actual repo state instead of inventing a separ
 
 ## Layout model
 
-Shared layout logic: [src/shared/layout.ts](/home/pm/dev/workspac/src/shared/layout.ts)
+Layout logic: [crates/octty-core/src/layout.rs](/home/pm/dev/workspac/crates/octty-core/src/layout.rs)
 
-Primary types: [src/shared/types.ts](/home/pm/dev/workspac/src/shared/types.ts)
+Primary types: [crates/octty-core/src/types.rs](/home/pm/dev/workspac/crates/octty-core/src/types.rs)
 
 The layout model is column-based:
 
@@ -171,11 +174,11 @@ The layout model is column-based:
 - left and right pinned columns are explicit
 - center columns are ordered independently
 
-This lets the renderer mutate layout without mixing geometry with pane content state.
+This lets the app mutate layout without mixing geometry with pane content state.
 
-## Renderer model
+## UI model
 
-Renderer entrypoint: [src/mainview/index.tsx](/home/pm/dev/workspac/src/mainview/index.tsx)
+Taskspace rendering: [crates/octty-app/src/taskspace.rs](/home/pm/dev/workspac/crates/octty-app/src/taskspace.rs)
 
 Responsibilities:
 
@@ -183,27 +186,27 @@ Responsibilities:
 - render sidebar and taskspace
 - manage pane focus and keyboard navigation
 - connect terminal panes to the terminal runtime
-- update browser, note, and diff panes
+- update shell, note, and diff panes
 
-The renderer should be treated as a projection of durable state plus live runtime handles, not as the source of truth for everything.
+The UI should be treated as a projection of durable state plus live runtime handles, not as the source of truth for everything.
 
 ## Event flow
 
 Typical workspace open flow:
 
-1. renderer asks backend to open a workspace
-2. backend loads workspace summary, notes, and saved snapshot
-3. backend restores terminal payload state from saved session metadata
-4. renderer mounts panes
+1. app selects a workspace
+2. store and JJ data load workspace summary, notes, and saved snapshot
+3. app restores terminal payload state from saved session metadata
+4. GPUI taskspace mounts panes
 5. terminal panes create or reattach to tmux-backed sessions
 
 Typical terminal flow:
 
-1. renderer requests session creation
-2. backend asks PTY sidecar to spawn tmux
-3. PTY sidecar streams output back
-4. backend broadcasts `terminal-output`
-5. renderer writes output into ghostty-web
+1. app creates a terminal pane
+2. `octty-term` creates or reuses a tmux session
+3. PTY bytes feed `libghostty-vt`
+4. dirty terminal snapshots flow back to `octty-app`
+5. GPUI repaints the affected terminal rows
 
 ## Watching and status refresh
 
@@ -213,56 +216,42 @@ Workspace status is updated from a combination of:
 - filesystem watching
 - explicit refresh paths after relevant actions
 
-The primary workspace status is JJ-native rather than Git-style dirty/clean.
-The service exposes independent markers instead of forcing all work into one
-state:
+The primary workspace status is JJ-native rather than Git-style dirty/clean. The service exposes independent markers instead of forcing all work into one state:
 
 - `published`: no non-empty workspace changes are outside remote bookmarks
 - `unpublished`: non-empty workspace changes outside remote bookmarks
 - `not in default`: non-empty workspace changes not contained in `default@`
 - `conflicted`: unresolved conflicts in the effective workspace commit
 
-The current working-copy diff is still tracked separately for the diff pane and
-for secondary status detail.
+The current working-copy diff is still tracked separately for the diff pane and for secondary status detail.
 
-Watch paths intentionally ignore heavy/noisy generated directories, but include
-`.jj` so JJ operations can refresh published/unpublished workspace markers.
-Ignored paths include:
+Watch paths intentionally ignore heavy/noisy generated directories, but include `.jj` so JJ operations can refresh published/unpublished workspace markers. Ignored paths include:
 
 - `.git`
 - `node_modules`
 - `dist`
+- `target`
 - `.cache`
 
 This is a pragmatic compromise to avoid self-inflicted watch storms.
 
 ## Shortcut architecture
 
-Some app shortcuts are routed through Electrobun's native/global shortcut bridge instead of renderer-only DOM handlers.
-
-Reason:
-
-- embedded browser/webview focus can bypass renderer keyboard handlers
-
-So pane/workspace navigation and pane-close handling need a native interception path to stay reliable.
+Shortcuts are GPUI actions bound at application startup. Workspace navigation, pane creation, pane close, and terminal focus behavior live in the Rust action layer.
 
 ## Known tradeoffs
 
-### Browser integration
+### Terminal rendering
 
-The embedded browser is currently the least stable pane type. It is useful, but more fragile than notes or diff panes.
-
-### Legacy compatibility
-
-The current code still contains compatibility fallbacks for the old product name and old tmux session prefixes so existing local setups are not broken during the rename to Octty.
+The current terminal renderer uses GPUI paint primitives over snapshots extracted from `libghostty-vt`. This is much closer to a terminal model than the old UI, but [docs/terminal-render-plan.md](/home/pm/dev/workspac/docs/terminal-render-plan.md) still tracks work toward a dedicated batched terminal surface.
 
 ### State layering
 
 There is unavoidable complexity because Octty mixes:
 
 - filesystem state
-- SQLite metadata
+- Turso metadata
 - live tmux sessions
-- renderer-local view state
+- GPUI view state
 
 The architecture works best when those layers stay clearly separated.

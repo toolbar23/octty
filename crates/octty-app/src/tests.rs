@@ -343,7 +343,7 @@ fn terminal_paste_normalizes_newlines_to_carriage_returns() {
 }
 
 #[test]
-fn terminal_clipboard_paste_quotes_image_path_like_electron() {
+fn terminal_clipboard_paste_quotes_image_path() {
     assert_eq!(
         quote_terminal_path_for_paste("/tmp/screenshot.png"),
         "/tmp/screenshot.png"

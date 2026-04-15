@@ -365,7 +365,6 @@ fn tmux_config_path() -> PathBuf {
 fn tmux_cache_dir() -> PathBuf {
     env_path("OCTTY_RS_CACHE_PATH")
         .or_else(|| env_path("OCTTY_CACHE_PATH"))
-        .or_else(|| env_path("WORKSPACE_ORBIT_CACHE_PATH"))
         .unwrap_or_else(|| {
             home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))

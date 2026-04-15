@@ -8,7 +8,7 @@ It is built around a few assumptions:
 
 - the filesystem is the source of truth for projects, workspaces, and notes
 - the app should reopen quickly and restore where the user left off
-- shells, agents, notes, diffs, and browser references belong in one tiled taskspace
+- shells, agents, notes, and diffs belong in one tiled taskspace
 - JJ workspaces are a first-class concept, not an afterthought
 
 The product is closer to a persistent workspace runtime than to a single terminal window.
@@ -34,7 +34,7 @@ Octty keeps durable state on the local machine:
 
 - workspace metadata comes from the filesystem and JJ
 - note contents live as `*.note.md` files in the workspace directory
-- UI snapshots, browser references, note read state, and terminal session metadata live in local SQLite
+- UI snapshots, note read state, terminal session metadata, and pane activity live in local Turso storage
 
 This keeps the system debuggable and easy to reason about.
 
@@ -82,7 +82,6 @@ The app should restore:
 - pane layout
 - shell and agent sessions
 - notes
-- browser references
 - diff state
 
 Persistence is explicit in the data model instead of being reconstructed from transient UI state alone.
@@ -102,12 +101,11 @@ A workspace is one JJ workspace associated with that root. Multiple workspaces c
 
 ## Pane model
 
-Octty currently supports five pane types:
+Octty currently supports four active pane types:
 
 - shell
 - agent-shell
 - note
-- browser
 - diff
 
 The shared layout model stores panes independently from columns. Columns point to pane IDs, which allows panes to move without rewriting the rest of the workspace snapshot.
@@ -116,7 +114,6 @@ Default width policy today:
 
 - shell / agent / diff: about one third of viewport width
 - note: narrower
-- browser: wider
 
 This keeps the common working set practical without manual resizing every time.
 
@@ -131,32 +128,21 @@ Octty uses tmux for shell/session durability because tmux already solves:
 - capture of current screen state
 - resilience across UI reloads
 
-This is cleaner than treating the frontend terminal renderer as the durable source of truth.
+This is cleaner than treating the UI terminal renderer as the durable source of truth.
 
-## Why ghostty-web
+## Why libghostty-vt
 
-Ghostty-web is used as the in-app terminal renderer.
+Octty uses `libghostty-vt` as the in-app terminal model.
 
-Its job is rendering and terminal input handling inside the pane. It should not be treated as the durable owner of the shell session. That ownership belongs to tmux and the PTY sidecar.
-
-## Browser pane design
-
-The browser pane is useful for:
-
-- docs
-- issue trackers
-- local dashboards
-- references tied to a workspace
-
-The browser is intentionally embedded as a tool pane, not as a full browser replacement. Its value is contextual persistence inside the same taskspace as the shells and notes.
+Its job is parsing terminal bytes and exposing terminal state to the Rust UI. It should not be treated as the durable owner of the shell session. That ownership belongs to tmux.
 
 ## Current rough edges
 
 Some areas are still MVP-grade:
 
-- browser focus can interfere with app-level shortcut behavior, so some shortcuts are routed through the native shortcut bridge
-- the browser implementation is more fragile than the note/diff/shell panes
-- terminal restore and workspace switching have been under active stabilization
+- note and diff panes are still simple compared with terminal panes
+- terminal restore and workspace switching are still under active stabilization
+- the GPUI terminal paint path is improving, but a dedicated batched terminal surface may still be needed
 
 These are implementation constraints, not product goals.
 

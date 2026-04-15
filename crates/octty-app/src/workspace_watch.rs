@@ -12,10 +12,7 @@ const DEFAULT_IGNORED_WORKSPACE_PATH_FRAGMENTS: &[&str] = &[
     "/.idea/",
 ];
 
-const WORKSPACE_WATCH_IGNORE_ENV_KEYS: &[&str] = &[
-    "OCTTY_WORKSPACE_WATCH_IGNORE",
-    "WORKSPACE_ORBIT_WORKSPACE_WATCH_IGNORE",
-];
+const WORKSPACE_WATCH_IGNORE_ENV_KEYS: &[&str] = &["OCTTY_WORKSPACE_WATCH_IGNORE"];
 
 pub(crate) struct WorkspacePathWatcher {
     pub(crate) path: String,

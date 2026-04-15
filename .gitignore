@@ -1,6 +1,2 @@
-build/
-dist/
-squashfs-root/
-node_modules/
 target/
 *.log
