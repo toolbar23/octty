@@ -637,9 +637,9 @@ impl OcttyApp {
         let store_path = self.store_path.clone();
         let answer = window.prompt(
             PromptLevel::Warning,
-            "Remove this project root from Octty?",
+            "Forget this project root from Octty?",
             Some(root.root_path.as_str()),
-            &["Remove", "Cancel"],
+            &["Forget", "Cancel"],
             cx,
         );
         cx.spawn(async move |this, cx| {
@@ -656,7 +656,7 @@ impl OcttyApp {
                 match result {
                     Ok(bootstrap) => app.apply_bootstrap(bootstrap, cx),
                     Err(error) => {
-                        app.status = format!("Failed to remove project root: {error:#}").into();
+                        app.status = format!("Failed to forget project root: {error:#}").into();
                     }
                 }
                 cx.notify();
@@ -769,7 +769,7 @@ impl OcttyApp {
             ),
             SidebarMenuEntry::Separator,
             SidebarMenuEntry::item(
-                "Remove",
+                "Forget",
                 SidebarMenuAction::RemoveProjectRoot(root_id.to_owned()),
             ),
         ]
@@ -1409,9 +1409,15 @@ impl OcttyApp {
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(index) = workspace_shortcut_index_from_key_event(event) {
+            self.open_workspace(&OpenWorkspaceShortcut { index }, window, cx);
+            cx.stop_propagation();
+            return;
+        }
+
         let Some(input) = terminal_input_from_key_event(event) else {
             return;
         };
@@ -3672,6 +3678,51 @@ fn terminal_input_from_key_event(event: &KeyDownEvent) -> Option<TerminalInput> 
     .map(TerminalInput::LiveKey)
 }
 
+fn workspace_shortcut_index_from_key_event(event: &KeyDownEvent) -> Option<usize> {
+    workspace_shortcut_index_from_key_parts(
+        &event.keystroke.key,
+        event.keystroke.key_char.as_deref(),
+        event.keystroke.modifiers.control,
+        event.keystroke.modifiers.alt,
+        event.keystroke.modifiers.shift,
+        event.keystroke.modifiers.platform,
+        event.keystroke.modifiers.function,
+    )
+}
+
+fn workspace_shortcut_index_from_key_parts(
+    key: &str,
+    key_char: Option<&str>,
+    control: bool,
+    alt: bool,
+    shift: bool,
+    platform: bool,
+    function: bool,
+) -> Option<usize> {
+    if !control || !shift || alt || platform || function {
+        return None;
+    }
+
+    workspace_shortcut_index_from_token(key)
+        .or_else(|| key_char.and_then(workspace_shortcut_index_from_token))
+}
+
+fn workspace_shortcut_index_from_token(token: &str) -> Option<usize> {
+    match token {
+        "1" | "!" => Some(0),
+        "2" | "@" => Some(1),
+        "3" | "#" => Some(2),
+        "4" | "$" => Some(3),
+        "5" | "%" => Some(4),
+        "6" | "^" => Some(5),
+        "7" | "&" => Some(6),
+        "8" | "*" => Some(7),
+        "9" | "(" => Some(8),
+        "0" | ")" => Some(9),
+        _ => None,
+    }
+}
+
 fn live_terminal_input_from_key_parts(
     key: &str,
     key_char: Option<&str>,
@@ -3684,12 +3735,8 @@ fn live_terminal_input_from_key_parts(
     if function {
         return None;
     }
-    if control
-        && shift
-        && matches!(
-            key,
-            "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
-        )
+    if workspace_shortcut_index_from_key_parts(key, key_char, control, alt, shift, platform, false)
+        .is_some()
     {
         return None;
     }
@@ -6278,11 +6325,71 @@ mod tests {
             None
         );
         assert_eq!(
+            live_terminal_input_from_key_parts("!", Some("!"), true, false, true, false, false),
+            None
+        );
+        assert_eq!(
             live_terminal_input_from_key_parts("up", None, true, false, true, false, false),
             None
         );
         assert_eq!(
             live_terminal_input_from_key_parts("down", None, true, false, true, false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn workspace_shortcut_index_accepts_shifted_digit_key_tokens() {
+        assert_eq!(
+            workspace_shortcut_index_from_key_parts(
+                "1",
+                Some("!"),
+                true,
+                false,
+                true,
+                false,
+                false
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            workspace_shortcut_index_from_key_parts(
+                "0",
+                Some(")"),
+                true,
+                false,
+                true,
+                false,
+                false
+            ),
+            Some(9)
+        );
+        assert_eq!(
+            workspace_shortcut_index_from_key_parts(
+                "!",
+                Some("!"),
+                true,
+                false,
+                true,
+                false,
+                false
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            workspace_shortcut_index_from_key_parts(
+                "1",
+                Some("!"),
+                true,
+                false,
+                false,
+                false,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            workspace_shortcut_index_from_key_parts("1", Some("!"), true, true, true, false, false),
             None
         );
     }
