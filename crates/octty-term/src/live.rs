@@ -1,10 +1,13 @@
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
+    fs::{File, OpenOptions, create_dir_all},
+    hash::{DefaultHasher, Hash, Hasher},
     io::{Read, Write},
+    path::PathBuf,
     sync::{Arc, mpsc},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use libghostty_vt::{
@@ -28,22 +31,28 @@ const LIVE_TERMINAL_IDLE_TIMEOUT: Duration = Duration::from_millis(100);
 const LIVE_TERMINAL_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(33);
 const LIVE_TERMINAL_INTERACTIVE_OUTPUT_WINDOW: Duration = Duration::from_millis(150);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct TerminalRgb {
     pub r: u8,
     pub g: u8,
     pub b: u8,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct TerminalCellSnapshot {
     pub text: String,
+    pub width: u8,
     pub fg: Option<TerminalRgb>,
     pub bg: Option<TerminalRgb>,
     pub bold: bool,
     pub italic: bool,
+    pub faint: bool,
+    pub blink: bool,
     pub underline: bool,
     pub inverse: bool,
+    pub invisible: bool,
+    pub strikethrough: bool,
+    pub overline: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,9 +75,17 @@ pub struct TerminalGridSnapshot {
     pub default_fg: TerminalRgb,
     pub default_bg: TerminalRgb,
     pub cursor: Option<TerminalCursorSnapshot>,
+    pub damage: TerminalDamageSnapshot,
     pub rows_data: Vec<TerminalRowSnapshot>,
     pub plain_text: String,
     pub timing: TerminalSnapshotTiming,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TerminalDamageSnapshot {
+    pub full: bool,
+    pub rows: Vec<u16>,
+    pub cells: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -81,6 +98,8 @@ pub struct TerminalSnapshotTiming {
     pub snapshot_build_micros: u64,
     pub snapshot_cells: u32,
     pub snapshot_text_cells: u32,
+    pub dirty_rows: u32,
+    pub dirty_cells: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -302,6 +321,59 @@ pub fn spawn_live_terminal_with_notifier(
     })
 }
 
+pub fn replay_terminal_bytes(
+    session_id: &str,
+    bytes: &[u8],
+    cols: u16,
+    rows: u16,
+) -> Result<TerminalGridSnapshot, TerminalError> {
+    replay_terminal_steps(session_id, cols, rows, [TerminalReplayStep::Output(bytes)])
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum TerminalReplayStep<'a> {
+    Output(&'a [u8]),
+    Resize { cols: u16, rows: u16 },
+}
+
+pub fn replay_terminal_steps<'a>(
+    session_id: &str,
+    cols: u16,
+    rows: u16,
+    steps: impl IntoIterator<Item = TerminalReplayStep<'a>>,
+) -> Result<TerminalGridSnapshot, TerminalError> {
+    let mut terminal = Terminal::new(TerminalOptions {
+        cols,
+        rows,
+        max_scrollback: 10_000,
+    })
+    .map_err(renderer_error)?;
+    terminal
+        .resize(
+            cols,
+            rows,
+            u32::from(DEFAULT_CELL_WIDTH),
+            u32::from(DEFAULT_CELL_HEIGHT),
+        )
+        .map_err(renderer_error)?;
+    for step in steps {
+        match step {
+            TerminalReplayStep::Output(bytes) => terminal.vt_write(bytes),
+            TerminalReplayStep::Resize { cols, rows } => terminal
+                .resize(
+                    cols,
+                    rows,
+                    u32::from(DEFAULT_CELL_WIDTH),
+                    u32::from(DEFAULT_CELL_HEIGHT),
+                )
+                .map_err(renderer_error)?,
+        }
+    }
+
+    let mut renderer = SnapshotExtractor::new()?;
+    renderer.snapshot(session_id, &terminal)
+}
+
 fn read_pty_loop(mut reader: Box<dyn Read + Send>, command_tx: mpsc::Sender<LiveTerminalCommand>) {
     let mut buffer = vec![0; 8192];
     loop {
@@ -363,6 +435,8 @@ impl LiveTerminalRuntime {
         let mut interactive_output_until: Option<Instant> = None;
         let mut pending_vt_write_micros = 0u64;
         let mut pending_pty_output_bytes = 0u64;
+        let mut recorder =
+            TerminalTraceRecorder::from_env(&self.session_id, self.spec.cols, self.spec.rows);
 
         loop {
             let mut processed_commands = 0usize;
@@ -394,7 +468,13 @@ impl LiveTerminalRuntime {
                 );
                 let command_received_at = Instant::now();
                 processed_commands += 1;
-                let effect = self.handle_command(command, &mut terminal, &mut input, &grid_size)?;
+                let effect = self.handle_command(
+                    command,
+                    &mut terminal,
+                    &mut input,
+                    &grid_size,
+                    recorder.as_mut(),
+                )?;
                 if effect.shutdown {
                     return Ok(());
                 }
@@ -402,7 +482,7 @@ impl LiveTerminalRuntime {
                     pending_vt_write_micros.saturating_add(effect.vt_write_micros);
                 pending_pty_output_bytes =
                     pending_pty_output_bytes.saturating_add(effect.pty_output_bytes);
-                drain_pty_responses(&mut self.writer, &pty_responses)?;
+                drain_pty_responses(&mut self.writer, &pty_responses, recorder.as_mut())?;
                 if is_interactive_input {
                     interactive_output_until =
                         Some(command_received_at + LIVE_TERMINAL_INTERACTIVE_OUTPUT_WINDOW);
@@ -440,7 +520,12 @@ impl LiveTerminalRuntime {
                     snapshot_build_micros: micros_since(snapshot_started_at, snapshot_finished_at),
                     snapshot_cells: snapshot.timing.snapshot_cells,
                     snapshot_text_cells: snapshot.timing.snapshot_text_cells,
+                    dirty_rows: snapshot.timing.dirty_rows,
+                    dirty_cells: snapshot.timing.dirty_cells,
                 };
+                if let Some(recorder) = recorder.as_mut() {
+                    recorder.record_snapshot(&snapshot);
+                }
                 if self.snapshot_tx.send(snapshot).is_ok() {
                     self.snapshot_notifier.notify();
                 }
@@ -468,23 +553,33 @@ impl LiveTerminalRuntime {
         terminal: &mut Terminal<'a, 'a>,
         input: &mut KeyInputEncoder<'a>,
         grid_size: &Cell<(u16, u16)>,
+        mut recorder: Option<&mut TerminalTraceRecorder>,
     ) -> Result<LiveTerminalCommandEffect, TerminalError> {
         match command {
             LiveTerminalCommand::Key(key_input) => {
                 let bytes = input.encode(terminal, key_input)?;
                 if !bytes.is_empty() {
+                    if let Some(recorder) = recorder.as_mut() {
+                        recorder.record_input("key", &bytes);
+                    }
                     self.writer.write_all(&bytes)?;
                     self.writer.flush()?;
                 }
                 Ok(LiveTerminalCommandEffect::unchanged())
             }
             LiveTerminalCommand::Bytes(bytes) => {
+                if let Some(recorder) = recorder.as_mut() {
+                    recorder.record_input("bytes", &bytes);
+                }
                 self.writer.write_all(&bytes)?;
                 self.writer.flush()?;
                 Ok(LiveTerminalCommandEffect::unchanged())
             }
             LiveTerminalCommand::Output(bytes) => {
                 let byte_count = bytes.len() as u64;
+                if let Some(recorder) = recorder.as_mut() {
+                    recorder.record_output(&bytes);
+                }
                 let vt_write_started_at = Instant::now();
                 terminal.vt_write(&bytes);
                 Ok(LiveTerminalCommandEffect::changed_with_vt_write(
@@ -512,10 +607,16 @@ impl LiveTerminalRuntime {
                         pixel_height: resize.pixel_height,
                     })
                     .map_err(|error| TerminalError::Pty(error.to_string()))?;
+                if let Some(recorder) = recorder.as_mut() {
+                    recorder.record_resize(cols, rows, resize.pixel_width, resize.pixel_height);
+                }
                 Ok(LiveTerminalCommandEffect::changed_now())
             }
             LiveTerminalCommand::Scroll(lines) => {
                 terminal.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(lines));
+                if let Some(recorder) = recorder.as_mut() {
+                    recorder.record_event("scroll", &format!("lines={lines}"));
+                }
                 Ok(LiveTerminalCommandEffect::changed_now())
             }
             LiveTerminalCommand::Shutdown => Ok(LiveTerminalCommandEffect {
@@ -615,7 +716,9 @@ fn install_terminal_effects<'a>(
 ) -> Result<(), TerminalError> {
     terminal
         .on_pty_write(|_terminal, data| {
-            pty_responses.borrow_mut().push_back(data.to_vec());
+            if !terminal_pty_response_is_xtversion(data) {
+                pty_responses.borrow_mut().push_back(data.to_vec());
+            }
         })
         .map_err(renderer_error)?
         .on_size(move |_terminal| {
@@ -647,28 +750,216 @@ fn install_terminal_effects<'a>(
             })
         })
         .map_err(renderer_error)?
-        .on_xtversion(|_terminal| Some("octty-rs"))
-        .map_err(renderer_error)?
         .on_color_scheme(|_terminal| None)
         .map_err(renderer_error)?;
     Ok(())
 }
 
+fn terminal_pty_response_is_xtversion(data: &[u8]) -> bool {
+    data.starts_with(b"\x1bP>|") && data.ends_with(b"\x1b\\")
+}
+
 fn drain_pty_responses(
     writer: &mut Box<dyn Write + Send>,
     pty_responses: &RefCell<VecDeque<Vec<u8>>>,
+    mut recorder: Option<&mut TerminalTraceRecorder>,
 ) -> Result<(), TerminalError> {
     while let Some(response) = pty_responses.borrow_mut().pop_front() {
+        if let Some(recorder) = recorder.as_mut() {
+            recorder.record_input("pty-response", &response);
+        }
         writer.write_all(&response)?;
     }
     writer.flush()?;
     Ok(())
 }
 
+struct TerminalTraceRecorder {
+    started_at: Instant,
+    output: File,
+    events: File,
+    output_offset: u64,
+}
+
+impl TerminalTraceRecorder {
+    fn from_env(session_id: &str, cols: u16, rows: u16) -> Option<Self> {
+        let dir = std::env::var_os("OCTTY_TERMINAL_RECORD_DIR")?;
+        let dir = PathBuf::from(dir);
+        if let Err(error) = create_dir_all(&dir) {
+            eprintln!(
+                "[octty-term] failed to create terminal record dir `{}`: {error}",
+                dir.display()
+            );
+            return None;
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default();
+        let basename = format!("{stamp}-{}", terminal_trace_safe_name(session_id));
+        let output_path = dir.join(format!("{basename}.pty"));
+        let events_path = dir.join(format!("{basename}.events"));
+        let output = match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&output_path)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                eprintln!(
+                    "[octty-term] failed to create terminal output record `{}`: {error}",
+                    output_path.display()
+                );
+                return None;
+            }
+        };
+        let events = match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&events_path)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                eprintln!(
+                    "[octty-term] failed to create terminal event record `{}`: {error}",
+                    events_path.display()
+                );
+                return None;
+            }
+        };
+
+        let mut recorder = Self {
+            started_at: Instant::now(),
+            output,
+            events,
+            output_offset: 0,
+        };
+        recorder.record_event(
+            "start",
+            &format!(
+                "session={session_id} cols={cols} rows={rows} output={}",
+                output_path.display()
+            ),
+        );
+        Some(recorder)
+    }
+
+    fn record_output(&mut self, bytes: &[u8]) {
+        let offset = self.output_offset;
+        if self.output.write_all(bytes).is_ok() {
+            let _ = self.output.flush();
+            self.output_offset = self.output_offset.saturating_add(bytes.len() as u64);
+        }
+        self.record_event(
+            "output",
+            &format!(
+                "offset={offset} len={} hex={}",
+                bytes.len(),
+                terminal_trace_hex_prefix(bytes, 48)
+            ),
+        );
+    }
+
+    fn record_input(&mut self, source: &str, bytes: &[u8]) {
+        self.record_event(
+            "input",
+            &format!(
+                "source={source} len={} hex={}",
+                bytes.len(),
+                terminal_trace_hex_prefix(bytes, 48)
+            ),
+        );
+    }
+
+    fn record_resize(&mut self, cols: u16, rows: u16, pixel_width: u16, pixel_height: u16) {
+        self.record_event(
+            "resize",
+            &format!(
+                "cols={cols} rows={rows} pixel_width={pixel_width} pixel_height={pixel_height}"
+            ),
+        );
+    }
+
+    fn record_snapshot(&mut self, snapshot: &TerminalGridSnapshot) {
+        let cursor = snapshot
+            .cursor
+            .as_ref()
+            .map(|cursor| format!("{},{}", cursor.col, cursor.row))
+            .unwrap_or_else(|| "none".to_owned());
+        self.record_event(
+            "snapshot",
+            &format!(
+                "cols={} rows={} cursor={} damage_full={} dirty_rows={} dirty_cells={} text_cells={} output_offset={}",
+                snapshot.cols,
+                snapshot.rows,
+                cursor,
+                snapshot.damage.full,
+                terminal_trace_rows(&snapshot.damage.rows),
+                snapshot.damage.cells,
+                snapshot.timing.snapshot_text_cells,
+                self.output_offset
+            ),
+        );
+    }
+
+    fn record_event(&mut self, kind: &str, detail: &str) {
+        let micros = self.started_at.elapsed().as_micros();
+        let _ = writeln!(self.events, "{micros} kind={kind} {detail}");
+        let _ = self.events.flush();
+    }
+}
+
+fn terminal_trace_safe_name(name: &str) -> String {
+    let safe: String = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe.is_empty() {
+        "terminal".to_owned()
+    } else {
+        safe
+    }
+}
+
+fn terminal_trace_hex_prefix(bytes: &[u8], max_bytes: usize) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let len = bytes.len().min(max_bytes);
+    let mut encoded = String::with_capacity(len.saturating_mul(2) + 3);
+    for byte in &bytes[..len] {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    if bytes.len() > max_bytes {
+        encoded.push_str("...");
+    }
+    encoded
+}
+
+fn terminal_trace_rows(rows: &[u16]) -> String {
+    let mut output = String::new();
+    for (index, row) in rows.iter().enumerate() {
+        if index > 0 {
+            output.push(',');
+        }
+        output.push_str(&row.to_string());
+    }
+    output
+}
+
 struct SnapshotExtractor<'alloc> {
     render_state: RenderState<'alloc>,
     row_iter: RowIterator<'alloc>,
     cell_iter: CellIterator<'alloc>,
+    previous_row_hashes: Vec<u64>,
+    previous_cursor_row: Option<u16>,
+    previous_size: Option<(u16, u16)>,
 }
 
 impl<'alloc> SnapshotExtractor<'alloc> {
@@ -677,6 +968,9 @@ impl<'alloc> SnapshotExtractor<'alloc> {
             render_state: RenderState::new().map_err(renderer_error)?,
             row_iter: RowIterator::new().map_err(renderer_error)?,
             cell_iter: CellIterator::new().map_err(renderer_error)?,
+            previous_row_hashes: Vec::new(),
+            previous_cursor_row: None,
+            previous_size: None,
         })
     }
 
@@ -686,16 +980,22 @@ impl<'alloc> SnapshotExtractor<'alloc> {
         terminal: &Terminal<'alloc, '_>,
     ) -> Result<TerminalGridSnapshot, TerminalError> {
         let update_started_at = Instant::now();
-        let snapshot = self.render_state.update(terminal).map_err(renderer_error)?;
+        let snapshot = self
+            .render_state
+            .update(terminal)
+            .map_err(renderer_context("render state update"))?;
         let snapshot_update_micros = micros_since(update_started_at, Instant::now());
         let extract_started_at = Instant::now();
-        let colors = snapshot.colors().map_err(renderer_error)?;
+        let colors = snapshot.colors().map_err(renderer_context("read colors"))?;
         let default_fg = terminal_rgb(colors.foreground);
         let default_bg = terminal_rgb(colors.background);
-        let cursor = if snapshot.cursor_visible().map_err(renderer_error)? {
+        let cursor = if snapshot
+            .cursor_visible()
+            .map_err(renderer_context("read cursor visibility"))?
+        {
             snapshot
                 .cursor_viewport()
-                .map_err(renderer_error)?
+                .map_err(renderer_context("read cursor viewport"))?
                 .map(|viewport| TerminalCursorSnapshot {
                     col: viewport.x,
                     row: viewport.y,
@@ -704,24 +1004,52 @@ impl<'alloc> SnapshotExtractor<'alloc> {
         } else {
             None
         };
-        let cols = snapshot.cols().map_err(renderer_error)?;
-        let rows = snapshot.rows().map_err(renderer_error)?;
+        let cols = snapshot.cols().map_err(renderer_context("read cols"))?;
+        let rows = snapshot.rows().map_err(renderer_context("read rows"))?;
         let mut rows_data = Vec::with_capacity(rows as usize);
         let mut plain_text = String::new();
-        let mut row_iteration = self.row_iter.update(&snapshot).map_err(renderer_error)?;
+        let mut row_iteration = self
+            .row_iter
+            .update(&snapshot)
+            .map_err(renderer_context("update row iterator"))?;
         let mut snapshot_cells = 0u32;
         let mut snapshot_text_cells = 0u32;
+        let mut dirty_rows = Vec::new();
+        let mut row_hashes = Vec::with_capacity(rows as usize);
+        let size_changed = self.previous_size != Some((cols, rows));
 
+        let mut row_index = 0u16;
         while let Some(row) = row_iteration.next() {
             let mut cells = Vec::with_capacity(cols as usize);
             let mut row_text = String::new();
-            let mut cell_iteration = self.cell_iter.update(row).map_err(renderer_error)?;
+            let mut cell_iteration = self
+                .cell_iter
+                .update(row)
+                .map_err(renderer_context("update cell iterator"))?;
             while let Some(cell) = cell_iteration.next() {
-                let graphemes = cell.graphemes().map_err(renderer_error)?;
+                let graphemes = cell
+                    .graphemes()
+                    .map_err(renderer_context("read cell graphemes"))?;
                 let text: String = graphemes.into_iter().collect();
-                let style = cell.style().map_err(renderer_error)?;
-                let fg = cell.fg_color().map_err(renderer_error)?.map(terminal_rgb);
-                let bg = cell.bg_color().map_err(renderer_error)?.map(terminal_rgb);
+                let style = cell.style().map_err(renderer_context("read cell style"))?;
+                let width = match cell
+                    .raw_cell()
+                    .and_then(|raw| raw.wide())
+                    .map_err(renderer_context("read cell width"))?
+                {
+                    libghostty_vt::screen::CellWide::Narrow => 1,
+                    libghostty_vt::screen::CellWide::Wide => 2,
+                    libghostty_vt::screen::CellWide::SpacerTail
+                    | libghostty_vt::screen::CellWide::SpacerHead => 0,
+                };
+                let fg = cell
+                    .fg_color()
+                    .map_err(renderer_context("read cell foreground"))?
+                    .map(terminal_rgb);
+                let bg = cell
+                    .bg_color()
+                    .map_err(renderer_context("read cell background"))?
+                    .map(terminal_rgb);
                 snapshot_cells = snapshot_cells.saturating_add(1);
                 if !text.is_empty() {
                     snapshot_text_cells = snapshot_text_cells.saturating_add(1);
@@ -733,19 +1061,59 @@ impl<'alloc> SnapshotExtractor<'alloc> {
                 }
                 cells.push(TerminalCellSnapshot {
                     text,
+                    width,
                     fg,
                     bg,
                     bold: style.bold,
                     italic: style.italic,
+                    faint: style.faint,
+                    blink: style.blink,
                     underline: !matches!(style.underline, libghostty_vt::style::Underline::None),
                     inverse: style.inverse,
+                    invisible: style.invisible,
+                    strikethrough: style.strikethrough,
+                    overline: style.overline,
                 });
             }
+            drop(cell_iteration);
+            let row_hash = terminal_row_hash(&cells);
+            let row_changed = size_changed
+                || self
+                    .previous_row_hashes
+                    .get(row_index as usize)
+                    .is_none_or(|previous_hash| *previous_hash != row_hash);
+            if row_changed {
+                dirty_rows.push(row_index);
+            }
+            row_hashes.push(row_hash);
             plain_text.push_str(row_text.trim_end());
             plain_text.push('\n');
             rows_data.push(TerminalRowSnapshot { cells });
+            row.set_dirty(false)
+                .map_err(renderer_context("clear row dirty state"))?;
+            row_index = row_index.saturating_add(1);
         }
+        let cursor_row = cursor.as_ref().and_then(|cursor| {
+            if cursor.visible && cursor.row < rows {
+                Some(cursor.row)
+            } else {
+                None
+            }
+        });
+        push_damage_row(&mut dirty_rows, self.previous_cursor_row, rows);
+        push_damage_row(&mut dirty_rows, cursor_row, rows);
+        dirty_rows.sort_unstable();
+        dirty_rows.dedup();
+        snapshot
+            .set_dirty(Dirty::Clean)
+            .map_err(renderer_context("clear global dirty state"))?;
         let snapshot_extract_micros = micros_since(extract_started_at, Instant::now());
+        let dirty_row_count = dirty_rows.len() as u32;
+        let dirty_cells = dirty_row_count.saturating_mul(u32::from(cols));
+        let full_damage = dirty_row_count == u32::from(rows);
+        self.previous_row_hashes = row_hashes;
+        self.previous_cursor_row = cursor_row;
+        self.previous_size = Some((cols, rows));
 
         Ok(TerminalGridSnapshot {
             session_id: session_id.to_owned(),
@@ -754,6 +1122,11 @@ impl<'alloc> SnapshotExtractor<'alloc> {
             default_fg,
             default_bg,
             cursor,
+            damage: TerminalDamageSnapshot {
+                full: full_damage,
+                rows: dirty_rows,
+                cells: dirty_cells,
+            },
             rows_data,
             plain_text,
             timing: TerminalSnapshotTiming {
@@ -761,6 +1134,8 @@ impl<'alloc> SnapshotExtractor<'alloc> {
                 snapshot_extract_micros,
                 snapshot_cells,
                 snapshot_text_cells,
+                dirty_rows: dirty_row_count,
+                dirty_cells,
                 ..TerminalSnapshotTiming::default()
             },
         })
@@ -769,6 +1144,20 @@ impl<'alloc> SnapshotExtractor<'alloc> {
     fn mark_clean(&mut self, terminal: &Terminal<'alloc, '_>) -> Result<(), TerminalError> {
         let snapshot = self.render_state.update(terminal).map_err(renderer_error)?;
         snapshot.set_dirty(Dirty::Clean).map_err(renderer_error)
+    }
+}
+
+fn terminal_row_hash(cells: &[TerminalCellSnapshot]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    cells.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn push_damage_row(rows: &mut Vec<u16>, row: Option<u16>, max_rows: u16) {
+    if let Some(row) = row
+        && row < max_rows
+    {
+        rows.push(row);
     }
 }
 
@@ -918,6 +1307,10 @@ fn renderer_error(error: libghostty_vt::Error) -> TerminalError {
     TerminalError::Renderer(error.to_string())
 }
 
+fn renderer_context(context: &'static str) -> impl FnOnce(libghostty_vt::Error) -> TerminalError {
+    move |error| TerminalError::Renderer(format!("{context}: {error}"))
+}
+
 fn micros_since(start: Instant, end: Instant) -> u64 {
     end.saturating_duration_since(start)
         .as_micros()
@@ -1005,6 +1398,170 @@ mod tests {
     }
 
     #[test]
+    fn replay_terminal_bytes_parses_escape_sequences() {
+        let snapshot = replay_terminal_bytes(
+            "replay-test",
+            b"\x1b[2J\x1b[1;1Hplain \x1b[7mselected\x1b[0m",
+            40,
+            4,
+        )
+        .expect("replay snapshot");
+
+        assert!(snapshot.plain_text.contains("plain selected"));
+        assert!(!snapshot.plain_text.contains("\\x1b"));
+        assert!(snapshot.rows_data[0].cells[6].inverse);
+    }
+
+    #[test]
+    fn terminal_trace_helpers_are_stable() {
+        assert_eq!(terminal_trace_safe_name("a/b:c"), "a_b_c");
+        assert_eq!(terminal_trace_hex_prefix(b"\x1b[7m", 8), "1b5b376d");
+        assert_eq!(terminal_trace_hex_prefix(b"abcdef", 3), "616263...");
+        assert_eq!(terminal_trace_rows(&[1, 3, 5]), "1,3,5");
+    }
+
+    #[test]
+    fn xtversion_query_does_not_emit_pty_input() {
+        let grid_size = Cell::new((80, 24));
+        let pty_responses = RefCell::new(VecDeque::<Vec<u8>>::new());
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 80,
+            rows: 24,
+            max_scrollback: 100,
+        })
+        .expect("terminal");
+        install_terminal_effects(&mut terminal, &grid_size, &pty_responses)
+            .expect("terminal effects");
+
+        terminal.vt_write(b"\x1b[>q");
+
+        assert!(pty_responses.borrow().is_empty());
+    }
+
+    #[test]
+    fn snapshot_reports_incremental_dirty_rows_after_clean_extract() {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 20,
+            rows: 4,
+            max_scrollback: 100,
+        })
+        .expect("terminal");
+        terminal
+            .resize(
+                20,
+                4,
+                u32::from(DEFAULT_CELL_WIDTH),
+                u32::from(DEFAULT_CELL_HEIGHT),
+            )
+            .expect("resize");
+        let mut renderer = SnapshotExtractor::new().expect("snapshot extractor");
+
+        terminal.vt_write(b"initial");
+        let _ = renderer
+            .snapshot("dirty-row-test", &terminal)
+            .expect("initial snapshot");
+        renderer.mark_clean(&terminal).expect("mark clean");
+
+        terminal.vt_write(b"\x1b[2;1Hx");
+        let snapshot = renderer
+            .snapshot("dirty-row-test", &terminal)
+            .expect("incremental snapshot");
+
+        assert!(!snapshot.damage.full);
+        assert!(snapshot.damage.rows.contains(&1));
+        assert!(snapshot.damage.rows.len() < usize::from(snapshot.rows));
+        assert_eq!(
+            snapshot.timing.dirty_rows,
+            snapshot.damage.rows.len() as u32
+        );
+        assert_eq!(
+            snapshot.timing.dirty_cells,
+            snapshot.timing.dirty_rows * u32::from(snapshot.cols)
+        );
+    }
+
+    #[test]
+    fn snapshot_reports_dirty_rows_when_style_marker_moves() {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 20,
+            rows: 4,
+            max_scrollback: 100,
+        })
+        .expect("terminal");
+        terminal
+            .resize(
+                20,
+                4,
+                u32::from(DEFAULT_CELL_WIDTH),
+                u32::from(DEFAULT_CELL_HEIGHT),
+            )
+            .expect("resize");
+        let mut renderer = SnapshotExtractor::new().expect("snapshot extractor");
+
+        terminal.vt_write(b"\x1b[2J\x1b[1;1H\x1b[2mfile-a\x1b[0m\x1b[2;1Hfile-b");
+        let _ = renderer
+            .snapshot("style-marker-test", &terminal)
+            .expect("initial snapshot");
+        renderer.mark_clean(&terminal).expect("mark clean");
+
+        terminal.vt_write(b"\x1b[1;1H\x1b[0mfile-a\x1b[K\x1b[2;1H\x1b[2mfile-b\x1b[0m\x1b[K");
+        let snapshot = renderer
+            .snapshot("style-marker-test", &terminal)
+            .expect("incremental snapshot");
+
+        assert!(!snapshot.damage.full);
+        assert!(snapshot.damage.rows.contains(&0));
+        assert!(snapshot.damage.rows.contains(&1));
+        assert!(!snapshot.rows_data[0].cells[0].faint);
+        assert!(snapshot.rows_data[1].cells[0].faint);
+    }
+
+    #[test]
+    fn snapshot_reports_dirty_rows_when_background_marker_moves() {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 20,
+            rows: 4,
+            max_scrollback: 100,
+        })
+        .expect("terminal");
+        terminal
+            .resize(
+                20,
+                4,
+                u32::from(DEFAULT_CELL_WIDTH),
+                u32::from(DEFAULT_CELL_HEIGHT),
+            )
+            .expect("resize");
+        let mut renderer = SnapshotExtractor::new().expect("snapshot extractor");
+
+        terminal.vt_write(b"\x1b[2J\x1b[1;1H\x1b[48;2;30;90;120mfile-a\x1b[0m\x1b[2;1Hfile-b");
+        let _ = renderer
+            .snapshot("background-marker-test", &terminal)
+            .expect("initial snapshot");
+        renderer.mark_clean(&terminal).expect("mark clean");
+
+        terminal.vt_write(
+            b"\x1b[1;1H\x1b[0mfile-a\x1b[K\x1b[2;1H\x1b[48;2;30;90;120mfile-b\x1b[0m\x1b[K",
+        );
+        let snapshot = renderer
+            .snapshot("background-marker-test", &terminal)
+            .expect("incremental snapshot");
+
+        assert!(!snapshot.damage.full);
+        assert!(snapshot.damage.rows.contains(&0));
+        assert!(snapshot.damage.rows.contains(&1));
+        assert_eq!(snapshot.rows_data[0].cells[0].bg, None);
+        assert_eq!(
+            snapshot.rows_data[1].cells[0].bg,
+            Some(TerminalRgb {
+                r: 30,
+                g: 90,
+                b: 120,
+            })
+        );
+    }
+
+    #[test]
     #[ignore = "profiling workload; run with --ignored --nocapture"]
     fn picker_preview_vt_pipeline_profile() {
         let mut terminal = Terminal::new(TerminalOptions {
@@ -1028,6 +1585,8 @@ mod tests {
         let mut build = VecDeque::new();
         let mut bytes_per_frame = VecDeque::new();
         let mut text_cells = VecDeque::new();
+        let mut dirty_rows = VecDeque::new();
+        let mut dirty_cells = VecDeque::new();
 
         for frame in 0..180 {
             let bytes = picker_preview_ansi_frame(frame, 120, 40);
@@ -1050,16 +1609,20 @@ mod tests {
                 &mut text_cells,
                 u64::from(snapshot.timing.snapshot_text_cells),
             );
+            push_test_sample(&mut dirty_rows, u64::from(snapshot.timing.dirty_rows));
+            push_test_sample(&mut dirty_cells, u64::from(snapshot.timing.dirty_cells));
             std::hint::black_box(snapshot);
         }
 
         println!(
-            "picker preview VT pipeline: bytes {} · vt {} · update {} · extract {} · build {} · text cells {}",
+            "picker preview VT pipeline: bytes {} · vt {} · update {} · extract {} · build {} · dirty rows {} · dirty cells {} · text cells {}",
             test_count_summary(&bytes_per_frame),
             test_summary(&vt_write),
             test_summary(&update),
             test_summary(&extract),
             test_summary(&build),
+            test_count_summary(&dirty_rows),
+            test_count_summary(&dirty_cells),
             test_count_summary(&text_cells)
         );
     }

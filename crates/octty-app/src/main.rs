@@ -1,15 +1,17 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeSet, HashMap, VecDeque},
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
 use futures::{StreamExt, channel::mpsc};
 use gpui::{
-    Action, App, Application, Bounds, Context, FocusHandle, Font, FontFallbacks, FontFeatures,
-    Hsla, IntoElement, KeyBinding, KeyDownEvent, Menu, MenuItem, MouseButton, Render, Rgba,
-    ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString, TextRun, Window, WindowBounds,
+    Action, AnyView, App, Application, Bounds, Context, Entity, FocusHandle, Font, FontFallbacks,
+    FontFeatures, Hsla, IntoElement, KeyBinding, KeyDownEvent, Menu, MenuItem, MouseButton, Render,
+    Rgba, ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString, TextRun, Window, WindowBounds,
     WindowOptions, canvas, div, fill, font, point, prelude::*, px, rgb, size,
 };
 use gpui_component::Root;
@@ -26,8 +28,9 @@ use octty_term::{
     TerminalSessionSpec, capture_tmux_pane, ensure_tmux_session, kill_tmux_session,
     live::{
         LiveTerminalHandle, LiveTerminalKey, LiveTerminalKeyInput, LiveTerminalModifiers,
-        LiveTerminalSnapshotNotifier, TerminalGridSnapshot, TerminalResize, TerminalRgb,
-        spawn_live_terminal, spawn_live_terminal_with_notifier,
+        LiveTerminalSnapshotNotifier, TerminalGridSnapshot, TerminalReplayStep, TerminalResize,
+        TerminalRgb, replay_terminal_bytes, replay_terminal_steps, spawn_live_terminal,
+        spawn_live_terminal_with_notifier,
     },
     resize_tmux_session, send_tmux_keys, send_tmux_keys_to_session, send_tmux_text,
     send_tmux_text_to_session, stable_tmux_session_name,
@@ -147,6 +150,8 @@ struct OcttyApp {
     terminal_snapshot_rx: Option<mpsc::UnboundedReceiver<()>>,
     terminal_notifications_active: bool,
     terminal_window_active: bool,
+    terminal_glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
+    terminal_render_cache: Rc<RefCell<TerminalRenderCache>>,
 }
 
 struct LiveTerminalPane {
@@ -166,6 +171,8 @@ struct TerminalLatencyStats {
     snapshot_update_micros: VecDeque<u64>,
     snapshot_extract_micros: VecDeque<u64>,
     snapshot_build_micros: VecDeque<u64>,
+    dirty_rows: VecDeque<u64>,
+    dirty_cells: VecDeque<u64>,
 }
 
 impl OcttyApp {
@@ -186,6 +193,8 @@ impl OcttyApp {
             terminal_snapshot_rx: Some(terminal_snapshot_rx),
             terminal_notifications_active: false,
             terminal_window_active: true,
+            terminal_glyph_cache: Rc::new(RefCell::new(TerminalGlyphLayoutCache::default())),
+            terminal_render_cache: Rc::new(RefCell::new(TerminalRenderCache::default())),
         };
         app.ensure_live_terminals_for_active_snapshot();
         app
@@ -783,7 +792,7 @@ impl OcttyApp {
         };
         let mut updates = Vec::new();
         for (key, live) in &mut self.live_terminals {
-            if let Some(snapshot) = live.handle.drain_latest_snapshot() {
+            if let Some(snapshot) = coalesce_terminal_snapshots(live.handle.drain_snapshots()) {
                 if let Some(input_at) = live.last_input_at.take() {
                     live.latency.record_key_to_snapshot(input_at.elapsed());
                 }
@@ -799,6 +808,8 @@ impl OcttyApp {
                     .record_snapshot_extract(snapshot.timing.snapshot_extract_micros);
                 live.latency
                     .record_snapshot_build(snapshot.timing.snapshot_build_micros);
+                live.latency.record_dirty_rows(snapshot.timing.dirty_rows);
+                live.latency.record_dirty_cells(snapshot.timing.dirty_cells);
                 live.latest = Some(snapshot.clone());
                 updates.push((key.clone(), snapshot));
             }
@@ -901,6 +912,14 @@ impl TerminalLatencyStats {
         push_latency_sample(&mut self.snapshot_build_micros, micros);
     }
 
+    fn record_dirty_rows(&mut self, rows: u32) {
+        push_latency_sample(&mut self.dirty_rows, u64::from(rows));
+    }
+
+    fn record_dirty_cells(&mut self, cells: u32) {
+        push_latency_sample(&mut self.dirty_cells, u64::from(cells));
+    }
+
     fn summary_label(&self) -> Option<String> {
         let key = latency_summary(&self.key_to_snapshot_micros)?;
         let pty = latency_summary(&self.pty_to_snapshot_micros);
@@ -909,6 +928,8 @@ impl TerminalLatencyStats {
         let update = latency_summary(&self.snapshot_update_micros);
         let extract = latency_summary(&self.snapshot_extract_micros);
         let build = latency_summary(&self.snapshot_build_micros);
+        let dirty_rows = count_summary(&self.dirty_rows);
+        let dirty_cells = count_summary(&self.dirty_cells);
         let render = terminal_render_profile_summary();
         let mut parts = vec![format!("key {key}")];
         if let Some(pty) = pty {
@@ -929,6 +950,12 @@ impl TerminalLatencyStats {
         if let Some(build) = build {
             parts.push(format!("snap {build}"));
         }
+        if let Some(dirty_rows) = dirty_rows {
+            parts.push(format!("dirty rows {dirty_rows}"));
+        }
+        if let Some(dirty_cells) = dirty_cells {
+            parts.push(format!("dirty cells {dirty_cells}"));
+        }
         if let Some(render) = render {
             parts.push(render);
         }
@@ -938,6 +965,50 @@ impl TerminalLatencyStats {
 
 fn drain_pending_terminal_notifications(notification_rx: &mut mpsc::UnboundedReceiver<()>) {
     while notification_rx.try_recv().is_ok() {}
+}
+
+fn coalesce_terminal_snapshots(
+    snapshots: Vec<TerminalGridSnapshot>,
+) -> Option<TerminalGridSnapshot> {
+    let mut snapshots = snapshots.into_iter();
+    let mut latest = snapshots.next()?;
+    let mut dirty_rows: BTreeSet<u16> = latest.damage.rows.iter().copied().collect();
+    let mut force_full = latest.damage.full;
+    let mut previous_session_id = latest.session_id.clone();
+    let mut previous_size = (latest.cols, latest.rows);
+
+    for snapshot in snapshots {
+        if snapshot.damage.full
+            || snapshot.session_id != previous_session_id
+            || (snapshot.cols, snapshot.rows) != previous_size
+        {
+            force_full = true;
+        }
+        dirty_rows.extend(snapshot.damage.rows.iter().copied());
+        previous_session_id = snapshot.session_id.clone();
+        previous_size = (snapshot.cols, snapshot.rows);
+        latest = snapshot;
+    }
+
+    if force_full {
+        latest.damage.rows = (0..latest.rows).collect();
+        latest.damage.full = true;
+    } else {
+        latest.damage.rows = dirty_rows
+            .into_iter()
+            .filter(|row| *row < latest.rows)
+            .collect();
+        latest.damage.full = latest.damage.rows.len() == usize::from(latest.rows);
+    }
+
+    latest.damage.cells = latest
+        .damage
+        .rows
+        .len()
+        .saturating_mul(usize::from(latest.cols)) as u32;
+    latest.timing.dirty_rows = latest.damage.rows.len() as u32;
+    latest.timing.dirty_cells = latest.damage.cells;
+    Some(latest)
 }
 
 fn terminal_snapshot_coalesce_interval(window_active: bool, has_recent_input: bool) -> Duration {
@@ -1020,6 +1091,8 @@ impl Render for OcttyApp {
         let taskspace = render_taskspace(
             self.active_snapshot.as_ref(),
             &self.live_terminals,
+            self.terminal_glyph_cache.clone(),
+            self.terminal_render_cache.clone(),
             taskspace_width,
             cx,
         );
@@ -1153,6 +1226,18 @@ fn main() {
             .block_on(live_terminal_check())
             .expect("run live terminal check");
         println!("octty-rs live terminal check ok: {marker}");
+        return;
+    }
+    if let Some((events_path, output_path)) = terminal_replay_events_args() {
+        let summary =
+            terminal_replay_events_check(events_path, output_path).expect("replay terminal events");
+        println!("{summary}");
+        return;
+    }
+    if let Some((path, cols, rows)) = terminal_replay_record_args() {
+        let summary =
+            terminal_replay_record_check(path, cols, rows).expect("replay terminal record");
+        println!("{summary}");
         return;
     }
 
@@ -1392,6 +1477,297 @@ async fn live_terminal_check() -> anyhow::Result<String> {
         }
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
+}
+
+fn terminal_replay_record_args() -> Option<(PathBuf, u16, u16)> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--terminal-replay-record" {
+            let path = args.next().map(PathBuf::from).unwrap_or_else(|| {
+                eprintln!("--terminal-replay-record requires a .pty path");
+                std::process::exit(2);
+            });
+            let cols = args
+                .next()
+                .and_then(|value| value.parse::<u16>().ok())
+                .unwrap_or(120);
+            let rows = args
+                .next()
+                .and_then(|value| value.parse::<u16>().ok())
+                .unwrap_or(40);
+            return Some((path, cols, rows));
+        }
+    }
+    None
+}
+
+fn terminal_replay_events_args() -> Option<(PathBuf, Option<PathBuf>)> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--terminal-replay-events" {
+            let events_path = args.next().map(PathBuf::from).unwrap_or_else(|| {
+                eprintln!("--terminal-replay-events requires a .events path");
+                std::process::exit(2);
+            });
+            return Some((events_path, args.next().map(PathBuf::from)));
+        }
+    }
+    None
+}
+
+fn terminal_replay_record_check(path: PathBuf, cols: u16, rows: u16) -> anyhow::Result<String> {
+    let bytes = std::fs::read(&path)?;
+    let snapshot = replay_terminal_bytes("terminal-replay", &bytes, cols, rows)?;
+    Ok(terminal_replay_summary(
+        "octty-rs terminal replay ok",
+        &path,
+        bytes.len(),
+        &snapshot,
+    ))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TerminalReplayEventsPlan {
+    output_path: PathBuf,
+    initial_cols: u16,
+    initial_rows: u16,
+    steps: Vec<TerminalReplayEventsStep>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TerminalReplayEventsStep {
+    Output { offset: usize, len: usize },
+    Resize { cols: u16, rows: u16 },
+}
+
+fn terminal_replay_events_check(
+    events_path: PathBuf,
+    output_path_override: Option<PathBuf>,
+) -> anyhow::Result<String> {
+    let events = std::fs::read_to_string(&events_path)?;
+    let mut plan = parse_terminal_replay_events(&events)?;
+    if let Some(output_path) = output_path_override {
+        plan.output_path = output_path;
+    }
+    let bytes = std::fs::read(&plan.output_path)?;
+    let mut steps = Vec::with_capacity(plan.steps.len());
+    for step in &plan.steps {
+        match *step {
+            TerminalReplayEventsStep::Resize { cols, rows } => {
+                steps.push(TerminalReplayStep::Resize { cols, rows });
+            }
+            TerminalReplayEventsStep::Output { offset, len } => {
+                let end = offset
+                    .checked_add(len)
+                    .ok_or_else(|| anyhow::anyhow!("output offset overflow at {offset}+{len}"))?;
+                let chunk = bytes.get(offset..end).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "output chunk {offset}..{end} is outside {} bytes",
+                        bytes.len()
+                    )
+                })?;
+                steps.push(TerminalReplayStep::Output(chunk));
+            }
+        }
+    }
+    let snapshot = replay_terminal_steps(
+        "terminal-replay-events",
+        plan.initial_cols,
+        plan.initial_rows,
+        steps,
+    )?;
+    Ok(terminal_replay_summary(
+        "octty-rs terminal event replay ok",
+        &events_path,
+        bytes.len(),
+        &snapshot,
+    ))
+}
+
+fn parse_terminal_replay_events(events: &str) -> anyhow::Result<TerminalReplayEventsPlan> {
+    let mut output_path = None;
+    let mut initial_cols = None;
+    let mut initial_rows = None;
+    let mut steps = Vec::new();
+
+    for line in events.lines() {
+        match terminal_trace_value(line, "kind") {
+            Some("start") => {
+                output_path = Some(PathBuf::from(
+                    terminal_trace_value(line, "output")
+                        .ok_or_else(|| anyhow::anyhow!("trace start is missing output path"))?,
+                ));
+                initial_cols = Some(
+                    terminal_trace_value(line, "cols")
+                        .and_then(parse_u16)
+                        .ok_or_else(|| anyhow::anyhow!("trace start is missing cols"))?,
+                );
+                initial_rows = Some(
+                    terminal_trace_value(line, "rows")
+                        .and_then(parse_u16)
+                        .ok_or_else(|| anyhow::anyhow!("trace start is missing rows"))?,
+                );
+            }
+            Some("resize") => {
+                let cols = terminal_trace_value(line, "cols")
+                    .and_then(parse_u16)
+                    .ok_or_else(|| anyhow::anyhow!("trace resize is missing cols"))?;
+                let rows = terminal_trace_value(line, "rows")
+                    .and_then(parse_u16)
+                    .ok_or_else(|| anyhow::anyhow!("trace resize is missing rows"))?;
+                steps.push(TerminalReplayEventsStep::Resize { cols, rows });
+            }
+            Some("output") => {
+                let offset = terminal_trace_value(line, "offset")
+                    .and_then(parse_usize)
+                    .ok_or_else(|| anyhow::anyhow!("trace output is missing offset"))?;
+                let len = terminal_trace_value(line, "len")
+                    .and_then(parse_usize)
+                    .ok_or_else(|| anyhow::anyhow!("trace output is missing len"))?;
+                steps.push(TerminalReplayEventsStep::Output { offset, len });
+            }
+            _ => {}
+        }
+    }
+
+    Ok(TerminalReplayEventsPlan {
+        output_path: output_path.ok_or_else(|| anyhow::anyhow!("trace is missing start event"))?,
+        initial_cols: initial_cols.ok_or_else(|| anyhow::anyhow!("trace is missing start cols"))?,
+        initial_rows: initial_rows.ok_or_else(|| anyhow::anyhow!("trace is missing start rows"))?,
+        steps,
+    })
+}
+
+fn terminal_trace_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let prefix = format!("{key}=");
+    line.split_whitespace()
+        .find_map(|part| part.strip_prefix(&prefix))
+}
+
+fn parse_u16(value: &str) -> Option<u16> {
+    value.parse().ok()
+}
+
+fn parse_usize(value: &str) -> Option<usize> {
+    value.parse().ok()
+}
+
+fn terminal_replay_summary(
+    label: &str,
+    path: &Path,
+    bytes_len: usize,
+    snapshot: &TerminalGridSnapshot,
+) -> String {
+    let cursor = snapshot
+        .cursor
+        .as_ref()
+        .map(|cursor| format!("{},{}", cursor.col, cursor.row))
+        .unwrap_or_else(|| "none".to_owned());
+    format!(
+        "{label}: path={} bytes={} grid={}x{} cursor={} dirty_rows={} dirty_cells={}\n{}\n{}",
+        path.display(),
+        bytes_len,
+        snapshot.cols,
+        snapshot.rows,
+        cursor,
+        snapshot.damage.rows.len(),
+        snapshot.damage.cells,
+        snapshot.plain_text,
+        terminal_replay_style_summary(snapshot)
+    )
+}
+
+fn terminal_replay_style_summary(snapshot: &TerminalGridSnapshot) -> String {
+    let mut lines = Vec::new();
+    for (row_index, row) in snapshot.rows_data.iter().enumerate() {
+        let bg_runs = terminal_replay_bg_runs(row, snapshot.default_bg);
+        if bg_runs.len() <= 1
+            && bg_runs
+                .first()
+                .is_none_or(|run| run.color == snapshot.default_bg)
+        {
+            continue;
+        }
+
+        let text = row
+            .cells
+            .iter()
+            .map(|cell| {
+                if cell.text.is_empty() {
+                    " "
+                } else {
+                    cell.text.as_str()
+                }
+            })
+            .collect::<String>()
+            .trim_end()
+            .to_owned();
+        lines.push(format!(
+            "style row {:02}: bg={} text={}",
+            row_index,
+            bg_runs
+                .iter()
+                .map(|run| format!(
+                    "{}:{}-{}",
+                    terminal_rgb_hex(run.color),
+                    run.start_col,
+                    run.end_col
+                ))
+                .collect::<Vec<_>>()
+                .join(","),
+            text
+        ));
+    }
+
+    if lines.is_empty() {
+        "style rows: none".to_owned()
+    } else {
+        format!("style rows:\n{}", lines.join("\n"))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TerminalReplayBgRun {
+    color: TerminalRgb,
+    start_col: usize,
+    end_col: usize,
+}
+
+fn terminal_replay_bg_runs(
+    row: &octty_term::live::TerminalRowSnapshot,
+    default_bg: TerminalRgb,
+) -> Vec<TerminalReplayBgRun> {
+    let mut runs = Vec::new();
+    let mut active: Option<TerminalReplayBgRun> = None;
+    for (col, cell) in row.cells.iter().enumerate() {
+        let color = cell.bg.unwrap_or(default_bg);
+        match active.as_mut() {
+            Some(run) if run.color == color => run.end_col = col + 1,
+            Some(_) => {
+                runs.push(active.take().expect("checked"));
+                active = Some(TerminalReplayBgRun {
+                    color,
+                    start_col: col,
+                    end_col: col + 1,
+                });
+            }
+            None => {
+                active = Some(TerminalReplayBgRun {
+                    color,
+                    start_col: col,
+                    end_col: col + 1,
+                });
+            }
+        }
+    }
+    if let Some(run) = active {
+        runs.push(run);
+    }
+    runs
+}
+
+fn terminal_rgb_hex(color: TerminalRgb) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
 }
 
 async fn flush_terminal_inputs(
@@ -1789,6 +2165,7 @@ fn live_terminal_input_from_key_parts(
     }
 
     let normalized_key = key.to_ascii_lowercase();
+    let mut text = None;
     let live_key = match normalized_key.as_str() {
         "enter" => LiveTerminalKey::Enter,
         "backspace" => LiveTerminalKey::Backspace,
@@ -1818,11 +2195,11 @@ fn live_terminal_input_from_key_parts(
         "f11" => LiveTerminalKey::F(11),
         "f12" => LiveTerminalKey::F(12),
         _ => {
-            let key_char =
-                key_char.filter(|text| !text.is_empty() && *text != "\r" && *text != "\n");
-            if let Some(text) = key_char
-                && let Some(character) = text.chars().next()
+            let key_text = terminal_printable_key_text(key_char, control, platform);
+            if let Some(key_text) = key_text
+                && let Some(character) = key_text.chars().next()
             {
+                text = Some(key_text);
                 LiveTerminalKey::Character(unshifted_character(character))
             } else if normalized_key.len() == 1 {
                 LiveTerminalKey::Character(
@@ -1838,9 +2215,6 @@ fn live_terminal_input_from_key_parts(
         }
     };
 
-    let text = key_char
-        .filter(|text| !control && !platform && !text.is_empty() && *text != "\r" && *text != "\n")
-        .map(str::to_owned);
     let unshifted = match live_key {
         LiveTerminalKey::Character(character) => character,
         LiveTerminalKey::Space => ' ',
@@ -1858,6 +2232,25 @@ fn live_terminal_input_from_key_parts(
         },
         unshifted,
     })
+}
+
+fn terminal_printable_key_text(
+    key_char: Option<&str>,
+    control: bool,
+    platform: bool,
+) -> Option<String> {
+    if control || platform {
+        return None;
+    }
+    let text = key_char?;
+    if text.is_empty()
+        || text == "\r"
+        || text == "\n"
+        || text.chars().any(|character| character.is_control())
+    {
+        return None;
+    }
+    Some(text.to_owned())
 }
 
 fn is_pane_action_key(key: &str) -> bool {
@@ -2071,6 +2464,8 @@ fn preview_terminal_input(snapshot: &mut WorkspaceSnapshot, pane_id: &str, input
 fn render_taskspace(
     snapshot: Option<&WorkspaceSnapshot>,
     live_terminals: &HashMap<String, LiveTerminalPane>,
+    terminal_glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
+    terminal_render_cache: Rc<RefCell<TerminalRenderCache>>,
     viewport_width: f32,
     cx: &mut Context<OcttyApp>,
 ) -> gpui::Div {
@@ -2118,6 +2513,8 @@ fn render_taskspace(
                     pane,
                     active,
                     terminal_live,
+                    terminal_glyph_cache.clone(),
+                    terminal_render_cache.clone(),
                     cx,
                 ));
             }
@@ -2132,6 +2529,8 @@ fn render_pane(
     pane: &PaneState,
     active: bool,
     terminal_live: Option<&LiveTerminalPane>,
+    terminal_glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
+    terminal_render_cache: Rc<RefCell<TerminalRenderCache>>,
     cx: &mut Context<OcttyApp>,
 ) -> gpui::Div {
     let pane_id = pane.id.clone();
@@ -2166,16 +2565,33 @@ fn render_pane(
         );
     }
 
-    pane_el.child(render_pane_body(pane, active, terminal_live))
+    pane_el.child(render_pane_body(
+        pane,
+        active,
+        terminal_live,
+        terminal_glyph_cache,
+        terminal_render_cache,
+        cx,
+    ))
 }
 
 fn render_pane_body(
     pane: &PaneState,
     active: bool,
     terminal_live: Option<&LiveTerminalPane>,
+    terminal_glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
+    terminal_render_cache: Rc<RefCell<TerminalRenderCache>>,
+    cx: &mut Context<OcttyApp>,
 ) -> gpui::Div {
     match &pane.payload {
-        PanePayload::Terminal(payload) => render_terminal_surface(payload, active, terminal_live),
+        PanePayload::Terminal(payload) => render_terminal_surface(
+            payload,
+            active,
+            terminal_live,
+            terminal_glyph_cache,
+            terminal_render_cache,
+            cx,
+        ),
         _ => div()
             .flex_1()
             .overflow_hidden()
@@ -2190,6 +2606,9 @@ fn render_terminal_surface(
     payload: &TerminalPanePayload,
     active: bool,
     terminal_live: Option<&LiveTerminalPane>,
+    terminal_glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
+    terminal_render_cache: Rc<RefCell<TerminalRenderCache>>,
+    cx: &mut Context<OcttyApp>,
 ) -> gpui::Div {
     let terminal_snapshot = terminal_live.and_then(|live| live.latest.as_ref());
     let Some(snapshot) = terminal_snapshot else {
@@ -2229,68 +2648,113 @@ fn render_terminal_surface(
         );
     }
 
-    surface.child(render_terminal_grid(snapshot, default_fg, default_bg))
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct TerminalCellRun {
-    text: String,
-    cell_count: usize,
-    fg: Option<Rgba>,
-    bg: Option<Rgba>,
-    bold: bool,
-    italic: bool,
-    underline: bool,
+    surface.child(render_terminal_grid(
+        snapshot,
+        default_fg,
+        default_bg,
+        terminal_glyph_cache,
+        terminal_render_cache,
+        cx,
+    ))
 }
 
 struct TerminalGridPaintInput {
+    session_id: String,
     cols: u16,
     rows: u16,
     default_bg: Rgba,
     rows_data: Vec<TerminalPaintRowInput>,
-    text_rows: Vec<TerminalPaintTextRow>,
+    glyph_cells: Vec<TerminalPaintGlyphCell>,
+    dirty_rows: usize,
+    dirty_cells: usize,
+    rebuilt_rows: usize,
+    reused_rows: usize,
+    rebuilt_row_flags: Vec<bool>,
 }
 
+#[derive(Clone)]
 struct TerminalPaintRowInput {
+    default_bg: Rgba,
     background_runs: Vec<TerminalPaintBackgroundRun>,
 }
 
-struct TerminalPaintTextRow {
+#[derive(Clone)]
+struct TerminalPaintGlyphCell {
     row_index: usize,
-    start_col: usize,
+    col_index: usize,
     text: SharedString,
-    shape_style: TextRun,
-    foreground_runs: Vec<TerminalPaintForegroundRun>,
-    style_run_count: usize,
-}
-
-struct TerminalPaintForegroundRun {
-    start_byte: usize,
-    end_byte: usize,
+    cell_width: u8,
     color: Hsla,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strikethrough: bool,
+    overline: bool,
 }
 
+#[derive(Clone)]
 struct TerminalPaintBackgroundRun {
     start_col: usize,
     cell_count: usize,
     color: Rgba,
 }
 
-struct TerminalPaintSurface {
-    input: TerminalGridPaintInput,
-    shaped_text_rows: Vec<TerminalShapedTextRow>,
-    shape_micros: u64,
+struct TerminalRowPaintSurface {
+    row_input: TerminalPaintRowInput,
+    glyph_cells: Vec<TerminalPaintGlyphCell>,
+    shaped_glyph_cells: Vec<TerminalShapedGlyphCell>,
 }
 
-struct TerminalShapedTextRow {
-    input_row_index: usize,
-    row_index: usize,
-    start_col: usize,
+struct TerminalFullPaintSurface {
+    input: TerminalGridPaintInput,
+    shaped_glyph_cells: Vec<TerminalShapedGlyphCell>,
+    glyph_cache_hits: usize,
+    glyph_cache_misses: usize,
+}
+
+struct TerminalShapedGlyphCell {
+    input_cell_index: usize,
     line: ShapedLine,
 }
 
-struct TerminalPaintFonts {
-    normal: Font,
+#[derive(Default)]
+struct TerminalGlyphLayoutCache {
+    glyphs: HashMap<TerminalGlyphCacheKey, ShapedLine>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TerminalGlyphCacheKey {
+    text: String,
+    bold: bool,
+    italic: bool,
+    strikethrough: bool,
+}
+
+#[derive(Default)]
+struct TerminalRenderCache {
+    sessions: HashMap<String, TerminalRenderGridCache>,
+}
+
+struct TerminalRenderGridCache {
+    cols: u16,
+    rows: u16,
+    default_fg: Rgba,
+    default_bg: Rgba,
+    rows_data: Vec<Option<TerminalCachedPaintRow>>,
+    row_views: Vec<Option<Entity<TerminalRowView>>>,
+}
+
+#[derive(Clone)]
+struct TerminalCachedPaintRow {
+    row_input: TerminalPaintRowInput,
+    glyph_cells: Vec<TerminalPaintGlyphCell>,
+}
+
+struct TerminalRowView {
+    cols: u16,
+    row_input: TerminalPaintRowInput,
+    glyph_cells: Vec<TerminalPaintGlyphCell>,
+    glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -2300,10 +2764,15 @@ struct TerminalRenderProfileSample {
     paint_micros: u64,
     rows: u16,
     cols: u16,
-    text_rows: usize,
-    text_runs: usize,
+    glyph_cells: usize,
+    glyph_cache_hits: usize,
+    glyph_cache_misses: usize,
     background_runs: usize,
     text_bytes: usize,
+    dirty_rows: usize,
+    dirty_cells: usize,
+    rebuilt_rows: usize,
+    reused_rows: usize,
 }
 
 #[derive(Default)]
@@ -2311,10 +2780,15 @@ struct TerminalRenderProfiler {
     build_micros: VecDeque<u64>,
     shape_micros: VecDeque<u64>,
     paint_micros: VecDeque<u64>,
-    text_rows: VecDeque<u64>,
-    text_runs: VecDeque<u64>,
+    glyph_cells: VecDeque<u64>,
+    glyph_cache_hits: VecDeque<u64>,
+    glyph_cache_misses: VecDeque<u64>,
     background_runs: VecDeque<u64>,
     text_bytes: VecDeque<u64>,
+    dirty_rows: VecDeque<u64>,
+    dirty_cells: VecDeque<u64>,
+    rebuilt_rows: VecDeque<u64>,
+    reused_rows: VecDeque<u64>,
     last_report_at: Option<Instant>,
 }
 
@@ -2322,203 +2796,417 @@ fn render_terminal_grid(
     snapshot: &TerminalGridSnapshot,
     default_fg: Rgba,
     default_bg: Rgba,
-) -> impl IntoElement {
+    terminal_glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
+    terminal_render_cache: Rc<RefCell<TerminalRenderCache>>,
+    cx: &mut Context<OcttyApp>,
+) -> gpui::Div {
     let build_started_at = Instant::now();
-    let input = terminal_paint_input(snapshot, default_fg, default_bg);
+    let input = terminal_paint_input(
+        snapshot,
+        default_fg,
+        default_bg,
+        &mut terminal_render_cache.borrow_mut(),
+    );
     let build_micros = duration_micros(build_started_at.elapsed());
     let width = TERMINAL_CELL_WIDTH * input.cols as f32;
     let height = TERMINAL_CELL_HEIGHT * input.rows as f32;
 
-    canvas(
-        move |_bounds, window, _cx| {
-            let shape_started_at = Instant::now();
-            let shaped_text_rows = input
-                .text_rows
-                .iter()
-                .enumerate()
-                .map(|(input_row_index, row)| {
-                    let line = window.text_system().shape_line(
-                        row.text.clone(),
-                        px(TERMINAL_FONT_SIZE),
-                        std::slice::from_ref(&row.shape_style),
-                        Some(px(TERMINAL_CELL_WIDTH)),
-                    );
-                    TerminalShapedTextRow {
-                        input_row_index,
-                        row_index: row.row_index,
-                        start_col: row.start_col,
-                        line,
-                    }
-                })
-                .collect();
-            let shape_micros = duration_micros(shape_started_at.elapsed());
-            TerminalPaintSurface {
-                input,
-                shaped_text_rows,
-                shape_micros,
-            }
-        },
-        move |bounds, surface, window, cx| {
-            let mut sample = terminal_render_profile_sample(&surface, build_micros);
-            let paint_started_at = Instant::now();
-            paint_terminal_surface(bounds, surface, window, cx);
-            sample.paint_micros = duration_micros(paint_started_at.elapsed());
-            record_terminal_render_profile(sample);
-        },
-    )
-    .w(px(width))
-    .h(px(height))
-    .overflow_hidden()
+    if terminal_prefers_full_canvas(&input) {
+        clear_terminal_row_views(&input.session_id, &mut terminal_render_cache.borrow_mut());
+        return render_terminal_full_canvas(
+            input,
+            terminal_glyph_cache,
+            build_micros,
+            width,
+            height,
+        );
+    }
+
+    let row_views = {
+        let mut render_cache = terminal_render_cache.borrow_mut();
+        terminal_row_views_for_input(&input, terminal_glyph_cache, &mut render_cache, cx)
+    };
+    record_terminal_render_build_profile(&input, build_micros);
+
+    div()
+        .flex()
+        .flex_col()
+        .w(px(width))
+        .h(px(height))
+        .overflow_hidden()
+        .children(row_views)
 }
 
 fn terminal_paint_input(
     snapshot: &TerminalGridSnapshot,
     default_fg: Rgba,
     default_bg: Rgba,
+    render_cache: &mut TerminalRenderCache,
 ) -> TerminalGridPaintInput {
-    let normal_font = terminal_font();
-    let fonts = TerminalPaintFonts {
-        normal: normal_font,
-    };
     let mut rows_data = Vec::with_capacity(snapshot.rows_data.len());
-    let mut text_rows = Vec::new();
+    let mut glyph_cells = Vec::new();
+    let cache = render_cache
+        .sessions
+        .entry(snapshot.session_id.clone())
+        .or_insert_with(|| TerminalRenderGridCache {
+            cols: snapshot.cols,
+            rows: snapshot.rows,
+            default_fg,
+            default_bg,
+            rows_data: Vec::new(),
+            row_views: Vec::new(),
+        });
+    let cache_invalid = cache.cols != snapshot.cols
+        || cache.rows != snapshot.rows
+        || cache.default_fg != default_fg
+        || cache.default_bg != default_bg
+        || cache.rows_data.len() != snapshot.rows_data.len();
+    if cache_invalid {
+        cache.cols = snapshot.cols;
+        cache.rows = snapshot.rows;
+        cache.default_fg = default_fg;
+        cache.default_bg = default_bg;
+        cache.rows_data = vec![None; snapshot.rows_data.len()];
+        cache.row_views = vec![None; snapshot.rows_data.len()];
+    }
+
+    let mut dirty_row_flags = vec![cache_invalid || snapshot.damage.full; snapshot.rows_data.len()];
+    for row in snapshot.damage.rows.iter().copied() {
+        if let Some(flag) = dirty_row_flags.get_mut(row as usize) {
+            *flag = true;
+        }
+    }
+
+    let mut rebuilt_rows = 0usize;
+    let mut reused_rows = 0usize;
 
     for (row_index, row) in snapshot.rows_data.iter().enumerate() {
-        let mut background_runs = Vec::new();
-        let mut start_col = 0usize;
-        let runs = terminal_cell_runs(row_index as u16, row, snapshot);
+        let rebuild_row = dirty_row_flags[row_index] || cache.rows_data[row_index].is_none();
+        let cached_row = if rebuild_row {
+            rebuilt_rows += 1;
+            let cached_row = terminal_cached_paint_row(row_index, row, snapshot, default_bg);
+            cache.rows_data[row_index] = Some(cached_row.clone());
+            cached_row
+        } else {
+            reused_rows += 1;
+            cache.rows_data[row_index]
+                .as_ref()
+                .expect("checked above")
+                .clone()
+        };
 
-        if let Some(text_row) = terminal_text_row(row_index, &runs, &fonts, default_fg) {
-            text_rows.push(text_row);
-        }
-
-        for run in runs {
-            if let Some(bg) = run.bg
-                && bg != default_bg
-            {
-                background_runs.push(TerminalPaintBackgroundRun {
-                    start_col,
-                    cell_count: run.cell_count,
-                    color: bg,
-                });
-            }
-            start_col += run.cell_count;
-        }
-
-        rows_data.push(TerminalPaintRowInput { background_runs });
+        glyph_cells.extend(cached_row.glyph_cells.iter().cloned());
+        rows_data.push(cached_row.row_input);
     }
 
     TerminalGridPaintInput {
+        session_id: snapshot.session_id.clone(),
         cols: snapshot.cols,
         rows: snapshot.rows,
         default_bg,
         rows_data,
-        text_rows,
+        glyph_cells,
+        dirty_rows: snapshot.damage.rows.len(),
+        dirty_cells: snapshot.damage.cells as usize,
+        rebuilt_rows,
+        reused_rows,
+        rebuilt_row_flags: dirty_row_flags,
     }
 }
 
-fn terminal_text_row(
-    row_index: usize,
-    runs: &[TerminalCellRun],
-    fonts: &TerminalPaintFonts,
-    default_fg: Rgba,
-) -> Option<TerminalPaintTextRow> {
-    let full_text: String = runs.iter().map(|run| run.text.as_str()).collect();
-    let (visible_start_cell, visible_end_cell) = terminal_visible_text_cell_range(&full_text)?;
-    let visible_text: String = full_text
-        .chars()
-        .skip(visible_start_cell)
-        .take(visible_end_cell - visible_start_cell)
-        .collect();
-    let mut foreground_runs: Vec<TerminalPaintForegroundRun> = Vec::new();
-    let mut style_run_count = 0usize;
-    let mut run_start_cell = 0usize;
+fn terminal_prefers_full_canvas(input: &TerminalGridPaintInput) -> bool {
+    // Keep one stable GPUI tree for the terminal. Switching between row views and
+    // a monolithic canvas during dense TUI redraws caused stale pixels to be
+    // composited into unrelated rows.
+    let _ = input;
+    false
+}
 
-    for run in runs {
-        let run_end_cell = run_start_cell + run.text.chars().count();
-        let overlap_start = run_start_cell.max(visible_start_cell);
-        let overlap_end = run_end_cell.min(visible_end_cell);
-        if overlap_start < overlap_end {
-            let style_text: String = run
-                .text
-                .chars()
-                .skip(overlap_start - run_start_cell)
-                .take(overlap_end - overlap_start)
-                .collect();
-            if !style_text.is_empty() {
-                style_run_count += 1;
-                let skipped_visible_cells = overlap_start - visible_start_cell;
-                let start_byte = terminal_byte_index_for_cell(&visible_text, skipped_visible_cells);
-                let end_byte = start_byte + style_text.len();
-                let color = Hsla::from(run.fg.unwrap_or(default_fg));
-                if let Some(last) = foreground_runs.last_mut()
-                    && last.end_byte == start_byte
-                    && last.color == color
-                {
-                    last.end_byte = end_byte;
-                } else {
-                    foreground_runs.push(TerminalPaintForegroundRun {
-                        start_byte,
-                        end_byte,
-                        color,
-                    });
+fn clear_terminal_row_views(session_id: &str, render_cache: &mut TerminalRenderCache) {
+    if let Some(cache) = render_cache.sessions.get_mut(session_id) {
+        cache.row_views.fill_with(|| None);
+    }
+}
+
+fn render_terminal_full_canvas(
+    input: TerminalGridPaintInput,
+    terminal_glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
+    build_micros: u64,
+    width: f32,
+    height: f32,
+) -> gpui::Div {
+    div().w(px(width)).h(px(height)).overflow_hidden().child(
+        canvas(
+            move |_bounds, window, _cx| {
+                let mut glyph_cache = terminal_glyph_cache.borrow_mut();
+                let mut glyph_cache_hits = 0usize;
+                let mut glyph_cache_misses = 0usize;
+                let shaped_glyph_cells = shape_terminal_glyph_cells(
+                    &input.glyph_cells,
+                    &mut glyph_cache,
+                    &mut glyph_cache_hits,
+                    &mut glyph_cache_misses,
+                    window,
+                );
+                TerminalFullPaintSurface {
+                    input,
+                    shaped_glyph_cells,
+                    glyph_cache_hits,
+                    glyph_cache_misses,
                 }
+            },
+            move |bounds, surface, window, cx| {
+                let sample = terminal_full_render_profile_sample(&surface, build_micros);
+                let paint_started_at = Instant::now();
+                paint_terminal_full_surface(bounds, surface, window, cx);
+                let mut sample = sample;
+                sample.paint_micros = duration_micros(paint_started_at.elapsed());
+                record_terminal_render_profile(sample);
+            },
+        )
+        .w(px(width))
+        .h(px(height))
+        .overflow_hidden(),
+    )
+}
+
+fn shape_terminal_glyph_cells(
+    glyph_cells: &[TerminalPaintGlyphCell],
+    glyph_cache: &mut TerminalGlyphLayoutCache,
+    glyph_cache_hits: &mut usize,
+    glyph_cache_misses: &mut usize,
+    window: &mut Window,
+) -> Vec<TerminalShapedGlyphCell> {
+    glyph_cells
+        .iter()
+        .enumerate()
+        .map(|(input_cell_index, cell)| {
+            let key = TerminalGlyphCacheKey {
+                text: cell.text.to_string(),
+                bold: cell.bold,
+                italic: cell.italic,
+                strikethrough: cell.strikethrough,
+            };
+            if let Some(line) = glyph_cache.glyphs.get(&key) {
+                *glyph_cache_hits += 1;
+                return TerminalShapedGlyphCell {
+                    input_cell_index,
+                    line: line.clone(),
+                };
             }
+
+            let text = cell.text.clone();
+            let style =
+                terminal_glyph_shape_style(text.len(), cell.bold, cell.italic, cell.strikethrough);
+            let line = window.text_system().shape_line(
+                text,
+                px(TERMINAL_FONT_SIZE),
+                std::slice::from_ref(&style),
+                Some(px(TERMINAL_CELL_WIDTH)),
+            );
+            glyph_cache.glyphs.insert(key, line.clone());
+            *glyph_cache_misses += 1;
+            TerminalShapedGlyphCell {
+                input_cell_index,
+                line,
+            }
+        })
+        .collect()
+}
+
+fn terminal_cached_paint_row(
+    row_index: usize,
+    row: &octty_term::live::TerminalRowSnapshot,
+    snapshot: &TerminalGridSnapshot,
+    default_bg: Rgba,
+) -> TerminalCachedPaintRow {
+    let background_runs = terminal_background_runs(row_index as u16, row, snapshot, default_bg);
+    let mut glyph_cells = Vec::new();
+
+    for (col_index, cell) in row.cells.iter().enumerate() {
+        if cell.width > 0 && !cell.invisible && !cell.text.is_empty() && cell.text != " " {
+            let (fg, _) =
+                terminal_effective_cell_colors(row_index as u16, col_index as u16, cell, snapshot);
+            glyph_cells.push(TerminalPaintGlyphCell {
+                row_index,
+                col_index,
+                text: SharedString::from(cell.text.clone()),
+                color: Hsla::from(fg),
+                bold: cell.bold,
+                italic: cell.italic,
+                underline: cell.underline,
+                strikethrough: cell.strikethrough,
+                overline: cell.overline,
+                cell_width: cell.width,
+            });
         }
-        run_start_cell = run_end_cell;
     }
 
-    if visible_text.is_empty() || foreground_runs.is_empty() {
-        return None;
+    TerminalCachedPaintRow {
+        row_input: TerminalPaintRowInput {
+            default_bg,
+            background_runs,
+        },
+        glyph_cells,
     }
-    let visible_text_len = visible_text.len();
-
-    Some(TerminalPaintTextRow {
-        row_index,
-        start_col: visible_start_cell,
-        text: SharedString::from(visible_text),
-        shape_style: terminal_text_style(visible_text_len, fonts, default_fg),
-        foreground_runs,
-        style_run_count,
-    })
 }
 
-fn terminal_byte_index_for_cell(text: &str, cell_index: usize) -> usize {
-    text.char_indices()
-        .nth(cell_index)
-        .map(|(byte_index, _)| byte_index)
-        .unwrap_or(text.len())
-}
+fn terminal_row_views_for_input(
+    input: &TerminalGridPaintInput,
+    glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
+    render_cache: &mut TerminalRenderCache,
+    cx: &mut Context<OcttyApp>,
+) -> Vec<AnyView> {
+    let Some(cache) = render_cache.sessions.get_mut(&input.session_id) else {
+        return Vec::new();
+    };
+    if cache.row_views.len() != input.rows_data.len() {
+        cache.row_views = vec![None; input.rows_data.len()];
+    }
 
-fn terminal_visible_text_cell_range(text: &str) -> Option<(usize, usize)> {
-    let start = text.chars().position(|ch| ch != ' ')?;
-    let mut end = start + 1;
-    for (index, ch) in text.chars().enumerate().skip(start + 1) {
-        if ch != ' ' {
-            end = index + 1;
+    let mut glyph_cells_by_row = vec![Vec::new(); input.rows_data.len()];
+    for cell in input.glyph_cells.iter().cloned() {
+        if let Some(row_cells) = glyph_cells_by_row.get_mut(cell.row_index) {
+            row_cells.push(cell);
         }
     }
-    Some((start, end))
+
+    let mut views = Vec::with_capacity(input.rows_data.len());
+    for (row_index, row_input) in input.rows_data.iter().cloned().enumerate() {
+        let glyph_cells = glyph_cells_by_row[row_index].clone();
+        let view = if let Some(view) = cache.row_views[row_index].as_ref() {
+            if input
+                .rebuilt_row_flags
+                .get(row_index)
+                .copied()
+                .unwrap_or(true)
+            {
+                let _ = view.update(cx, |view, cx| {
+                    view.cols = input.cols;
+                    view.row_input = row_input;
+                    view.glyph_cells = glyph_cells;
+                    view.glyph_cache = glyph_cache.clone();
+                    cx.notify();
+                });
+            }
+            view.clone()
+        } else {
+            let view = cx.new(|_| TerminalRowView {
+                cols: input.cols,
+                row_input,
+                glyph_cells,
+                glyph_cache: glyph_cache.clone(),
+            });
+            cache.row_views[row_index] = Some(view.clone());
+            view
+        };
+
+        let any_view: AnyView = view.into();
+        views.push(any_view);
+    }
+
+    views
 }
 
-fn terminal_text_style(len: usize, fonts: &TerminalPaintFonts, default_fg: Rgba) -> TextRun {
+impl Render for TerminalRowView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let cols = self.cols;
+        let row_input = self.row_input.clone();
+        let glyph_cells = self.glyph_cells.clone();
+        let glyph_cache = self.glyph_cache.clone();
+        let width = TERMINAL_CELL_WIDTH * cols as f32;
+
+        canvas(
+            move |_bounds, window, _cx| {
+                let mut cache = glyph_cache.borrow_mut();
+                let mut glyph_cache_hits = 0usize;
+                let mut glyph_cache_misses = 0usize;
+                let shaped_glyph_cells = shape_terminal_glyph_cells(
+                    &glyph_cells,
+                    &mut cache,
+                    &mut glyph_cache_hits,
+                    &mut glyph_cache_misses,
+                    window,
+                );
+                TerminalRowPaintSurface {
+                    row_input,
+                    glyph_cells,
+                    shaped_glyph_cells,
+                }
+            },
+            move |bounds, surface, window, cx| {
+                let paint_started_at = Instant::now();
+                paint_terminal_row_surface(bounds, surface, window, cx);
+                let _paint_micros = duration_micros(paint_started_at.elapsed());
+            },
+        )
+        .w(px(width))
+        .h(px(TERMINAL_CELL_HEIGHT))
+        .overflow_hidden()
+    }
+}
+
+fn terminal_glyph_shape_style(
+    len: usize,
+    bold: bool,
+    italic: bool,
+    strikethrough: bool,
+) -> TextRun {
+    let mut font = terminal_font();
+    if bold {
+        font = font.bold();
+    }
+    if italic {
+        font = font.italic();
+    }
     TextRun {
         len,
-        font: fonts.normal.clone(),
-        color: Hsla::from(default_fg),
+        font,
+        color: Hsla::from(rgb(0xffffff)),
         background_color: None,
         underline: None,
-        strikethrough: None,
+        strikethrough: strikethrough.then_some(Default::default()),
     }
 }
 
-fn paint_terminal_surface(
+fn paint_terminal_row_surface(
     bounds: Bounds<gpui::Pixels>,
-    surface: TerminalPaintSurface,
+    surface: TerminalRowPaintSurface,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    window.paint_quad(fill(bounds, surface.row_input.default_bg));
+
+    for run in &surface.row_input.background_runs {
+        let origin = point(
+            bounds.origin.x + px(run.start_col as f32 * TERMINAL_CELL_WIDTH),
+            bounds.origin.y,
+        );
+        let size = size(
+            px(run.cell_count as f32 * TERMINAL_CELL_WIDTH),
+            px(TERMINAL_CELL_HEIGHT),
+        );
+        window.paint_quad(fill(Bounds { origin, size }, run.color));
+    }
+
+    for shaped_cell in surface.shaped_glyph_cells.iter() {
+        let cell = &surface.glyph_cells[shaped_cell.input_cell_index];
+        let origin = point(
+            bounds.origin.x + px(cell.col_index as f32 * TERMINAL_CELL_WIDTH),
+            bounds.origin.y,
+        );
+        let _ = paint_terminal_glyph_cell(origin, cell, &shaped_cell.line, window, cx);
+    }
+}
+
+fn paint_terminal_full_surface(
+    bounds: Bounds<gpui::Pixels>,
+    surface: TerminalFullPaintSurface,
     window: &mut Window,
     cx: &mut App,
 ) {
     window.paint_quad(fill(bounds, surface.input.default_bg));
+
     for (row_index, row) in surface.input.rows_data.iter().enumerate() {
         let row_top = bounds.origin.y + px(row_index as f32 * TERMINAL_CELL_HEIGHT);
         for run in &row.background_runs {
@@ -2534,97 +3222,220 @@ fn paint_terminal_surface(
         }
     }
 
-    for run in surface.shaped_text_rows.iter() {
+    for shaped_cell in surface.shaped_glyph_cells.iter() {
+        let cell = &surface.input.glyph_cells[shaped_cell.input_cell_index];
         let origin = point(
-            bounds.origin.x + px(run.start_col as f32 * TERMINAL_CELL_WIDTH),
-            bounds.origin.y + px(run.row_index as f32 * TERMINAL_CELL_HEIGHT),
+            bounds.origin.x + px(cell.col_index as f32 * TERMINAL_CELL_WIDTH),
+            bounds.origin.y + px(cell.row_index as f32 * TERMINAL_CELL_HEIGHT),
         );
-        let input_row = &surface.input.text_rows[run.input_row_index];
-        let _ = paint_terminal_text_row(origin, input_row, &run.line, window, cx);
+        let _ = paint_terminal_glyph_cell(origin, cell, &shaped_cell.line, window, cx);
     }
 }
 
-fn paint_terminal_text_row(
+fn paint_terminal_glyph_cell(
     origin: gpui::Point<gpui::Pixels>,
-    row: &TerminalPaintTextRow,
+    cell: &TerminalPaintGlyphCell,
     line: &ShapedLine,
     window: &mut Window,
-    cx: &mut App,
+    _cx: &mut App,
 ) -> gpui::Result<()> {
-    let padding_top = (px(TERMINAL_CELL_HEIGHT) - line.ascent - line.descent) / 2.0;
-    let baseline_offset = point(px(0.0), padding_top + line.ascent);
-    let text_system = cx.text_system().clone();
-    let mut glyph_origin = origin;
-    let mut prev_glyph_position = gpui::Point::default();
-    let mut foreground_run_index = 0usize;
+    let cell_bounds = terminal_glyph_cell_bounds(origin, cell);
+    window.with_content_mask(
+        Some(gpui::ContentMask {
+            bounds: cell_bounds,
+        }),
+        |window| {
+            let padding_top = (px(TERMINAL_CELL_HEIGHT) - line.ascent - line.descent) / 2.0;
+            let baseline_offset = point(px(0.0), padding_top + line.ascent);
+            let mut glyph_origin = origin;
+            let mut prev_glyph_position = gpui::Point::default();
 
-    for run in &line.runs {
-        let max_glyph_size = text_system.bounding_box(run.font_id, line.font_size).size;
-        for glyph in &run.glyphs {
-            glyph_origin.x += glyph.position.x - prev_glyph_position.x;
-            prev_glyph_position = glyph.position;
+            for run in &line.runs {
+                for glyph in &run.glyphs {
+                    glyph_origin.x += glyph.position.x - prev_glyph_position.x;
+                    prev_glyph_position = glyph.position;
 
-            while row
-                .foreground_runs
-                .get(foreground_run_index)
-                .is_some_and(|run| glyph.index >= run.end_byte)
-            {
-                foreground_run_index += 1;
+                    if glyph.is_emoji {
+                        window.paint_emoji(
+                            glyph_origin + baseline_offset,
+                            run.font_id,
+                            glyph.id,
+                            line.font_size,
+                        )?;
+                    } else {
+                        window.paint_glyph(
+                            glyph_origin + baseline_offset,
+                            run.font_id,
+                            glyph.id,
+                            line.font_size,
+                            cell.color,
+                        )?;
+                    }
+                }
             }
-            let color = row
-                .foreground_runs
-                .get(foreground_run_index)
-                .filter(|run| glyph.index >= run.start_byte)
-                .map(|run| run.color)
-                .unwrap_or(row.shape_style.color);
-
-            let max_glyph_bounds = Bounds {
-                origin: glyph_origin,
-                size: max_glyph_size,
-            };
-            let content_mask = window.content_mask();
-            if !max_glyph_bounds.intersects(&content_mask.bounds) {
-                continue;
-            }
-
-            if glyph.is_emoji {
-                window.paint_emoji(
-                    glyph_origin + baseline_offset,
-                    run.font_id,
-                    glyph.id,
-                    line.font_size,
-                )?;
-            } else {
-                window.paint_glyph(
-                    glyph_origin + baseline_offset,
-                    run.font_id,
-                    glyph.id,
-                    line.font_size,
-                    color,
-                )?;
-            }
-        }
-    }
-    Ok(())
+            paint_terminal_cell_decorations(origin, cell, window);
+            Ok(())
+        },
+    )
 }
 
-fn terminal_render_profile_sample(
-    surface: &TerminalPaintSurface,
+fn terminal_glyph_cell_bounds(
+    origin: gpui::Point<gpui::Pixels>,
+    cell: &TerminalPaintGlyphCell,
+) -> Bounds<gpui::Pixels> {
+    Bounds {
+        origin,
+        size: size(
+            px(TERMINAL_CELL_WIDTH * f32::from(cell.cell_width.max(1))),
+            px(TERMINAL_CELL_HEIGHT),
+        ),
+    }
+}
+
+fn paint_terminal_cell_decorations(
+    origin: gpui::Point<gpui::Pixels>,
+    cell: &TerminalPaintGlyphCell,
+    window: &mut Window,
+) {
+    let width = px(TERMINAL_CELL_WIDTH * f32::from(cell.cell_width.max(1)));
+    let thickness = px(1.0);
+    if cell.overline {
+        window.paint_quad(fill(
+            Bounds {
+                origin,
+                size: size(width, thickness),
+            },
+            cell.color,
+        ));
+    }
+    if cell.strikethrough {
+        window.paint_quad(fill(
+            Bounds {
+                origin: point(origin.x, origin.y + px(TERMINAL_CELL_HEIGHT * 0.5)),
+                size: size(width, thickness),
+            },
+            cell.color,
+        ));
+    }
+    if cell.underline {
+        window.paint_quad(fill(
+            Bounds {
+                origin: point(origin.x, origin.y + px(TERMINAL_CELL_HEIGHT - 2.0)),
+                size: size(width, thickness),
+            },
+            cell.color,
+        ));
+    }
+}
+
+fn terminal_background_runs(
+    row_index: u16,
+    row: &octty_term::live::TerminalRowSnapshot,
+    snapshot: &TerminalGridSnapshot,
+    default_bg: Rgba,
+) -> Vec<TerminalPaintBackgroundRun> {
+    let mut runs = Vec::new();
+    let mut active: Option<TerminalPaintBackgroundRun> = None;
+
+    for (col, cell) in row.cells.iter().enumerate() {
+        let (_, bg) = terminal_effective_cell_colors(row_index, col as u16, cell, snapshot);
+        let bg = (bg != default_bg).then_some(bg);
+
+        match (&mut active, bg) {
+            (Some(run), Some(bg)) if run.color == bg && run.start_col + run.cell_count == col => {
+                run.cell_count += 1;
+            }
+            (Some(_), Some(bg)) => {
+                runs.push(active.take().expect("checked above"));
+                active = Some(TerminalPaintBackgroundRun {
+                    start_col: col,
+                    cell_count: 1,
+                    color: bg,
+                });
+            }
+            (None, Some(bg)) => {
+                active = Some(TerminalPaintBackgroundRun {
+                    start_col: col,
+                    cell_count: 1,
+                    color: bg,
+                });
+            }
+            (Some(_), None) => {
+                runs.push(active.take().expect("checked above"));
+            }
+            (None, None) => {}
+        }
+    }
+
+    if let Some(run) = active {
+        runs.push(run);
+    }
+
+    runs
+}
+
+fn terminal_effective_cell_colors(
+    row_index: u16,
+    col: u16,
+    cell: &octty_term::live::TerminalCellSnapshot,
+    snapshot: &TerminalGridSnapshot,
+) -> (Rgba, Rgba) {
+    let is_cursor = snapshot
+        .cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.visible && cursor.row == row_index && cursor.col == col);
+    let mut fg = cell
+        .fg
+        .map(terminal_rgb_to_rgba)
+        .unwrap_or_else(|| terminal_rgb_to_rgba(snapshot.default_fg));
+    let mut bg = cell
+        .bg
+        .map(terminal_rgb_to_rgba)
+        .unwrap_or_else(|| terminal_rgb_to_rgba(snapshot.default_bg));
+    if cell.inverse {
+        std::mem::swap(&mut fg, &mut bg);
+    }
+    if is_cursor {
+        fg = terminal_rgb_to_rgba(snapshot.default_bg);
+        bg = terminal_rgb_to_rgba(snapshot.default_fg);
+    } else if cell.faint {
+        fg = terminal_dim_color(fg, bg);
+    }
+    (fg, bg)
+}
+
+fn record_terminal_render_build_profile(input: &TerminalGridPaintInput, build_micros: u64) {
+    let sample = TerminalRenderProfileSample {
+        build_micros,
+        rows: input.rows,
+        cols: input.cols,
+        glyph_cells: input.glyph_cells.len(),
+        background_runs: input
+            .rows_data
+            .iter()
+            .map(|row| row.background_runs.len())
+            .sum(),
+        text_bytes: input.glyph_cells.iter().map(|cell| cell.text.len()).sum(),
+        dirty_rows: input.dirty_rows,
+        dirty_cells: input.dirty_cells,
+        rebuilt_rows: input.rebuilt_rows,
+        reused_rows: input.reused_rows,
+        ..TerminalRenderProfileSample::default()
+    };
+    record_terminal_render_profile(sample);
+}
+
+fn terminal_full_render_profile_sample(
+    surface: &TerminalFullPaintSurface,
     build_micros: u64,
 ) -> TerminalRenderProfileSample {
     TerminalRenderProfileSample {
         build_micros,
-        shape_micros: surface.shape_micros,
-        paint_micros: 0,
         rows: surface.input.rows,
         cols: surface.input.cols,
-        text_rows: surface.input.text_rows.len(),
-        text_runs: surface
-            .input
-            .text_rows
-            .iter()
-            .map(|row| row.style_run_count)
-            .sum(),
+        glyph_cells: surface.input.glyph_cells.len(),
+        glyph_cache_hits: surface.glyph_cache_hits,
+        glyph_cache_misses: surface.glyph_cache_misses,
         background_runs: surface
             .input
             .rows_data
@@ -2633,10 +3444,15 @@ fn terminal_render_profile_sample(
             .sum(),
         text_bytes: surface
             .input
-            .text_rows
+            .glyph_cells
             .iter()
-            .map(|row| row.text.len())
+            .map(|cell| cell.text.len())
             .sum(),
+        dirty_rows: surface.input.dirty_rows,
+        dirty_cells: surface.input.dirty_cells,
+        rebuilt_rows: surface.input.rebuilt_rows,
+        reused_rows: surface.input.reused_rows,
+        ..TerminalRenderProfileSample::default()
     }
 }
 
@@ -2678,21 +3494,36 @@ static TERMINAL_RENDER_PROFILER: OnceLock<Mutex<TerminalRenderProfiler>> = OnceL
 impl TerminalRenderProfiler {
     fn record(&mut self, sample: TerminalRenderProfileSample) {
         push_latency_sample(&mut self.build_micros, sample.build_micros);
-        push_latency_sample(&mut self.shape_micros, sample.shape_micros);
-        push_latency_sample(&mut self.paint_micros, sample.paint_micros);
-        push_latency_sample(&mut self.text_rows, sample.text_rows as u64);
-        push_latency_sample(&mut self.text_runs, sample.text_runs as u64);
+        if sample.shape_micros > 0 {
+            push_latency_sample(&mut self.shape_micros, sample.shape_micros);
+        }
+        if sample.paint_micros > 0 {
+            push_latency_sample(&mut self.paint_micros, sample.paint_micros);
+        }
+        push_latency_sample(&mut self.glyph_cells, sample.glyph_cells as u64);
+        push_latency_sample(&mut self.glyph_cache_hits, sample.glyph_cache_hits as u64);
+        push_latency_sample(
+            &mut self.glyph_cache_misses,
+            sample.glyph_cache_misses as u64,
+        );
         push_latency_sample(&mut self.background_runs, sample.background_runs as u64);
         push_latency_sample(&mut self.text_bytes, sample.text_bytes as u64);
+        push_latency_sample(&mut self.dirty_rows, sample.dirty_rows as u64);
+        push_latency_sample(&mut self.dirty_cells, sample.dirty_cells as u64);
+        push_latency_sample(&mut self.rebuilt_rows, sample.rebuilt_rows as u64);
+        push_latency_sample(&mut self.reused_rows, sample.reused_rows as u64);
     }
 
     fn summary(&self) -> Option<String> {
         let build = latency_summary(&self.build_micros)?;
-        let shape = latency_summary(&self.shape_micros)?;
-        let paint = latency_summary(&self.paint_micros)?;
-        Some(format!(
-            "render build {build} · shape {shape} · paint {paint}"
-        ))
+        let mut parts = vec![format!("render build {build}")];
+        if let Some(shape) = latency_summary(&self.shape_micros) {
+            parts.push(format!("shape {shape}"));
+        }
+        if let Some(paint) = latency_summary(&self.paint_micros) {
+            parts.push(format!("paint {paint}"));
+        }
+        Some(parts.join(" · "))
     }
 
     fn maybe_report(&mut self, sample: TerminalRenderProfileSample) {
@@ -2709,65 +3540,20 @@ impl TerminalRenderProfiler {
             return;
         };
         eprintln!(
-            "octty terminal render profile: {summary} · grid {}x{} · text rows {} · text runs {} · bg runs {} · text bytes {}",
+            "octty terminal render profile: {summary} · grid {}x{} · dirty rows {} · dirty cells {} · rebuilt rows {} · reused rows {} · glyph cells {} · glyph hits {} · glyph misses {} · bg runs {} · text bytes {}",
             sample.cols,
             sample.rows,
-            count_summary(&self.text_rows).unwrap_or_else(|| "n/a".to_owned()),
-            count_summary(&self.text_runs).unwrap_or_else(|| "n/a".to_owned()),
+            count_summary(&self.dirty_rows).unwrap_or_else(|| "n/a".to_owned()),
+            count_summary(&self.dirty_cells).unwrap_or_else(|| "n/a".to_owned()),
+            count_summary(&self.rebuilt_rows).unwrap_or_else(|| "n/a".to_owned()),
+            count_summary(&self.reused_rows).unwrap_or_else(|| "n/a".to_owned()),
+            count_summary(&self.glyph_cells).unwrap_or_else(|| "n/a".to_owned()),
+            count_summary(&self.glyph_cache_hits).unwrap_or_else(|| "n/a".to_owned()),
+            count_summary(&self.glyph_cache_misses).unwrap_or_else(|| "n/a".to_owned()),
             count_summary(&self.background_runs).unwrap_or_else(|| "n/a".to_owned()),
             count_summary(&self.text_bytes).unwrap_or_else(|| "n/a".to_owned())
         );
     }
-}
-
-fn terminal_cell_runs(
-    row_index: u16,
-    row: &octty_term::live::TerminalRowSnapshot,
-    snapshot: &TerminalGridSnapshot,
-) -> Vec<TerminalCellRun> {
-    let mut runs: Vec<TerminalCellRun> = Vec::new();
-    for (col, cell) in row.cells.iter().enumerate() {
-        let is_cursor = snapshot.cursor.as_ref().is_some_and(|cursor| {
-            cursor.visible && cursor.row == row_index && cursor.col == col as u16
-        });
-        let mut fg = cell.fg.map(terminal_rgb_to_rgba);
-        let mut bg = cell.bg.map(terminal_rgb_to_rgba);
-        if cell.inverse {
-            std::mem::swap(&mut fg, &mut bg);
-        }
-        if is_cursor {
-            fg = Some(terminal_rgb_to_rgba(snapshot.default_bg));
-            bg = Some(terminal_rgb_to_rgba(snapshot.default_fg));
-        }
-        let text = if cell.text.is_empty() {
-            " ".to_owned()
-        } else {
-            cell.text.clone()
-        };
-        let can_extend = runs.last().is_some_and(|run| {
-            run.fg == fg
-                && run.bg == bg
-                && run.bold == cell.bold
-                && run.italic == cell.italic
-                && run.underline == cell.underline
-        });
-        if can_extend {
-            let run = runs.last_mut().expect("checked above");
-            run.text.push_str(&text);
-            run.cell_count += 1;
-        } else {
-            runs.push(TerminalCellRun {
-                text,
-                cell_count: 1,
-                fg,
-                bg,
-                bold: cell.bold,
-                italic: cell.italic,
-                underline: cell.underline,
-            });
-        }
-    }
-    runs
 }
 
 fn pane_body_label(pane: &PaneState) -> String {
@@ -2995,6 +3781,15 @@ fn terminal_rgb_to_rgba(color: TerminalRgb) -> Rgba {
     }
 }
 
+fn terminal_dim_color(color: Rgba, target: Rgba) -> Rgba {
+    Rgba {
+        r: (color.r + target.r) * 0.5,
+        g: (color.g + target.g) * 0.5,
+        b: (color.b + target.b) * 0.5,
+        a: color.a,
+    }
+}
+
 fn workspace_status_label(state: &WorkspaceState) -> &'static str {
     match state {
         WorkspaceState::Published => "published",
@@ -3057,6 +3852,50 @@ mod tests {
         )
         .expect("backspace input");
         assert_eq!(backspace.key, LiveTerminalKey::Backspace);
+    }
+
+    #[test]
+    fn named_keys_do_not_forward_key_char_as_text() {
+        let escape = live_terminal_input_from_key_parts(
+            "escape",
+            Some("\\x1b"),
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .expect("escape input");
+        assert_eq!(escape.key, LiveTerminalKey::Escape);
+        assert_eq!(escape.text, None);
+
+        let up = live_terminal_input_from_key_parts(
+            "up",
+            Some("\\x1b[A"),
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .expect("up input");
+        assert_eq!(up.key, LiveTerminalKey::ArrowUp);
+        assert_eq!(up.text, None);
+    }
+
+    #[test]
+    fn control_characters_are_not_forwarded_as_text() {
+        let escape = live_terminal_input_from_key_parts(
+            "escape",
+            Some("\x1b"),
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .expect("escape input");
+        assert_eq!(escape.text, None);
     }
 
     #[test]
@@ -3163,6 +4002,71 @@ mod tests {
     }
 
     #[test]
+    fn terminal_snapshot_coalesce_keeps_dirty_rows_from_skipped_snapshots() {
+        let first = test_terminal_snapshot("session", 4, 3, vec![0, 1], false);
+        let second = test_terminal_snapshot("session", 4, 3, vec![2], false);
+
+        let snapshot =
+            coalesce_terminal_snapshots(vec![first, second]).expect("coalesced snapshot");
+
+        assert_eq!(snapshot.damage.rows, vec![0, 1, 2]);
+        assert!(snapshot.damage.full);
+        assert_eq!(snapshot.damage.cells, 12);
+        assert_eq!(snapshot.timing.dirty_rows, 3);
+        assert_eq!(snapshot.timing.dirty_cells, 12);
+    }
+
+    #[test]
+    fn terminal_snapshot_coalesce_forces_full_damage_on_resize() {
+        let first = test_terminal_snapshot("session", 4, 3, vec![1], false);
+        let second = test_terminal_snapshot("session", 4, 2, vec![0], false);
+
+        let snapshot =
+            coalesce_terminal_snapshots(vec![first, second]).expect("coalesced snapshot");
+
+        assert_eq!(snapshot.rows, 2);
+        assert_eq!(snapshot.damage.rows, vec![0, 1]);
+        assert!(snapshot.damage.full);
+        assert_eq!(snapshot.damage.cells, 8);
+    }
+
+    #[test]
+    fn terminal_replay_event_parser_keeps_resizes_and_output_order() {
+        let events = "\
+3 kind=start session=s cols=90 rows=20 output=/tmp/octty-record/session.pty
+9 kind=resize cols=87 rows=52 pixel_width=696 pixel_height=936
+10 kind=output offset=0 len=258 hex=1b5b
+11 kind=input source=key len=1 hex=6e
+12 kind=resize cols=87 rows=18 pixel_width=696 pixel_height=324
+13 kind=output offset=258 len=224 hex=1b5b
+";
+
+        let plan = parse_terminal_replay_events(events).expect("parsed trace");
+
+        assert_eq!(
+            plan.output_path,
+            PathBuf::from("/tmp/octty-record/session.pty")
+        );
+        assert_eq!(plan.initial_cols, 90);
+        assert_eq!(plan.initial_rows, 20);
+        assert_eq!(
+            plan.steps,
+            vec![
+                TerminalReplayEventsStep::Resize { cols: 87, rows: 52 },
+                TerminalReplayEventsStep::Output {
+                    offset: 0,
+                    len: 258
+                },
+                TerminalReplayEventsStep::Resize { cols: 87, rows: 18 },
+                TerminalReplayEventsStep::Output {
+                    offset: 258,
+                    len: 224
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn terminal_paint_input_shapes_only_visible_text_cells() {
         let default_fg = TerminalRgb {
             r: 200,
@@ -3177,34 +4081,53 @@ mod tests {
             default_fg,
             default_bg,
             cursor: None,
+            damage: octty_term::live::TerminalDamageSnapshot::default(),
             rows_data: vec![octty_term::live::TerminalRowSnapshot {
                 cells: vec![
                     octty_term::live::TerminalCellSnapshot {
                         text: String::new(),
+                        width: 1,
                         fg: None,
                         bg: None,
                         bold: false,
                         italic: false,
+                        faint: false,
+                        blink: false,
                         underline: false,
                         inverse: false,
+                        invisible: false,
+                        strikethrough: false,
+                        overline: false,
                     },
                     octty_term::live::TerminalCellSnapshot {
                         text: "a".to_owned(),
+                        width: 1,
                         fg: None,
                         bg: None,
                         bold: false,
                         italic: false,
+                        faint: false,
+                        blink: false,
                         underline: false,
                         inverse: false,
+                        invisible: false,
+                        strikethrough: false,
+                        overline: false,
                     },
                     octty_term::live::TerminalCellSnapshot {
                         text: String::new(),
+                        width: 1,
                         fg: None,
                         bg: None,
                         bold: false,
                         italic: false,
+                        faint: false,
+                        blink: false,
                         underline: false,
                         inverse: false,
+                        invisible: false,
+                        strikethrough: false,
+                        overline: false,
                     },
                 ],
             }],
@@ -3212,40 +4135,400 @@ mod tests {
             timing: octty_term::live::TerminalSnapshotTiming::default(),
         };
 
+        let mut render_cache = TerminalRenderCache::default();
         let input = terminal_paint_input(
             &snapshot,
             terminal_rgb_to_rgba(default_fg),
             terminal_rgb_to_rgba(default_bg),
+            &mut render_cache,
         );
 
-        assert_eq!(input.text_rows.len(), 1);
-        assert_eq!(input.text_rows[0].start_col, 1);
-        assert_eq!(input.text_rows[0].text.as_ref(), "a");
-        assert_eq!(input.text_rows[0].shape_style.len, 1);
-        assert_eq!(input.text_rows[0].foreground_runs.len(), 1);
+        assert_eq!(input.glyph_cells.len(), 1);
+        assert_eq!(input.glyph_cells[0].col_index, 1);
+        assert_eq!(input.glyph_cells[0].text.as_ref(), "a");
         assert!(input.rows_data[0].background_runs.is_empty());
+    }
+
+    #[test]
+    fn terminal_background_runs_ignore_foreground_style_splits() {
+        let default_fg = TerminalRgb {
+            r: 200,
+            g: 200,
+            b: 200,
+        };
+        let default_bg = TerminalRgb { r: 0, g: 0, b: 0 };
+        let highlighted_bg = TerminalRgb {
+            r: 20,
+            g: 60,
+            b: 80,
+        };
+        let snapshot = TerminalGridSnapshot {
+            session_id: "session-1".to_owned(),
+            cols: 4,
+            rows: 1,
+            default_fg,
+            default_bg,
+            cursor: None,
+            damage: octty_term::live::TerminalDamageSnapshot::default(),
+            rows_data: vec![octty_term::live::TerminalRowSnapshot {
+                cells: vec![
+                    picker_cell(
+                        "a",
+                        Some(TerminalRgb { r: 255, g: 0, b: 0 }),
+                        Some(highlighted_bg),
+                        false,
+                        false,
+                    ),
+                    picker_cell(
+                        "b",
+                        Some(TerminalRgb { r: 0, g: 255, b: 0 }),
+                        Some(highlighted_bg),
+                        true,
+                        false,
+                    ),
+                    picker_cell(
+                        "c",
+                        Some(TerminalRgb { r: 0, g: 0, b: 255 }),
+                        Some(highlighted_bg),
+                        false,
+                        true,
+                    ),
+                    picker_cell("d", None, Some(highlighted_bg), false, false),
+                ],
+            }],
+            plain_text: "abcd\n".to_owned(),
+            timing: octty_term::live::TerminalSnapshotTiming::default(),
+        };
+
+        let mut render_cache = TerminalRenderCache::default();
+        let input = terminal_paint_input(
+            &snapshot,
+            terminal_rgb_to_rgba(default_fg),
+            terminal_rgb_to_rgba(default_bg),
+            &mut render_cache,
+        );
+
+        assert_eq!(input.rows_data[0].background_runs.len(), 1);
+        assert_eq!(input.rows_data[0].background_runs[0].start_col, 0);
+        assert_eq!(input.rows_data[0].background_runs[0].cell_count, 4);
+    }
+
+    #[test]
+    fn terminal_background_runs_render_inverse_default_colors() {
+        let default_fg = TerminalRgb {
+            r: 200,
+            g: 200,
+            b: 200,
+        };
+        let default_bg = TerminalRgb { r: 0, g: 0, b: 0 };
+        let mut inverse_cell = picker_cell("a", None, None, false, false);
+        inverse_cell.inverse = true;
+        let snapshot = TerminalGridSnapshot {
+            session_id: "session-1".to_owned(),
+            cols: 2,
+            rows: 1,
+            default_fg,
+            default_bg,
+            cursor: None,
+            damage: octty_term::live::TerminalDamageSnapshot::default(),
+            rows_data: vec![octty_term::live::TerminalRowSnapshot {
+                cells: vec![inverse_cell, picker_cell("b", None, None, false, false)],
+            }],
+            plain_text: "ab\n".to_owned(),
+            timing: octty_term::live::TerminalSnapshotTiming::default(),
+        };
+
+        let mut render_cache = TerminalRenderCache::default();
+        let input = terminal_paint_input(
+            &snapshot,
+            terminal_rgb_to_rgba(default_fg),
+            terminal_rgb_to_rgba(default_bg),
+            &mut render_cache,
+        );
+
+        assert_eq!(input.rows_data[0].background_runs.len(), 1);
+        assert_eq!(input.rows_data[0].background_runs[0].start_col, 0);
+        assert_eq!(input.rows_data[0].background_runs[0].cell_count, 1);
+        assert_eq!(
+            input.rows_data[0].background_runs[0].color,
+            terminal_rgb_to_rgba(default_fg)
+        );
+        assert_eq!(
+            input.glyph_cells[0].color,
+            Hsla::from(terminal_rgb_to_rgba(default_bg))
+        );
+    }
+
+    #[test]
+    fn terminal_paint_input_rebuilds_only_dirty_rows() {
+        let default_fg = TerminalRgb {
+            r: 200,
+            g: 200,
+            b: 200,
+        };
+        let default_bg = TerminalRgb { r: 0, g: 0, b: 0 };
+        let mut snapshot = TerminalGridSnapshot {
+            session_id: "session-1".to_owned(),
+            cols: 2,
+            rows: 2,
+            default_fg,
+            default_bg,
+            cursor: None,
+            damage: octty_term::live::TerminalDamageSnapshot {
+                full: true,
+                rows: vec![0, 1],
+                cells: 4,
+            },
+            rows_data: vec![
+                octty_term::live::TerminalRowSnapshot {
+                    cells: vec![
+                        picker_cell("a", None, None, false, false),
+                        picker_cell("", None, None, false, false),
+                    ],
+                },
+                octty_term::live::TerminalRowSnapshot {
+                    cells: vec![
+                        picker_cell("x", None, None, false, false),
+                        picker_cell("", None, None, false, false),
+                    ],
+                },
+            ],
+            plain_text: "a\nx\n".to_owned(),
+            timing: octty_term::live::TerminalSnapshotTiming::default(),
+        };
+        let mut render_cache = TerminalRenderCache::default();
+
+        let first = terminal_paint_input(
+            &snapshot,
+            terminal_rgb_to_rgba(default_fg),
+            terminal_rgb_to_rgba(default_bg),
+            &mut render_cache,
+        );
+        assert_eq!(first.rebuilt_rows, 2);
+        assert_eq!(first.reused_rows, 0);
+
+        snapshot.damage = octty_term::live::TerminalDamageSnapshot {
+            full: false,
+            rows: vec![1],
+            cells: 2,
+        };
+        snapshot.rows_data[1].cells[0].text = "b".to_owned();
+        let second = terminal_paint_input(
+            &snapshot,
+            terminal_rgb_to_rgba(default_fg),
+            terminal_rgb_to_rgba(default_bg),
+            &mut render_cache,
+        );
+
+        assert_eq!(second.rebuilt_rows, 1);
+        assert_eq!(second.reused_rows, 1);
+        assert!(
+            second
+                .glyph_cells
+                .iter()
+                .any(|cell| cell.row_index == 0 && cell.text.as_ref() == "a")
+        );
+        assert!(
+            second
+                .glyph_cells
+                .iter()
+                .any(|cell| cell.row_index == 1 && cell.text.as_ref() == "b")
+        );
+    }
+
+    #[test]
+    fn terminal_paint_input_keeps_glyphs_on_original_cell_columns() {
+        let default_fg = TerminalRgb {
+            r: 200,
+            g: 200,
+            b: 200,
+        };
+        let default_bg = TerminalRgb { r: 0, g: 0, b: 0 };
+        let snapshot = TerminalGridSnapshot {
+            session_id: "session-1".to_owned(),
+            cols: 3,
+            rows: 1,
+            default_fg,
+            default_bg,
+            cursor: None,
+            damage: octty_term::live::TerminalDamageSnapshot::default(),
+            rows_data: vec![octty_term::live::TerminalRowSnapshot {
+                cells: vec![
+                    picker_cell("\u{65}\u{301}", None, None, false, false),
+                    picker_cell("", None, None, false, false),
+                    picker_cell("x", None, None, false, false),
+                ],
+            }],
+            plain_text: "\u{65}\u{301} x\n".to_owned(),
+            timing: octty_term::live::TerminalSnapshotTiming::default(),
+        };
+
+        let mut render_cache = TerminalRenderCache::default();
+        let input = terminal_paint_input(
+            &snapshot,
+            terminal_rgb_to_rgba(default_fg),
+            terminal_rgb_to_rgba(default_bg),
+            &mut render_cache,
+        );
+
+        let glyph_columns: Vec<_> = input
+            .glyph_cells
+            .iter()
+            .map(|cell| (cell.col_index, cell.text.to_string()))
+            .collect();
+        assert_eq!(
+            glyph_columns,
+            vec![(0, "\u{65}\u{301}".to_owned()), (2, "x".to_owned())]
+        );
+    }
+
+    #[test]
+    fn terminal_paint_input_preserves_wide_cell_widths() {
+        let default_fg = TerminalRgb {
+            r: 200,
+            g: 200,
+            b: 200,
+        };
+        let default_bg = TerminalRgb { r: 0, g: 0, b: 0 };
+        let mut wide = picker_cell("表", None, None, false, false);
+        wide.width = 2;
+        let mut spacer = picker_cell("", None, None, false, false);
+        spacer.width = 0;
+        let snapshot = TerminalGridSnapshot {
+            session_id: "session-1".to_owned(),
+            cols: 3,
+            rows: 1,
+            default_fg,
+            default_bg,
+            cursor: None,
+            damage: octty_term::live::TerminalDamageSnapshot::default(),
+            rows_data: vec![octty_term::live::TerminalRowSnapshot {
+                cells: vec![wide, spacer, picker_cell("x", None, None, false, false)],
+            }],
+            plain_text: "表 x\n".to_owned(),
+            timing: octty_term::live::TerminalSnapshotTiming::default(),
+        };
+
+        let mut render_cache = TerminalRenderCache::default();
+        let input = terminal_paint_input(
+            &snapshot,
+            terminal_rgb_to_rgba(default_fg),
+            terminal_rgb_to_rgba(default_bg),
+            &mut render_cache,
+        );
+
+        let glyph_cells: Vec<_> = input
+            .glyph_cells
+            .iter()
+            .map(|cell| (cell.col_index, cell.cell_width, cell.text.to_string()))
+            .collect();
+        assert_eq!(
+            glyph_cells,
+            vec![(0, 2, "表".to_owned()), (2, 1, "x".to_owned())]
+        );
+    }
+
+    #[test]
+    fn terminal_paint_input_moves_highlight_for_dirty_rows() {
+        let default_fg = TerminalRgb {
+            r: 200,
+            g: 200,
+            b: 200,
+        };
+        let default_bg = TerminalRgb { r: 0, g: 0, b: 0 };
+        let marker_bg = TerminalRgb {
+            r: 30,
+            g: 90,
+            b: 120,
+        };
+        let mut snapshot = TerminalGridSnapshot {
+            session_id: "session-1".to_owned(),
+            cols: 4,
+            rows: 2,
+            default_fg,
+            default_bg,
+            cursor: None,
+            damage: octty_term::live::TerminalDamageSnapshot {
+                full: true,
+                rows: vec![0, 1],
+                cells: 8,
+            },
+            rows_data: vec![
+                octty_term::live::TerminalRowSnapshot {
+                    cells: vec![
+                        picker_cell("a", None, Some(marker_bg), false, false),
+                        picker_cell("b", None, Some(marker_bg), false, false),
+                        picker_cell("c", None, Some(marker_bg), false, false),
+                        picker_cell("d", None, Some(marker_bg), false, false),
+                    ],
+                },
+                octty_term::live::TerminalRowSnapshot {
+                    cells: vec![
+                        picker_cell("w", None, None, false, false),
+                        picker_cell("x", None, None, false, false),
+                        picker_cell("y", None, None, false, false),
+                        picker_cell("z", None, None, false, false),
+                    ],
+                },
+            ],
+            plain_text: "abcd\nwxyz\n".to_owned(),
+            timing: octty_term::live::TerminalSnapshotTiming::default(),
+        };
+        let mut render_cache = TerminalRenderCache::default();
+
+        let first = terminal_paint_input(
+            &snapshot,
+            terminal_rgb_to_rgba(default_fg),
+            terminal_rgb_to_rgba(default_bg),
+            &mut render_cache,
+        );
+        assert_eq!(first.rows_data[0].background_runs.len(), 1);
+        assert!(first.rows_data[1].background_runs.is_empty());
+
+        snapshot.damage = octty_term::live::TerminalDamageSnapshot {
+            full: false,
+            rows: vec![0, 1],
+            cells: 8,
+        };
+        for cell in &mut snapshot.rows_data[0].cells {
+            cell.bg = None;
+        }
+        for cell in &mut snapshot.rows_data[1].cells {
+            cell.bg = Some(marker_bg);
+        }
+        let second = terminal_paint_input(
+            &snapshot,
+            terminal_rgb_to_rgba(default_fg),
+            terminal_rgb_to_rgba(default_bg),
+            &mut render_cache,
+        );
+
+        assert_eq!(second.rebuilt_rows, 2);
+        assert!(second.rows_data[0].background_runs.is_empty());
+        assert_eq!(second.rows_data[1].background_runs.len(), 1);
+        assert_eq!(second.rows_data[1].background_runs[0].start_col, 0);
+        assert_eq!(second.rows_data[1].background_runs[0].cell_count, 4);
     }
 
     #[test]
     fn terminal_picker_preview_workload_has_dense_runs_and_backgrounds() {
         let snapshot = picker_preview_snapshot(7, 120, 40);
+        let mut render_cache = TerminalRenderCache::default();
         let input = terminal_paint_input(
             &snapshot,
             terminal_rgb_to_rgba(snapshot.default_fg),
             terminal_rgb_to_rgba(snapshot.default_bg),
+            &mut render_cache,
         );
         let background_runs: usize = input
             .rows_data
             .iter()
             .map(|row| row.background_runs.len())
             .sum();
-        let style_runs: usize = input.text_rows.iter().map(|row| row.style_run_count).sum();
 
         assert_eq!(input.cols, 120);
         assert_eq!(input.rows, 40);
-        assert!(input.text_rows.len() <= 40);
-        assert!(input.text_rows.len() > 30);
-        assert!(style_runs > 180);
+        assert!(input.glyph_cells.len() > 1_000);
         assert!(background_runs > 40);
     }
 
@@ -3253,9 +4536,11 @@ mod tests {
     #[ignore = "profiling workload; run with --ignored --nocapture"]
     fn terminal_picker_preview_paint_input_profile() {
         let mut samples = VecDeque::new();
-        let mut text_rows = VecDeque::new();
-        let mut text_runs = VecDeque::new();
+        let mut glyph_cells = VecDeque::new();
         let mut background_runs = VecDeque::new();
+        let mut rebuilt_rows = VecDeque::new();
+        let mut reused_rows = VecDeque::new();
+        let mut render_cache = TerminalRenderCache::default();
 
         for frame in 0..240 {
             let snapshot = picker_preview_snapshot(frame, 120, 40);
@@ -3264,17 +4549,12 @@ mod tests {
                 &snapshot,
                 terminal_rgb_to_rgba(snapshot.default_fg),
                 terminal_rgb_to_rgba(snapshot.default_bg),
+                &mut render_cache,
             );
             push_latency_sample(&mut samples, duration_micros(started_at.elapsed()));
-            push_latency_sample(&mut text_rows, input.text_rows.len() as u64);
-            push_latency_sample(
-                &mut text_runs,
-                input
-                    .text_rows
-                    .iter()
-                    .map(|row| row.style_run_count)
-                    .sum::<usize>() as u64,
-            );
+            push_latency_sample(&mut glyph_cells, input.glyph_cells.len() as u64);
+            push_latency_sample(&mut rebuilt_rows, input.rebuilt_rows as u64);
+            push_latency_sample(&mut reused_rows, input.reused_rows as u64);
             push_latency_sample(
                 &mut background_runs,
                 input
@@ -3287,10 +4567,11 @@ mod tests {
         }
 
         println!(
-            "picker preview paint-input: {} · text rows {} · text runs {} · background runs {}",
+            "picker preview paint-input: {} · glyph cells {} · rebuilt rows {} · reused rows {} · background runs {}",
             latency_summary(&samples).unwrap(),
-            count_summary(&text_rows).unwrap(),
-            count_summary(&text_runs).unwrap(),
+            count_summary(&glyph_cells).unwrap(),
+            count_summary(&rebuilt_rows).unwrap(),
+            count_summary(&reused_rows).unwrap(),
             count_summary(&background_runs).unwrap()
         );
     }
@@ -3492,6 +4773,11 @@ mod tests {
                 row: ((frame % (rows as usize - 2)) + 1) as u16,
                 visible: true,
             }),
+            damage: octty_term::live::TerminalDamageSnapshot {
+                full: true,
+                rows: (0..rows).collect(),
+                cells: u32::from(cols) * u32::from(rows),
+            },
             rows_data,
             plain_text: String::new(),
             timing: octty_term::live::TerminalSnapshotTiming::default(),
@@ -3612,12 +4898,65 @@ mod tests {
     ) -> octty_term::live::TerminalCellSnapshot {
         octty_term::live::TerminalCellSnapshot {
             text: text.to_owned(),
+            width: 1,
             fg,
             bg,
             bold,
             italic,
+            faint: false,
+            blink: false,
             underline: false,
             inverse: false,
+            invisible: false,
+            strikethrough: false,
+            overline: false,
+        }
+    }
+
+    fn test_terminal_snapshot(
+        session_id: &str,
+        cols: u16,
+        rows: u16,
+        dirty_rows: Vec<u16>,
+        full_damage: bool,
+    ) -> TerminalGridSnapshot {
+        let default_fg = TerminalRgb {
+            r: 210,
+            g: 216,
+            b: 222,
+        };
+        let default_bg = TerminalRgb {
+            r: 30,
+            g: 34,
+            b: 48,
+        };
+        let rows_data = (0..rows)
+            .map(|_| octty_term::live::TerminalRowSnapshot {
+                cells: (0..cols)
+                    .map(|_| picker_cell("", None, None, false, false))
+                    .collect(),
+            })
+            .collect();
+        let damage_cells = dirty_rows.len().saturating_mul(usize::from(cols)) as u32;
+        TerminalGridSnapshot {
+            session_id: session_id.to_owned(),
+            cols,
+            rows,
+            default_fg,
+            default_bg,
+            cursor: None,
+            damage: octty_term::live::TerminalDamageSnapshot {
+                full: full_damage,
+                rows: dirty_rows,
+                cells: damage_cells,
+            },
+            rows_data,
+            plain_text: String::new(),
+            timing: octty_term::live::TerminalSnapshotTiming {
+                dirty_rows: damage_cells / u32::from(cols),
+                dirty_cells: damage_cells,
+                ..Default::default()
+            },
         }
     }
 }

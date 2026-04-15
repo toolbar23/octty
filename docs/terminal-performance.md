@@ -65,9 +65,15 @@ The terminal label and stderr now include these buckets:
 - `upd`: `RenderState::update`.
 - `extract`: Octty row/cell snapshot extraction.
 - `snap`: full snapshot build.
-- `render build`: Octty snapshot-to-paint-input construction.
-- `shape`: GPUI text shaping inside canvas prepaint.
-- `paint`: GPUI canvas paint.
+- `dirty rows` / `dirty cells`: row-hash damage detected at the VT boundary.
+- `render build`: Octty snapshot-to-persistent-row-cache construction.
+- `rebuilt rows` / `reused rows`: app render rows rebuilt from dirty rows vs
+  reused from the persistent row cache.
+- `shape`: glyph-cache lookup time plus GPUI shaping for glyph cache misses
+  when a row is repainted.
+- `paint`: GPUI row paint time when a row is repainted.
+- `glyph cells`: non-space terminal cells in the current render input.
+- `glyph hits` / `glyph misses`: per-glyph layout cache reuse vs new shapes.
 
 Synthetic profile tests:
 

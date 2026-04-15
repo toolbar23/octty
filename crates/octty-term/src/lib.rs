@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 use octty_core::TerminalKind;
@@ -39,6 +40,8 @@ set -g mouse off
 unbind-key -a
 unbind-key -a -T root
 "#;
+
+static TMUX_CONFIG_SOURCED: OnceLock<()> = OnceLock::new();
 
 #[derive(Debug, Error)]
 pub enum TerminalError {
@@ -295,7 +298,30 @@ pub(crate) fn ensure_tmux_config() -> Result<PathBuf, TerminalError> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&config_path, OCTTY_TMUX_CONFIG)?;
+    TMUX_CONFIG_SOURCED.get_or_init(|| {
+        let _ = source_tmux_config_for_existing_server(&config_path);
+    });
     Ok(config_path)
+}
+
+fn source_tmux_config_for_existing_server(config_path: &Path) -> Result<(), TerminalError> {
+    let output = std::process::Command::new("tmux")
+        .args([
+            "-L",
+            tmux_socket_name().as_str(),
+            "source-file",
+            config_path.to_string_lossy().as_ref(),
+        ])
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(TerminalError::Tmux(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ))
+    }
 }
 
 fn tmux_config_path() -> PathBuf {
