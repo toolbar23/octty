@@ -13,19 +13,18 @@ use std::{
 
 use futures::{StreamExt, channel::mpsc};
 use gpui::{
-    Action, AnyView, App, Application, Bounds, ClipboardEntry, ClipboardItem, Context, Corner,
-    Entity, FocusHandle, Font, FontFallbacks, FontFeatures, Hsla, Image, ImageFormat, IntoElement,
-    KeyBinding, KeyDownEvent, Menu, MenuItem, Modifiers, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render, Rgba,
-    ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString, TextRun, Window, WindowBounds,
-    WindowOptions, anchored, canvas, deferred, div, fill, font, point, prelude::*, px, rgb, rgba,
-    size,
+    Action, Animation, AnimationExt as _, AnyView, App, Application, Bounds, ClipboardEntry,
+    ClipboardItem, Context, Corner, Entity, FocusHandle, Font, FontFallbacks, FontFeatures, Hsla,
+    Image, ImageFormat, IntoElement, KeyBinding, KeyDownEvent, Menu, MenuItem, Modifiers,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
+    PromptLevel, Render, Rgba, ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString, TextRun,
+    Window, WindowBounds, WindowOptions, anchored, canvas, deferred, div, fill, font, point,
+    prelude::*, px, rgb, rgba, size,
 };
 use gpui_component::{
-    Icon, IconName, Root, Sizable,
+    Icon, IconName, PixelsExt, Root, Sizable,
     input::{Input, InputState},
     scroll::ScrollableElement,
-    spinner::Spinner,
     tag::Tag,
 };
 use octty_core::{

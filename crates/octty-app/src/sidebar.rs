@@ -555,14 +555,56 @@ pub(crate) fn render_workspace_activity_icon(activity_state: ActivityState) -> g
         .h(px(9.0))
         .rounded_full();
     match activity_state {
-        ActivityState::Active => base.flex().items_center().justify_center().child(
-            Spinner::new()
-                .with_size(px(9.0))
-                .color(rgb(0x5f7bff).into()),
-        ),
+        ActivityState::Active => base.child(render_workspace_activity_spinner()),
         ActivityState::IdleUnseen => base.bg(rgb(0x4a7cff)),
         ActivityState::IdleSeen => base.bg(rgb(0x6b7280)),
     }
+}
+
+fn render_workspace_activity_spinner() -> impl IntoElement {
+    workspace_activity_spinner_canvas(0.0).with_animation(
+        "workspace-activity-spinner",
+        Animation::new(Duration::from_millis(750)).repeat(),
+        |_, delta| workspace_activity_spinner_canvas(delta),
+    )
+}
+
+fn workspace_activity_spinner_canvas(phase: f32) -> impl IntoElement {
+    const DOTS: usize = 8;
+    const DOT_SIZE: f32 = 1.8;
+    const RADIUS: f32 = 3.0;
+
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let center_x =
+                bounds.origin.x.as_f64() as f32 + bounds.size.width.as_f64() as f32 / 2.0;
+            let center_y =
+                bounds.origin.y.as_f64() as f32 + bounds.size.height.as_f64() as f32 / 2.0;
+            let head = phase * DOTS as f32;
+            let color = Hsla::from(rgb(0x5f7bff));
+
+            for dot in 0..DOTS {
+                let angle = (dot as f32 / DOTS as f32) * std::f32::consts::TAU;
+                let x = center_x + angle.cos() * RADIUS - DOT_SIZE / 2.0;
+                let y = center_y + angle.sin() * RADIUS - DOT_SIZE / 2.0;
+                let age = (head - dot as f32).rem_euclid(DOTS as f32);
+                let opacity = 1.0 - (age / DOTS as f32) * 0.8;
+
+                window.paint_quad(
+                    fill(
+                        Bounds {
+                            origin: point(px(x), px(y)),
+                            size: size(px(DOT_SIZE), px(DOT_SIZE)),
+                        },
+                        color.opacity(opacity),
+                    )
+                    .corner_radii(px(DOT_SIZE / 2.0)),
+                );
+            }
+        },
+    )
+    .size_full()
 }
 
 pub(crate) fn render_workspace_status_tag(state: &WorkspaceState, changed: bool) -> Tag {
