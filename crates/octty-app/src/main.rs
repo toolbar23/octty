@@ -16,14 +16,15 @@ use gpui::{
     Action, AnyView, App, Application, Bounds, ClipboardEntry, ClipboardItem, Context, Corner,
     Entity, FocusHandle, Font, FontFallbacks, FontFeatures, Hsla, Image, ImageFormat, IntoElement,
     KeyBinding, KeyDownEvent, Menu, MenuItem, Modifiers, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, PromptLevel, Render, Rgba, ScrollDelta,
-    ScrollWheelEvent, ShapedLine, SharedString, TextRun, Window, WindowBounds, WindowOptions,
-    anchored, canvas, deferred, div, fill, font, point, prelude::*, px, rgb, rgba, size,
+    MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render, Rgba,
+    ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString, TextRun, Window, WindowBounds,
+    WindowOptions, anchored, canvas, deferred, div, fill, font, point, prelude::*, px, rgb, rgba,
+    size,
 };
 use gpui_component::{
-    Root, Sizable, WindowExt,
-    dialog::DialogButtonProps,
+    Icon, IconName, Root, Sizable,
     input::{Input, InputState},
+    scroll::ScrollableElement,
     tag::Tag,
 };
 use octty_core::{
@@ -60,9 +61,6 @@ const TERMINAL_DEBUG_TIMER_FONT_SIZE: f32 = 10.0;
 const TERMINAL_DEBUG_TIMER_LINE_HEIGHT: f32 = 12.0;
 const TERMINAL_SURFACE_PADDING_Y: f32 = 16.0;
 const TERMINAL_SURFACE_DEBUG_TIMER_MARGIN_BOTTOM: f32 = 4.0;
-const TERMINAL_SURFACE_CHROME_HEIGHT: f32 = TERMINAL_SURFACE_PADDING_Y
-    + TERMINAL_DEBUG_TIMER_LINE_HEIGHT
-    + TERMINAL_SURFACE_DEBUG_TIMER_MARGIN_BOTTOM;
 const TERMINAL_TASKSPACE_VERTICAL_CHROME_HEIGHT: f32 = 176.0;
 const WORKSPACE_SIDEBAR_WIDTH: f32 = 280.0;
 const TASKSPACE_HORIZONTAL_PADDING: f32 = 48.0;
@@ -127,6 +125,10 @@ struct CloseActivePane;
 struct ResizeFocusedColumn {
     direction: ColumnResizeDirection,
 }
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
+struct AddProjectRoot;
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
@@ -278,6 +280,18 @@ struct SidebarMenuOverlay {
     menu: Entity<SidebarMenuView>,
 }
 
+struct SidebarRenameDialog {
+    target: SidebarRenameTarget,
+    title: SharedString,
+    input: Entity<InputState>,
+}
+
+#[derive(Clone)]
+struct AppToast {
+    id: u64,
+    message: SharedString,
+}
+
 struct SidebarMenuView {
     app: Entity<OcttyApp>,
     focus_handle: FocusHandle,
@@ -396,6 +410,9 @@ struct OcttyApp {
     terminal_glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
     terminal_render_cache: Rc<RefCell<TerminalRenderCache>>,
     sidebar_menu: Option<SidebarMenuOverlay>,
+    sidebar_rename_dialog: Option<SidebarRenameDialog>,
+    toasts: VecDeque<AppToast>,
+    next_toast_id: u64,
 }
 
 struct LiveTerminalPane {
@@ -455,7 +472,7 @@ struct TerminalLatencyStats {
 }
 
 impl OcttyApp {
-    fn new(bootstrap: BootstrapState, focus_handle: FocusHandle) -> Self {
+    fn new(bootstrap: BootstrapState, focus_handle: FocusHandle, cx: &mut Context<Self>) -> Self {
         let (terminal_snapshot_tx, terminal_snapshot_rx) = mpsc::unbounded();
         let mut app = Self {
             status: bootstrap.status.into(),
@@ -478,8 +495,14 @@ impl OcttyApp {
             terminal_glyph_cache: Rc::new(RefCell::new(TerminalGlyphLayoutCache::default())),
             terminal_render_cache: Rc::new(RefCell::new(TerminalRenderCache::default())),
             sidebar_menu: None,
+            sidebar_rename_dialog: None,
+            toasts: VecDeque::new(),
+            next_toast_id: 1,
         };
-        app.ensure_live_terminals_for_active_snapshot();
+        if app.status.starts_with("Startup failed:") {
+            app.show_error(app.status.clone(), cx);
+        }
+        app.ensure_live_terminals_for_active_snapshot(cx);
         app
     }
 
@@ -530,13 +553,15 @@ impl OcttyApp {
                 match result {
                     Ok(snapshot) => {
                         app.active_snapshot = Some(snapshot);
-                        app.ensure_live_terminals_for_active_snapshot();
+                        app.ensure_live_terminals_for_active_snapshot(cx);
                         app.schedule_terminal_snapshot_notifications(cx);
                         app.status = format!("Opened {workspace_display_name}.").into();
                     }
                     Err(error) => {
-                        app.status =
-                            format!("Failed to open {workspace_display_name}: {error:#}").into();
+                        app.show_error(
+                            format!("Failed to open {workspace_display_name}: {error:#}"),
+                            cx,
+                        );
                     }
                 }
                 cx.notify();
@@ -570,6 +595,54 @@ impl OcttyApp {
         }
 
         self.open_workspace(&OpenWorkspaceShortcut { index: target }, window, cx);
+    }
+
+    fn add_project_root(&mut self, _: &AddProjectRoot, _: &mut Window, cx: &mut Context<Self>) {
+        let path_rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Add repository".into()),
+        });
+        let store_path = self.store_path.clone();
+        let active_workspace_id = self
+            .active_workspace()
+            .map(|workspace| workspace.id.clone());
+        self.status = "Choose a JJ repository directory...".into();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let selected_path = match path_rx.await {
+                Ok(Ok(Some(paths))) => match paths.into_iter().next() {
+                    Some(path) => Ok(path),
+                    None => Err(anyhow::anyhow!("no repository directory was selected")),
+                },
+                Ok(Ok(None)) => return,
+                Ok(Err(error)) => Err(error),
+                Err(error) => Err(anyhow::anyhow!("repository picker failed: {error}")),
+            };
+            let result = match selected_path {
+                Ok(selected_path) => match gpui_tokio::Tokio::spawn_result(cx, async move {
+                    add_project_root_and_reload(store_path, selected_path, active_workspace_id)
+                        .await
+                }) {
+                    Ok(task) => task.await,
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            };
+
+            let _ = this.update(cx, |app, cx| {
+                match result {
+                    Ok(bootstrap) => app.apply_bootstrap(bootstrap, cx),
+                    Err(error) => {
+                        app.show_error(format!("Failed to add repository: {error:#}"), cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn create_workspace_for_root(
@@ -656,7 +729,7 @@ impl OcttyApp {
                 match result {
                     Ok(bootstrap) => app.apply_bootstrap(bootstrap, cx),
                     Err(error) => {
-                        app.status = format!("Failed to forget project root: {error:#}").into();
+                        app.show_error(format!("Failed to forget project root: {error:#}"), cx);
                     }
                 }
                 cx.notify();
@@ -811,38 +884,33 @@ impl OcttyApp {
             SidebarRenameTarget::Workspace(_) => "Rename workspace",
         };
         let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
-        let app_entity = cx.entity();
-        window.open_dialog(cx, {
-            let input = input.clone();
-            move |dialog, _, _| {
-                dialog
-                    .title(title)
-                    .confirm()
-                    .button_props(DialogButtonProps::default().ok_text("Rename"))
-                    .child(Input::new(&input).appearance(false).bordered(true))
-                    .on_ok({
-                        let input = input.clone();
-                        let app_entity = app_entity.clone();
-                        let target = target.clone();
-                        move |_, _window, cx| {
-                            let display_name =
-                                sanitize_display_name(&input.read(cx).value().to_string());
-                            if display_name.is_empty() {
-                                let _ = app_entity.update(cx, |app, cx| {
-                                    app.status = "Display name cannot be empty.".into();
-                                    cx.notify();
-                                });
-                                return false;
-                            }
-                            let _ = app_entity.update(cx, |app, cx| {
-                                app.rename_sidebar_target(target.clone(), display_name, cx);
-                            });
-                            true
-                        }
-                    })
-            }
+        self.sidebar_menu = None;
+        self.sidebar_rename_dialog = Some(SidebarRenameDialog {
+            target,
+            title: title.into(),
+            input: input.clone(),
         });
         input.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    fn cancel_sidebar_rename_dialog(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_rename_dialog = None;
+        cx.notify();
+    }
+
+    fn confirm_sidebar_rename_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.sidebar_rename_dialog.take() else {
+            return;
+        };
+        let display_name = sanitize_display_name(&dialog.input.read(cx).value().to_string());
+        if display_name.is_empty() {
+            self.sidebar_rename_dialog = Some(dialog);
+            self.show_error("Display name cannot be empty.", cx);
+            return;
+        }
+
+        self.rename_sidebar_target(dialog.target, display_name, cx);
     }
 
     fn confirm_and_forget_workspace(
@@ -861,8 +929,7 @@ impl OcttyApp {
             return;
         };
         if workspace.workspace_name == "default" {
-            self.status = "The default workspace cannot be forgotten.".into();
-            cx.notify();
+            self.show_error("The default workspace cannot be forgotten.", cx);
             return;
         }
         let active_workspace_id = self
@@ -910,7 +977,7 @@ impl OcttyApp {
                 match result {
                     Ok(bootstrap) => app.apply_bootstrap(bootstrap, cx),
                     Err(error) => {
-                        app.status = format!("Failed to forget workspace: {error:#}").into();
+                        app.show_error(format!("Failed to forget workspace: {error:#}"), cx);
                     }
                 }
                 cx.notify();
@@ -982,7 +1049,7 @@ impl OcttyApp {
                 match result {
                     Ok(bootstrap) => app.apply_bootstrap(bootstrap, cx),
                     Err(error) => {
-                        app.status = format!("Navigation action failed: {error:#}").into()
+                        app.show_error(format!("Navigation action failed: {error:#}"), cx);
                     }
                 }
                 cx.notify();
@@ -997,8 +1064,33 @@ impl OcttyApp {
         self.workspaces = bootstrap.workspaces;
         self.active_workspace_index = bootstrap.active_workspace_index;
         self.active_snapshot = bootstrap.active_snapshot;
-        self.ensure_live_terminals_for_active_snapshot();
+        self.ensure_live_terminals_for_active_snapshot(cx);
         self.schedule_terminal_snapshot_notifications(cx);
+    }
+
+    fn show_error(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let message = message.into();
+        self.status = message.clone();
+        let id = self.next_toast_id;
+        self.next_toast_id = self.next_toast_id.wrapping_add(1).max(1);
+        self.toasts.push_back(AppToast { id, message });
+        while self.toasts.len() > 4 {
+            self.toasts.pop_front();
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(6)).await;
+            let _ = this.update(cx, |app, cx| app.dismiss_toast(id, cx));
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn dismiss_toast(&mut self, id: u64, cx: &mut Context<Self>) {
+        let before = self.toasts.len();
+        self.toasts.retain(|toast| toast.id != id);
+        if self.toasts.len() != before {
+            cx.notify();
+        }
     }
 
     fn add_shell_pane(&mut self, _: &AddShellPane, _: &mut Window, cx: &mut Context<Self>) {
@@ -1026,8 +1118,7 @@ impl OcttyApp {
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    self.status = format!("Clipboard paste failed: {error:#}").into();
-                    cx.notify();
+                    self.show_error(format!("Clipboard paste failed: {error:#}"), cx);
                 }
             }
         }
@@ -1249,7 +1340,7 @@ impl OcttyApp {
                     .map(|live| live.handle.session_id().to_owned());
                 self.status = format!("Closed pane {pane_id}.").into();
                 self.active_snapshot = Some(snapshot.clone());
-                self.ensure_live_terminals_for_active_snapshot();
+                self.ensure_live_terminals_for_active_snapshot(cx);
                 self.schedule_terminal_snapshot_notifications(cx);
                 self.save_workspace_snapshot(
                     snapshot,
@@ -1262,8 +1353,7 @@ impl OcttyApp {
                 cx.notify();
             }
             Err(error) => {
-                self.status = format!("Failed to close pane: {error:#}").into();
-                cx.notify();
+                self.show_error(format!("Failed to close pane: {error:#}"), cx);
             }
         }
     }
@@ -1293,8 +1383,7 @@ impl OcttyApp {
 
     fn add_pane(&mut self, pane_type: PaneType, cx: &mut Context<Self>) {
         let Some(workspace) = self.active_workspace().cloned() else {
-            self.status = "No active workspace.".into();
-            cx.notify();
+            self.show_error("No active workspace.", cx);
             return;
         };
 
@@ -1313,8 +1402,10 @@ impl OcttyApp {
             match prepare_live_terminal_snapshot(&workspace, snapshot.clone(), &pane_id) {
                 Ok(snapshot) => (snapshot, true),
                 Err(error) => {
-                    self.status =
-                        format!("Added pane, but terminal metadata failed: {error:#}").into();
+                    self.show_error(
+                        format!("Added pane, but terminal metadata failed: {error:#}"),
+                        cx,
+                    );
                     (snapshot, false)
                 }
             }
@@ -1337,7 +1428,7 @@ impl OcttyApp {
             .into();
         }
         self.active_snapshot = Some(snapshot.clone());
-        self.ensure_live_terminals_for_active_snapshot();
+        self.ensure_live_terminals_for_active_snapshot(cx);
         self.schedule_terminal_snapshot_notifications(cx);
         self.save_workspace_snapshot(snapshot, "Failed to save taskspace", cx);
         cx.notify();
@@ -1375,8 +1466,7 @@ impl OcttyApp {
             };
             if let Err(error) = result {
                 let _ = this.update(cx, |app, cx| {
-                    app.status = format!("{error_context}: {error:#}").into();
-                    cx.notify();
+                    app.show_error(format!("{error_context}: {error:#}"), cx);
                 });
             }
         })
@@ -1395,11 +1485,12 @@ impl OcttyApp {
             };
             if let Err(error) = result {
                 let _ = this.update(cx, |app, cx| {
-                    app.status = format!(
-                        "Closed pane, but failed to stop {session_id_for_error}: {error:#}"
-                    )
-                    .into();
-                    cx.notify();
+                    app.show_error(
+                        format!(
+                            "Closed pane, but failed to stop {session_id_for_error}: {error:#}"
+                        ),
+                        cx,
+                    );
                 });
             }
         })
@@ -1412,6 +1503,16 @@ impl OcttyApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.sidebar_rename_dialog.is_some() {
+            match event.keystroke.key.to_ascii_lowercase().as_str() {
+                "enter" => self.confirm_sidebar_rename_dialog(cx),
+                "escape" => self.cancel_sidebar_rename_dialog(cx),
+                _ => {}
+            }
+            cx.stop_propagation();
+            return;
+        }
+
         if let Some(index) = workspace_shortcut_index_from_key_event(event) {
             self.open_workspace(&OpenWorkspaceShortcut { index }, window, cx);
             cx.stop_propagation();
@@ -1440,11 +1541,12 @@ impl OcttyApp {
         };
 
         let live_key = live_terminal_key(&workspace.id, &pane_id);
+        let mut send_error = None;
         if let Some(live) = self.live_terminals.get_mut(&live_key) {
             match &input {
                 TerminalInput::LiveKey(key_input) => {
                     if let Err(error) = live.handle.send_key(key_input.clone()) {
-                        self.status = format!("Terminal input failed: {error:#}").into();
+                        send_error = Some(format!("Terminal input failed: {error:#}"));
                     } else {
                         live.last_input_at = Some(Instant::now());
                     }
@@ -1452,6 +1554,9 @@ impl OcttyApp {
             }
             if let Some(snapshot) = self.active_snapshot.as_mut() {
                 snapshot.active_pane_id = Some(pane_id);
+            }
+            if let Some(send_error) = send_error {
+                self.show_error(send_error, cx);
             }
             return;
         }
@@ -1510,8 +1615,7 @@ impl OcttyApp {
             return;
         };
         if let Err(error) = live.handle.send_bytes(bytes) {
-            self.status = format!("Terminal paste failed: {error:#}").into();
-            cx.notify();
+            self.show_error(format!("Terminal paste failed: {error:#}"), cx);
             return;
         }
         live.last_input_at = Some(Instant::now());
@@ -1555,7 +1659,7 @@ impl OcttyApp {
                     match result {
                         Ok(snapshots) => app.apply_terminal_flush_snapshots(snapshots),
                         Err(error) => {
-                            app.status = format!("Terminal input failed: {error:#}").into();
+                            app.show_error(format!("Terminal input failed: {error:#}"), cx);
                         }
                     }
                     cx.notify();
@@ -1611,7 +1715,7 @@ impl OcttyApp {
             .and_then(|index| self.workspaces.get(index))
     }
 
-    fn ensure_live_terminals_for_active_snapshot(&mut self) {
+    fn ensure_live_terminals_for_active_snapshot(&mut self, cx: &mut Context<Self>) {
         let Some(workspace) = self.active_workspace().cloned() else {
             return;
         };
@@ -1669,7 +1773,7 @@ impl OcttyApp {
                 }
                 Err(error) => {
                     self.failed_live_terminals.insert(key);
-                    self.status = format!("Failed to start live terminal: {error:#}").into();
+                    self.show_error(format!("Failed to start live terminal: {error:#}"), cx);
                 }
             }
         }
@@ -1758,23 +1862,26 @@ impl OcttyApp {
         let mut updates = Vec::new();
         for (key, live) in &mut self.live_terminals {
             if let Some(snapshot) = coalesce_terminal_snapshots(live.handle.drain_snapshots()) {
-                if let Some(input_at) = live.last_input_at.take() {
-                    live.latency.record_key_to_snapshot(input_at.elapsed());
+                let input_at = live.last_input_at.take();
+                if terminal_performance_data_enabled() {
+                    if let Some(input_at) = input_at {
+                        live.latency.record_key_to_snapshot(input_at.elapsed());
+                    }
+                    live.latency
+                        .record_pty_to_snapshot(snapshot.timing.pty_to_snapshot_micros);
+                    live.latency
+                        .record_pty_output_bytes(snapshot.timing.pty_output_bytes);
+                    live.latency
+                        .record_vt_write(snapshot.timing.vt_write_micros);
+                    live.latency
+                        .record_snapshot_update(snapshot.timing.snapshot_update_micros);
+                    live.latency
+                        .record_snapshot_extract(snapshot.timing.snapshot_extract_micros);
+                    live.latency
+                        .record_snapshot_build(snapshot.timing.snapshot_build_micros);
+                    live.latency.record_dirty_rows(snapshot.timing.dirty_rows);
+                    live.latency.record_dirty_cells(snapshot.timing.dirty_cells);
                 }
-                live.latency
-                    .record_pty_to_snapshot(snapshot.timing.pty_to_snapshot_micros);
-                live.latency
-                    .record_pty_output_bytes(snapshot.timing.pty_output_bytes);
-                live.latency
-                    .record_vt_write(snapshot.timing.vt_write_micros);
-                live.latency
-                    .record_snapshot_update(snapshot.timing.snapshot_update_micros);
-                live.latency
-                    .record_snapshot_extract(snapshot.timing.snapshot_extract_micros);
-                live.latency
-                    .record_snapshot_build(snapshot.timing.snapshot_build_micros);
-                live.latency.record_dirty_rows(snapshot.timing.dirty_rows);
-                live.latency.record_dirty_cells(snapshot.timing.dirty_cells);
                 live.pending_snapshot = Some(snapshot);
             }
 
@@ -2141,6 +2248,122 @@ fn render_workspace_sidebar(
     list
 }
 
+fn render_sidebar_footer(cx: &mut Context<OcttyApp>) -> gpui::Div {
+    div()
+        .border_t_1()
+        .border_color(rgb(0x4d545f))
+        .p_2()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(sidebar_add_repository_button().on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _, window, cx| {
+                this.add_project_root(&AddProjectRoot, window, cx);
+            }),
+        ))
+        .child(
+            div()
+                .grid()
+                .grid_cols(3)
+                .gap_2()
+                .child(
+                    sidebar_pane_button(IconName::SquareTerminal, "Shell").on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.add_pane(PaneType::Shell, cx);
+                        }),
+                    ),
+                )
+                .child(sidebar_pane_button(IconName::Replace, "Diff").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.add_pane(PaneType::Diff, cx);
+                    }),
+                ))
+                .child(sidebar_pane_button(IconName::File, "Note").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.add_pane(PaneType::Note, cx);
+                    }),
+                )),
+        )
+}
+
+fn sidebar_add_repository_button() -> gpui::Div {
+    sidebar_control_button()
+        .w_full()
+        .justify_center()
+        .gap_2()
+        .child(Icon::new(IconName::FolderOpen).size(px(14.0)))
+        .child(
+            div()
+                .text_xs()
+                .font_weight(gpui::FontWeight::BOLD)
+                .child("Add repository"),
+        )
+}
+
+fn sidebar_pane_button(icon: IconName, label: &'static str) -> gpui::Div {
+    sidebar_control_button()
+        .justify_center()
+        .gap_1()
+        .child(Icon::new(icon).size(px(13.0)))
+        .child(div().text_xs().child(label))
+}
+
+fn sidebar_control_button() -> gpui::Div {
+    div()
+        .h(px(28.0))
+        .px_2()
+        .flex()
+        .items_center()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(0x4d545f))
+        .bg(rgb(0x282c34))
+        .text_color(rgb(0xd7dce4))
+        .cursor_pointer()
+}
+
+fn render_error_toast(id: u64, message: SharedString, cx: &mut Context<OcttyApp>) -> gpui::Div {
+    div()
+        .w_full()
+        .flex()
+        .items_start()
+        .gap_2()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(0xb94a52))
+        .bg(rgb(0x35191d))
+        .text_color(rgb(0xf7d4d7))
+        .shadow_lg()
+        .px_3()
+        .py_2()
+        .child(
+            div()
+                .pt(px(2.0))
+                .text_color(rgb(0xff777f))
+                .child(Icon::new(IconName::TriangleAlert).size(px(14.0))),
+        )
+        .child(div().flex_1().text_sm().child(message))
+        .child(
+            div()
+                .p_1()
+                .rounded_sm()
+                .cursor_pointer()
+                .text_color(rgb(0xf7d4d7))
+                .hover(|this| this.bg(rgb(0x52252b)))
+                .child(Icon::new(IconName::Close).size(px(12.0)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.dismiss_toast(id, cx);
+                    }),
+                ),
+        )
+}
+
 fn render_sidebar_project_group(
     group: &SidebarWorkspaceGroup,
     workspaces: &[WorkspaceSummary],
@@ -2405,7 +2628,7 @@ impl Render for SidebarMenuView {
 
 impl Render for OcttyApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.ensure_live_terminals_for_active_snapshot();
+        self.ensure_live_terminals_for_active_snapshot(cx);
         self.terminal_window_active = window.is_window_active();
         self.schedule_terminal_snapshot_notifications(cx);
         let taskspace_height =
@@ -2438,6 +2661,15 @@ impl Render for OcttyApp {
             cx,
         );
         let sidebar_menu = self.sidebar_menu.clone();
+        let sidebar_rename_dialog = self
+            .sidebar_rename_dialog
+            .as_ref()
+            .map(|dialog| (dialog.title.clone(), dialog.input.clone()));
+        let toasts = self
+            .toasts
+            .iter()
+            .map(|toast| (toast.id, toast.message.clone()))
+            .collect::<Vec<_>>();
         let outside_menu_width =
             (window.viewport_size().width - px(WORKSPACE_SIDEBAR_WIDTH)).max(px(0.0));
 
@@ -2447,6 +2679,7 @@ impl Render for OcttyApp {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::open_workspace))
             .on_action(cx.listener(Self::navigate_workspace))
+            .on_action(cx.listener(Self::add_project_root))
             .on_action(cx.listener(Self::add_shell_pane))
             .on_action(cx.listener(Self::add_diff_pane))
             .on_action(cx.listener(Self::add_note_pane))
@@ -2475,7 +2708,10 @@ impl Render for OcttyApp {
                     .border_color(rgb(0x4d545f))
                     .bg(rgb(0x323640))
                     .text_color(rgb(0xd7dce4))
-                    .child(workspace_list),
+                    .flex()
+                    .flex_col()
+                    .child(div().flex_1().overflow_y_scrollbar().child(workspace_list))
+                    .child(render_sidebar_footer(cx)),
             )
             .child(
                 div()
@@ -2485,38 +2721,94 @@ impl Render for OcttyApp {
                     .flex_col()
                     .overflow_hidden()
                     .p_6()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0xb8b8b8))
-                            .child(self.status.clone()),
-                    )
-                    .child(
-                        div()
-                            .mt_6()
-                            .flex()
-                            .gap_2()
-                            .child(toolbar_button("Shell").on_mouse_up(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    this.add_pane(PaneType::Shell, cx);
-                                }),
-                            ))
-                            .child(toolbar_button("Diff").on_mouse_up(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    this.add_pane(PaneType::Diff, cx);
-                                }),
-                            ))
-                            .child(toolbar_button("Note").on_mouse_up(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    this.add_pane(PaneType::Note, cx);
-                                }),
-                            )),
-                    )
                     .child(taskspace),
             )
+            .when(!toasts.is_empty(), |this| {
+                this.child(deferred(
+                    anchored()
+                        .anchor(Corner::TopRight)
+                        .position(point(px(16.0), px(16.0)))
+                        .child(
+                            div().w(px(420.0)).flex().flex_col().gap_2().children(
+                                toasts
+                                    .into_iter()
+                                    .map(|(id, message)| render_error_toast(id, message, cx)),
+                            ),
+                        ),
+                ))
+            })
+            .when_some(sidebar_rename_dialog, |this, (title, input)| {
+                this.child(deferred(
+                    anchored()
+                        .anchor(Corner::TopLeft)
+                        .position(point(px(0.0), px(0.0)))
+                        .child(
+                            div()
+                                .w(window.viewport_size().width)
+                                .h(window.viewport_size().height)
+                                .occlude()
+                                .bg(rgba(0x00000033))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _window, cx| {
+                                        this.cancel_sidebar_rename_dialog(cx);
+                                    }),
+                                )
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(WORKSPACE_SIDEBAR_WIDTH + 24.0))
+                                        .top(px(64.0))
+                                        .w(px(360.0))
+                                        .p_3()
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(rgb(0x4d545f))
+                                        .bg(rgb(0x23272f))
+                                        .shadow_lg()
+                                        .text_color(rgb(0xd7dce4))
+                                        .occlude()
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .child(
+                                            div()
+                                                .mb_3()
+                                                .text_sm()
+                                                .font_weight(gpui::FontWeight::BOLD)
+                                                .child(title),
+                                        )
+                                        .child(Input::new(&input).appearance(false).bordered(true))
+                                        .child(
+                                            div()
+                                                .mt_3()
+                                                .flex()
+                                                .justify_end()
+                                                .gap_2()
+                                                .child(
+                                                    rename_dialog_button("Cancel").on_mouse_down(
+                                                        MouseButton::Left,
+                                                        cx.listener(|this, _, _window, cx| {
+                                                            this.cancel_sidebar_rename_dialog(cx);
+                                                        }),
+                                                    ),
+                                                )
+                                                .child(
+                                                    rename_dialog_primary_button("Rename")
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            cx.listener(|this, _, _window, cx| {
+                                                                this.confirm_sidebar_rename_dialog(
+                                                                    cx,
+                                                                );
+                                                            }),
+                                                        ),
+                                                ),
+                                        ),
+                                ),
+                        ),
+                ))
+            })
             .when_some(sidebar_menu, |this, overlay| {
                 this.child(deferred(
                     anchored()
@@ -2644,7 +2936,7 @@ fn main() {
             |window, cx| {
                 let focus_handle = cx.focus_handle();
                 focus_handle.focus(window);
-                let view = cx.new(|_| OcttyApp::new(bootstrap, focus_handle));
+                let view = cx.new(|cx| OcttyApp::new(bootstrap, focus_handle, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             },
         )
@@ -2765,6 +3057,24 @@ async fn create_workspace_for_root_and_reload(
     let workspace_id =
         octty_jj::workspace_id_for(&root_path.to_string_lossy(), workspace_name.as_str());
     load_bootstrap_with_active(true, Some(workspace_id)).await
+}
+
+async fn add_project_root_and_reload(
+    store_path: PathBuf,
+    selected_path: PathBuf,
+    active_workspace_id: Option<String>,
+) -> anyhow::Result<BootstrapState> {
+    let root_path = resolve_repo_root(selected_path).await?;
+    let root = project_root_from_path(&root_path);
+    let store = TursoStore::open(store_path).await?;
+    store.upsert_project_root(&root).await?;
+
+    let workspace_id = discover_workspaces(&root)
+        .await
+        .ok()
+        .and_then(|workspaces| workspaces.first().map(|workspace| workspace.id.clone()))
+        .or(active_workspace_id);
+    load_bootstrap_with_active(true, workspace_id).await
 }
 
 async fn rename_project_root_and_reload(
@@ -3654,15 +3964,24 @@ fn workspace_key_bindings() -> Vec<KeyBinding> {
     ]
 }
 
-fn toolbar_button(label: &'static str) -> gpui::Div {
+fn rename_dialog_button(label: &'static str) -> gpui::Div {
     div()
         .px_3()
-        .py_2()
-        .border_1()
-        .border_color(rgb(0x444444))
+        .py_1()
         .rounded_md()
+        .border_1()
+        .border_color(rgb(0x4d545f))
+        .bg(rgb(0x23272f))
         .text_sm()
+        .cursor_pointer()
         .child(label)
+}
+
+fn rename_dialog_primary_button(label: &'static str) -> gpui::Div {
+    rename_dialog_button(label)
+        .border_color(rgb(0x4e86d8))
+        .bg(rgb(0x2f5f9f))
+        .text_color(rgb(0xffffff))
 }
 
 fn terminal_input_from_key_event(event: &KeyDownEvent) -> Option<TerminalInput> {
@@ -4254,7 +4573,9 @@ fn render_terminal_surface(
 
     let default_fg = terminal_rgb_to_rgba(snapshot.default_fg);
     let default_bg = terminal_rgb_to_rgba(snapshot.default_bg);
-    let debug_timer_label = terminal_live.and_then(|live| live.latency.summary_label());
+    let debug_timer_label = terminal_performance_data_enabled()
+        .then(|| terminal_live.and_then(|live| live.latency.summary_label()))
+        .flatten();
     let selection = terminal_live.and_then(|live| live.selection.as_ref());
     let live_key = live_terminal_key(workspace_id, pane_id);
     let mut surface = div()
@@ -5379,6 +5700,10 @@ fn terminal_paint_cursor(
 }
 
 fn record_terminal_render_build_profile(input: &TerminalGridPaintInput, build_micros: u64) {
+    if !terminal_render_profile_enabled() {
+        return;
+    }
+
     let sample = TerminalRenderProfileSample {
         build_micros,
         rows: input.rows,
@@ -5489,11 +5814,24 @@ fn terminal_render_profile_summary() -> Option<String> {
 
 fn terminal_render_profile_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| terminal_env_flag_enabled("OCTTY_TERMINAL_PROFILE"))
+}
+
+fn terminal_performance_data_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("OCTTY_TERMINAL_PROFILE")
-            .ok()
-            .is_some_and(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+        terminal_env_flag_enabled("OCTTY_TERMINAL_PERF") || terminal_render_profile_enabled()
     })
+}
+
+fn terminal_env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|value| terminal_env_value_enabled(&value))
+}
+
+fn terminal_env_value_enabled(value: &str) -> bool {
+    value != "0" && !value.eq_ignore_ascii_case("false")
 }
 
 static TERMINAL_RENDER_PROFILER: OnceLock<Mutex<TerminalRenderProfiler>> = OnceLock::new();
@@ -6002,6 +6340,15 @@ fn taskspace_width_for_viewport(viewport_width: f32) -> f32 {
     (viewport_width - WORKSPACE_SIDEBAR_WIDTH - TASKSPACE_HORIZONTAL_PADDING).max(240.0)
 }
 
+fn terminal_surface_chrome_height() -> f32 {
+    let debug_height = if terminal_performance_data_enabled() {
+        TERMINAL_DEBUG_TIMER_LINE_HEIGHT + TERMINAL_SURFACE_DEBUG_TIMER_MARGIN_BOTTOM
+    } else {
+        0.0
+    };
+    TERMINAL_SURFACE_PADDING_Y + debug_height
+}
+
 fn taskspace_viewport_offset(snapshot: &WorkspaceSnapshot, viewport_width: f32) -> f32 {
     let Some((active_left, active_width, total_width)) = active_column_metrics(snapshot) else {
         return 0.0;
@@ -6060,7 +6407,7 @@ fn terminal_resize_requests(
         let pane_height =
             (taskspace_height - (pane_count.saturating_sub(1) as f32 * 12.0)) / pane_count as f32;
         let terminal_height =
-            (pane_height - TERMINAL_SURFACE_CHROME_HEIGHT).max(TERMINAL_CELL_HEIGHT);
+            (pane_height - terminal_surface_chrome_height()).max(TERMINAL_CELL_HEIGHT);
         let cols = ((column.width_px as f32 - 24.0) / TERMINAL_CELL_WIDTH)
             .floor()
             .max(20.0) as u16;
@@ -6693,6 +7040,15 @@ mod tests {
         let summary = latency_summary(&samples).expect("latency summary");
         assert!(summary.contains("p50 1.5ms"));
         assert!(summary.contains("max 8.0ms"));
+    }
+
+    #[test]
+    fn terminal_env_value_enabled_treats_zero_and_false_as_off() {
+        assert!(!terminal_env_value_enabled("0"));
+        assert!(!terminal_env_value_enabled("false"));
+        assert!(!terminal_env_value_enabled("FALSE"));
+        assert!(terminal_env_value_enabled("1"));
+        assert!(terminal_env_value_enabled("true"));
     }
 
     #[test]
@@ -7750,7 +8106,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_resize_rows_subtract_all_visible_chrome() {
+    fn terminal_resize_rows_subtracts_visible_chrome_without_perf_overlay() {
         let snapshot = add_pane(
             create_default_snapshot("workspace-1"),
             create_pane_state(PaneType::Shell, "/tmp", None),
@@ -7760,7 +8116,7 @@ mod tests {
 
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].2, 87);
-        assert_eq!(requests[0].3, 53);
+        assert_eq!(requests[0].3, 54);
     }
 
     #[test]
