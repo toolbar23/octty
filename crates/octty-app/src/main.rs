@@ -5,9 +5,10 @@ use std::{
 };
 
 use gpui::{
-    Action, App, Application, Bounds, Context, FocusHandle, IntoElement, KeyBinding, KeyDownEvent,
-    Menu, MenuItem, MouseButton, Render, Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
+    Action, App, Application, Bounds, Context, FocusHandle, Font, FontFallbacks, FontFeatures,
+    IntoElement, KeyBinding, KeyDownEvent, Menu, MenuItem, MouseButton, Render, Rgba, ScrollDelta,
+    ScrollWheelEvent, SharedString, Window, WindowBounds, WindowOptions, div, font, prelude::*, px,
+    rgb, size,
 };
 use gpui_component::Root;
 use octty_core::{
@@ -32,8 +33,10 @@ mod gpui_tokio;
 
 const TERMINAL_CELL_WIDTH: f32 = 8.0;
 const TERMINAL_CELL_HEIGHT: f32 = 18.0;
+const TERMINAL_FONT_SIZE: f32 = 14.0;
 const TERMINAL_GRID_HEIGHT: f32 = 520.0;
 const TERMINAL_PANE_CHROME_HEIGHT: f32 = 42.0;
+const DEFAULT_TERMINAL_FONT_FAMILY: &str = "JetBrains Mono";
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
@@ -1599,8 +1602,8 @@ fn render_terminal_surface(
             .overflow_hidden()
             .p_3()
             .bg(rgb(0x080a0d))
-            .font_family("monospace")
-            .text_size(px(13.0))
+            .font(terminal_font())
+            .text_size(px(TERMINAL_FONT_SIZE))
             .line_height(px(TERMINAL_CELL_HEIGHT))
             .text_color(rgb(0xc8d0d8))
             .child(terminal_screen_excerpt(&payload.restored_buffer));
@@ -1613,8 +1616,8 @@ fn render_terminal_surface(
         .overflow_hidden()
         .p_2()
         .bg(default_bg)
-        .font_family("monospace")
-        .text_size(px(13.0))
+        .font(terminal_font())
+        .text_size(px(TERMINAL_FONT_SIZE))
         .line_height(px(TERMINAL_CELL_HEIGHT))
         .child(
             div()
@@ -1761,6 +1764,37 @@ fn terminal_screen_excerpt(screen: &str) -> String {
         .collect();
     let start = lines.len().saturating_sub(8);
     lines[start..].join("\n")
+}
+
+fn terminal_font() -> Font {
+    let mut terminal_font = font(terminal_font_family());
+    terminal_font.features = FontFeatures::disable_ligatures();
+    terminal_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
+        "DejaVu Sans Mono".to_owned(),
+        "Liberation Mono".to_owned(),
+        "Noto Sans Mono".to_owned(),
+        "Cascadia Mono".to_owned(),
+        "Menlo".to_owned(),
+        "Consolas".to_owned(),
+        "monospace".to_owned(),
+    ]));
+    terminal_font
+}
+
+fn terminal_font_family() -> String {
+    std::env::var("OCTTY_RS_TERMINAL_FONT_FAMILY")
+        .or_else(|_| std::env::var("OCTTY_TERMINAL_FONT_FAMILY"))
+        .ok()
+        .and_then(|family| first_font_family(&family))
+        .unwrap_or_else(|| DEFAULT_TERMINAL_FONT_FAMILY.to_owned())
+}
+
+fn first_font_family(input: &str) -> Option<String> {
+    input
+        .split(',')
+        .map(|family| family.trim().trim_matches('"').trim_matches('\'').trim())
+        .find(|family| !family.is_empty() && !family.eq_ignore_ascii_case("monospace"))
+        .map(str::to_owned)
 }
 
 fn default_terminal_grid_for_pane() -> (u16, u16) {
