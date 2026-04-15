@@ -6,6 +6,8 @@ impl Render for OcttyApp {
         self.terminal_window_active = window.is_window_active();
         self.schedule_terminal_snapshot_notifications(cx);
         self.schedule_pane_activity_reconciliation(cx);
+        self.schedule_workspace_watch_notifications(cx);
+        self.ensure_workspace_watchers();
         let taskspace_height =
             taskspace_height_for_viewport(f32::from(window.viewport_size().height));
         let taskspace_width = taskspace_width_for_viewport(f32::from(window.viewport_size().width));
@@ -28,8 +30,10 @@ impl Render for OcttyApp {
             cx,
         );
 
+        let active_workspace = self.active_workspace().cloned();
         let taskspace = render_taskspace(
             self.active_snapshot.as_ref(),
+            active_workspace.as_ref(),
             &self.live_terminals,
             &self.pane_activity,
             self.terminal_glyph_cache.clone(),

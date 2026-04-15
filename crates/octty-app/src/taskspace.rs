@@ -2,6 +2,7 @@ use super::*;
 
 pub(crate) fn render_taskspace(
     snapshot: Option<&WorkspaceSnapshot>,
+    active_workspace: Option<&WorkspaceSummary>,
     live_terminals: &HashMap<String, LiveTerminalPane>,
     pane_activity: &HashMap<(String, String), PaneActivity>,
     terminal_glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
@@ -24,6 +25,9 @@ pub(crate) fn render_taskspace(
     }
 
     let viewport_offset = taskspace_viewport_offset(snapshot, viewport_width);
+    let diff_pane_state = active_workspace
+        .map(|workspace| diff_pane_render_state(&workspace.status))
+        .unwrap_or_default();
     let mut panel_strip = div()
         .flex()
         .gap_3()
@@ -50,6 +54,7 @@ pub(crate) fn render_taskspace(
                     live_terminals.get(&live_terminal_key(&snapshot.workspace_id, &pane.id));
                 column_el = column_el.child(render_pane(
                     &snapshot.workspace_id,
+                    diff_pane_state,
                     pane,
                     active,
                     pane_activity_state(&snapshot.workspace_id, &pane.id, pane_activity),
@@ -67,6 +72,7 @@ pub(crate) fn render_taskspace(
 
 pub(crate) fn render_pane(
     workspace_id: &str,
+    diff_pane_state: DiffPaneRenderState<'_>,
     pane: &PaneState,
     active: bool,
     activity_state: ActivityState,
@@ -109,6 +115,7 @@ pub(crate) fn render_pane(
 
     pane_el.child(render_pane_body(
         workspace_id,
+        diff_pane_state,
         &pane.id,
         pane,
         active,
@@ -121,6 +128,7 @@ pub(crate) fn render_pane(
 
 pub(crate) fn render_pane_body(
     workspace_id: &str,
+    diff_pane_state: DiffPaneRenderState<'_>,
     pane_id: &str,
     pane: &PaneState,
     active: bool,
@@ -140,7 +148,8 @@ pub(crate) fn render_pane_body(
             terminal_render_cache,
             cx,
         ),
-        _ => div()
+        PanePayload::Diff(_) => render_diff_pane(diff_pane_state),
+        PanePayload::Note(_) | PanePayload::Browser(_) => div()
             .flex_1()
             .overflow_hidden()
             .p_3()
@@ -148,6 +157,39 @@ pub(crate) fn render_pane_body(
             .text_color(rgb(0xb8b8b8))
             .child(pane_body_label(pane)),
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum DiffPaneRenderState<'a> {
+    #[default]
+    NoWorkingCopyChanges,
+    WorkingCopyDiff(&'a str),
+}
+
+pub(crate) fn diff_pane_render_state(status: &WorkspaceStatus) -> DiffPaneRenderState<'_> {
+    let diff_text = status.diff_text.as_str();
+    if diff_text.trim().is_empty() {
+        DiffPaneRenderState::NoWorkingCopyChanges
+    } else {
+        DiffPaneRenderState::WorkingCopyDiff(diff_text)
+    }
+}
+
+pub(crate) fn render_diff_pane(state: DiffPaneRenderState<'_>) -> gpui::Div {
+    let content = match state {
+        DiffPaneRenderState::NoWorkingCopyChanges => "No working-copy changes.",
+        DiffPaneRenderState::WorkingCopyDiff(diff_text) => diff_text,
+    };
+    div().flex_1().overflow_hidden().child(
+        div()
+            .size_full()
+            .overflow_y_scrollbar()
+            .p_3()
+            .font(terminal_font())
+            .text_sm()
+            .text_color(rgb(0xd7dce4))
+            .child(content.to_owned()),
+    )
 }
 
 pub(crate) fn render_terminal_surface(

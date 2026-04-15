@@ -30,8 +30,9 @@ use gpui_component::{
 use octty_core::{
     ActivityState, PaneActivity, PanePayload, PaneState, PaneType, ProjectRootRecord,
     SessionSnapshot, SessionState, TerminalPanePayload, WorkspaceBookmarkRelation,
-    WorkspaceSnapshot, WorkspaceState, WorkspaceSummary, add_pane, create_default_snapshot,
-    create_pane_state, derive_workspace_activity, has_recorded_workspace_path,
+    WorkspaceSnapshot, WorkspaceState, WorkspaceStatus, WorkspaceSummary, add_pane,
+    create_default_snapshot, create_pane_state, derive_workspace_activity,
+    has_recorded_workspace_path,
     layout::{LAYOUT_VERSION, now_ms},
     remove_pane, screen_fingerprint, workspace_shortcut_targets,
 };
@@ -60,6 +61,7 @@ mod app_core;
 mod app_live_terminals;
 mod app_panes;
 mod app_render;
+mod app_workspace_status;
 mod bootstrap;
 mod cli;
 mod desktop_notifications;
@@ -77,10 +79,12 @@ mod terminal_render_types;
 mod terminal_selection;
 mod terminal_state;
 mod workspace;
+mod workspace_watch;
 
 pub use cli::run;
 
 pub(crate) use actions::*;
+pub(crate) use app_workspace_status::*;
 pub(crate) use bootstrap::*;
 pub(crate) use desktop_notifications::*;
 pub(crate) use input::*;
@@ -96,6 +100,7 @@ pub(crate) use terminal_render_types::*;
 pub(crate) use terminal_selection::*;
 pub(crate) use terminal_state::*;
 pub(crate) use workspace::*;
+pub(crate) use workspace_watch::*;
 
 const TERMINAL_CELL_WIDTH: f32 = 8.0;
 const TERMINAL_CELL_HEIGHT: f32 = 18.0;

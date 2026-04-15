@@ -14,6 +14,7 @@ anyhow.workspace = true
 futures.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
+notify = "7.0.0"
 octty-core.workspace = true
 octty-jj.workspace = true
 octty-store.workspace = true

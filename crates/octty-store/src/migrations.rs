@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::{StoreError, TursoStore};
 
 impl TursoStore {
@@ -25,11 +27,21 @@ impl TursoStore {
               project_label text not null,
               workspace_name text not null,
               display_name text not null default '',
-              workspace_path text not null unique,
-              workspace_state text not null default 'unknown',
-              has_working_copy_changes integer not null default 0,
-              bookmarks text not null default '',
-              bookmark_relation text not null default 'none',
+	              workspace_path text not null unique,
+	              workspace_state text not null default 'unknown',
+	              has_working_copy_changes integer not null default 0,
+	              effective_added_lines integer not null default 0,
+	              effective_removed_lines integer not null default 0,
+	              has_conflicts integer not null default 0,
+	              unpublished_change_count integer not null default 0,
+	              unpublished_added_lines integer not null default 0,
+	              unpublished_removed_lines integer not null default 0,
+	              not_in_default_available integer not null default 0,
+	              not_in_default_change_count integer not null default 0,
+	              not_in_default_added_lines integer not null default 0,
+	              not_in_default_removed_lines integer not null default 0,
+	              bookmarks text not null default '',
+	              bookmark_relation text not null default 'none',
               unread_notes integer not null default 0,
               active_agent_count integer not null default 0,
               agent_attention_state text,
@@ -87,6 +99,68 @@ impl TursoStore {
             ",
         )
         .await?;
+        ensure_workspace_status_columns(&conn).await?;
         Ok(())
     }
+}
+
+async fn ensure_workspace_status_columns(conn: &turso::Connection) -> Result<(), StoreError> {
+    let mut rows = conn.query("pragma table_info(workspaces)", ()).await?;
+    let mut columns = HashSet::new();
+    while let Some(row) = rows.next().await? {
+        if let turso::Value::Text(name) = row.get_value(1)? {
+            columns.insert(name);
+        }
+    }
+    drop(rows);
+
+    for (name, definition) in [
+        (
+            "effective_added_lines",
+            "effective_added_lines integer not null default 0",
+        ),
+        (
+            "effective_removed_lines",
+            "effective_removed_lines integer not null default 0",
+        ),
+        ("has_conflicts", "has_conflicts integer not null default 0"),
+        (
+            "unpublished_change_count",
+            "unpublished_change_count integer not null default 0",
+        ),
+        (
+            "unpublished_added_lines",
+            "unpublished_added_lines integer not null default 0",
+        ),
+        (
+            "unpublished_removed_lines",
+            "unpublished_removed_lines integer not null default 0",
+        ),
+        (
+            "not_in_default_available",
+            "not_in_default_available integer not null default 0",
+        ),
+        (
+            "not_in_default_change_count",
+            "not_in_default_change_count integer not null default 0",
+        ),
+        (
+            "not_in_default_added_lines",
+            "not_in_default_added_lines integer not null default 0",
+        ),
+        (
+            "not_in_default_removed_lines",
+            "not_in_default_removed_lines integer not null default 0",
+        ),
+    ] {
+        if !columns.contains(name) {
+            conn.execute(
+                format!("alter table workspaces add column {definition}").as_str(),
+                (),
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
 }

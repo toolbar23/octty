@@ -52,12 +52,17 @@ pub(crate) async fn load_bootstrap_from_store(
                     workspace.updated_at = now;
                     if has_recorded_workspace_path(&workspace.workspace_path) {
                         match read_workspace_status(&workspace.workspace_path).await {
-                            Ok(status) => workspace.status = status,
+                            Ok(status) => {
+                                workspace.status =
+                                    merge_jj_workspace_status(&workspace.status, status);
+                            }
                             Err(error) => errors.push(format!(
                                 "{}: failed to read status: {error}",
                                 workspace.workspace_name
                             )),
                         }
+                    } else {
+                        workspace.status = reset_jj_workspace_status(&workspace.status);
                     }
                     store.upsert_workspace(&workspace).await?;
                     workspaces.push(workspace);

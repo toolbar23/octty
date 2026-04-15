@@ -533,10 +533,7 @@ pub(crate) fn render_sidebar_workspace_row(
             .gap_2()
             .child(render_workspace_activity_icon(activity_state))
             .child(workspace_name)
-            .child(render_workspace_status_tag(
-                &workspace.status.workspace_state,
-                workspace.status.has_working_copy_changes,
-            )),
+            .children(render_workspace_status_tags(&workspace.status)),
     );
     if has_meta_row {
         row = row.child(meta_row.relative());
@@ -607,21 +604,65 @@ fn workspace_activity_spinner_canvas(phase: f32) -> impl IntoElement {
     .size_full()
 }
 
-pub(crate) fn render_workspace_status_tag(state: &WorkspaceState, changed: bool) -> Tag {
-    let tag = match state {
-        WorkspaceState::Published => Tag::success(),
-        WorkspaceState::MergedLocal => Tag::warning(),
-        WorkspaceState::Draft => Tag::info(),
-        WorkspaceState::Conflicted => Tag::danger(),
-        WorkspaceState::Unknown => Tag::secondary(),
-    };
-    let label = if changed {
-        format!("{}*", workspace_status_label(state))
-    } else {
-        workspace_status_label(state).to_owned()
-    };
+pub(crate) fn render_workspace_status_tags(status: &WorkspaceStatus) -> Vec<Tag> {
+    if status.workspace_state == WorkspaceState::Unknown {
+        return vec![workspace_status_tag(
+            Tag::secondary(),
+            "Unknown",
+            status.has_working_copy_changes,
+        )];
+    }
 
+    let mut tags = Vec::new();
+    if status.has_conflicts {
+        tags.push(workspace_status_tag(
+            Tag::danger(),
+            "Conflict",
+            status.has_working_copy_changes,
+        ));
+    }
+
+    if status.unpublished_change_count == 0 {
+        tags.push(workspace_status_tag(
+            Tag::success(),
+            "Published",
+            status.has_working_copy_changes && tags.is_empty(),
+        ));
+    } else {
+        tags.push(workspace_status_tag(
+            Tag::info(),
+            format_diff_stat(
+                status.unpublished_added_lines,
+                status.unpublished_removed_lines,
+            ),
+            status.has_working_copy_changes && tags.is_empty(),
+        ));
+    }
+
+    if status.not_in_default_available && status.not_in_default_change_count > 0 {
+        tags.push(workspace_status_tag(
+            Tag::warning(),
+            format_diff_stat(
+                status.not_in_default_added_lines,
+                status.not_in_default_removed_lines,
+            ),
+            false,
+        ));
+    }
+
+    tags
+}
+
+fn workspace_status_tag(tag: Tag, label: impl Into<String>, changed: bool) -> Tag {
+    let mut label = label.into();
+    if changed {
+        label.push('*');
+    }
     tag.outline().xsmall().child(label)
+}
+
+fn format_diff_stat(added_lines: i64, removed_lines: i64) -> String {
+    format!("+{added_lines}/-{removed_lines}")
 }
 
 pub(crate) fn workspace_bookmark_label(workspace: &WorkspaceSummary) -> Option<String> {

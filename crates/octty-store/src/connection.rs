@@ -14,7 +14,8 @@ impl TursoStore {
             .await?;
         let conn = db.connect()?;
         conn.busy_timeout(Duration::from_secs(5))?;
-        let store = Self { conn };
+        enable_concurrent_mode(&conn).await?;
+        let store = Self { db };
         store.migrate().await?;
         Ok(store)
     }
@@ -23,12 +24,21 @@ impl TursoStore {
         let db = Builder::new_local(":memory:").build().await?;
         let conn = db.connect()?;
         conn.busy_timeout(Duration::from_secs(5))?;
-        let store = Self { conn };
+        enable_concurrent_mode(&conn).await?;
+        let store = Self { db };
         store.migrate().await?;
         Ok(store)
     }
 
     pub async fn connection(&self) -> Result<Connection, StoreError> {
-        Ok(self.conn.clone())
+        let conn = self.db.connect()?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        Ok(conn)
     }
+}
+
+async fn enable_concurrent_mode(conn: &Connection) -> Result<(), StoreError> {
+    let mut rows = conn.query("PRAGMA journal_mode = 'mvcc'", ()).await?;
+    while rows.next().await?.is_some() {}
+    Ok(())
 }

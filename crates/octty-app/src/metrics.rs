@@ -260,13 +260,3 @@ pub(crate) fn terminal_dim_color(color: Rgba, target: Rgba) -> Rgba {
         a: color.a,
     }
 }
-
-pub(crate) fn workspace_status_label(state: &WorkspaceState) -> &'static str {
-    match state {
-        WorkspaceState::Published => "published",
-        WorkspaceState::MergedLocal => "merged local",
-        WorkspaceState::Draft => "draft",
-        WorkspaceState::Conflicted => "conflicted",
-        WorkspaceState::Unknown => "unknown",
-    }
-}

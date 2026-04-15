@@ -1,5 +1,5 @@
 use thiserror::Error;
-use turso::{Connection, Value};
+use turso::{Database, Value};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -14,7 +14,7 @@ pub enum StoreError {
 }
 
 pub struct TursoStore {
-    conn: Connection,
+    db: Database,
 }
 
 mod codecs;

@@ -8,6 +8,7 @@ impl OcttyApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let (terminal_snapshot_tx, terminal_snapshot_rx) = mpsc::unbounded();
+        let (workspace_watch_tx, workspace_watch_rx) = mpsc::unbounded();
         let pane_activity = pane_activity_map(bootstrap.pane_activity);
         let mut app = Self {
             status: bootstrap.status.into(),
@@ -27,6 +28,12 @@ impl OcttyApp {
             terminal_deferred_snapshot_timer_active: false,
             terminal_window_active: true,
             terminal_last_snapshot_notify_at: None,
+            workspace_watch_tx,
+            workspace_watch_rx: Some(workspace_watch_rx),
+            workspace_watch_notifications_active: false,
+            workspace_watchers: HashMap::new(),
+            workspace_status_refresh_due_at: HashMap::new(),
+            workspace_status_refresh_timer_active: BTreeSet::new(),
             terminal_glyph_cache: Rc::new(RefCell::new(TerminalGlyphLayoutCache::default())),
             terminal_render_cache: Rc::new(RefCell::new(TerminalRenderCache::default())),
             sidebar_menu: None,
@@ -609,6 +616,7 @@ impl OcttyApp {
         self.sync_active_workspace_terminal_snapshots(Instant::now(), cx);
         self.schedule_terminal_snapshot_notifications(cx);
         self.schedule_pane_activity_reconciliation(cx);
+        self.ensure_workspace_watchers();
         self.record_active_pane_seen(cx);
     }
 

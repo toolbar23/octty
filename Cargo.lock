@@ -4399,6 +4399,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui-component",
+ "notify",
  "octty-core",
  "octty-jj",
  "octty-store",

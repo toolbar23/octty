@@ -15,24 +15,38 @@ impl TursoStore {
         let conn = self.connection().await?;
         let bookmarks_json = serde_json::to_string(&workspace.status.bookmarks)?;
         conn.execute(
-            "insert into workspaces (
-               id, root_id, root_path, project_label, workspace_name, display_name,
-               workspace_path, workspace_state, has_working_copy_changes, bookmarks,
-               bookmark_relation, unread_notes, active_agent_count, agent_attention_state,
-               recent_activity_at, diff_text, created_at, updated_at, last_opened_at
-             )
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
-             on conflict(id) do update set
-               root_id = excluded.root_id,
-               root_path = excluded.root_path,
+	            "insert into workspaces (
+	               id, root_id, root_path, project_label, workspace_name, display_name,
+	               workspace_path, workspace_state, has_working_copy_changes, bookmarks,
+	               effective_added_lines, effective_removed_lines, has_conflicts,
+	               unpublished_change_count, unpublished_added_lines, unpublished_removed_lines,
+	               not_in_default_available, not_in_default_change_count,
+	               not_in_default_added_lines, not_in_default_removed_lines,
+	               bookmark_relation, unread_notes, active_agent_count, agent_attention_state,
+	               recent_activity_at, diff_text, created_at, updated_at, last_opened_at
+	             )
+	             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)
+	             on conflict(id) do update set
+	               root_id = excluded.root_id,
+	               root_path = excluded.root_path,
                project_label = excluded.project_label,
                workspace_name = excluded.workspace_name,
                display_name = excluded.display_name,
-               workspace_path = excluded.workspace_path,
-               workspace_state = excluded.workspace_state,
-               has_working_copy_changes = excluded.has_working_copy_changes,
-               bookmarks = excluded.bookmarks,
-               bookmark_relation = excluded.bookmark_relation,
+	               workspace_path = excluded.workspace_path,
+	               workspace_state = excluded.workspace_state,
+	               has_working_copy_changes = excluded.has_working_copy_changes,
+	               effective_added_lines = excluded.effective_added_lines,
+	               effective_removed_lines = excluded.effective_removed_lines,
+	               has_conflicts = excluded.has_conflicts,
+	               unpublished_change_count = excluded.unpublished_change_count,
+	               unpublished_added_lines = excluded.unpublished_added_lines,
+	               unpublished_removed_lines = excluded.unpublished_removed_lines,
+	               not_in_default_available = excluded.not_in_default_available,
+	               not_in_default_change_count = excluded.not_in_default_change_count,
+	               not_in_default_added_lines = excluded.not_in_default_added_lines,
+	               not_in_default_removed_lines = excluded.not_in_default_removed_lines,
+	               bookmarks = excluded.bookmarks,
+	               bookmark_relation = excluded.bookmark_relation,
                unread_notes = excluded.unread_notes,
                active_agent_count = excluded.active_agent_count,
                agent_attention_state = excluded.agent_attention_state,
@@ -47,13 +61,23 @@ impl TursoStore {
                 workspace.project_display_name.as_str(),
                 workspace.workspace_name.as_str(),
                 workspace.display_name.as_str(),
-                workspace.workspace_path.as_str(),
-                workspace_state_to_str(&workspace.status.workspace_state),
-                bool_to_int(workspace.status.has_working_copy_changes),
-                bookmarks_json.as_str(),
-                bookmark_relation_to_str(&workspace.status.bookmark_relation),
-                workspace.status.unread_notes,
-                workspace.status.active_agent_count,
+	                workspace.workspace_path.as_str(),
+	                workspace_state_to_str(&workspace.status.workspace_state),
+	                bool_to_int(workspace.status.has_working_copy_changes),
+	                bookmarks_json.as_str(),
+	                workspace.status.effective_added_lines,
+	                workspace.status.effective_removed_lines,
+	                bool_to_int(workspace.status.has_conflicts),
+	                workspace.status.unpublished_change_count,
+	                workspace.status.unpublished_added_lines,
+	                workspace.status.unpublished_removed_lines,
+	                bool_to_int(workspace.status.not_in_default_available),
+	                workspace.status.not_in_default_change_count,
+	                workspace.status.not_in_default_added_lines,
+	                workspace.status.not_in_default_removed_lines,
+	                bookmark_relation_to_str(&workspace.status.bookmark_relation),
+	                workspace.status.unread_notes,
+	                workspace.status.active_agent_count,
                 optional_agent_attention_to_value(&workspace.status.agent_attention_state),
                 workspace.status.recent_activity_at,
                 workspace.status.diff_text.as_str(),
@@ -122,7 +146,7 @@ impl TursoStore {
         };
         drop(snapshot_rows);
 
-        conn.execute("begin", ()).await?;
+        conn.execute("begin concurrent", ()).await?;
         let result = async {
             conn.execute(
                 "update workspaces
@@ -220,13 +244,17 @@ impl TursoStore {
     pub async fn list_workspaces(&self) -> Result<Vec<WorkspaceSummary>, StoreError> {
         let conn = self.connection().await?;
         let mut rows = conn
-            .query(
-                "select id, root_id, root_path, project_label, workspace_name, display_name,
-                        workspace_path, workspace_state, has_working_copy_changes, bookmarks,
-                        bookmark_relation, unread_notes, active_agent_count, agent_attention_state,
-                        recent_activity_at, diff_text, created_at, updated_at, last_opened_at
-                 from workspaces
-                 order by project_label, workspace_name",
+	            .query(
+	                "select id, root_id, root_path, project_label, workspace_name, display_name,
+	                        workspace_path, workspace_state, has_working_copy_changes, bookmarks,
+	                        effective_added_lines, effective_removed_lines, has_conflicts,
+	                        unpublished_change_count, unpublished_added_lines, unpublished_removed_lines,
+	                        not_in_default_available, not_in_default_change_count,
+	                        not_in_default_added_lines, not_in_default_removed_lines,
+	                        bookmark_relation, unread_notes, active_agent_count, agent_attention_state,
+	                        recent_activity_at, diff_text, created_at, updated_at, last_opened_at
+	                 from workspaces
+	                 order by project_label, workspace_name",
                 (),
             )
             .await?;
@@ -250,21 +278,55 @@ impl TursoStore {
                         row.get_value(8)?,
                         "has_working_copy_changes",
                     )? != 0,
+                    effective_added_lines: integer(row.get_value(10)?, "effective_added_lines")?,
+                    effective_removed_lines: integer(
+                        row.get_value(11)?,
+                        "effective_removed_lines",
+                    )?,
+                    has_conflicts: integer(row.get_value(12)?, "has_conflicts")? != 0,
+                    unpublished_change_count: integer(
+                        row.get_value(13)?,
+                        "unpublished_change_count",
+                    )?,
+                    unpublished_added_lines: integer(
+                        row.get_value(14)?,
+                        "unpublished_added_lines",
+                    )?,
+                    unpublished_removed_lines: integer(
+                        row.get_value(15)?,
+                        "unpublished_removed_lines",
+                    )?,
+                    not_in_default_available: integer(
+                        row.get_value(16)?,
+                        "not_in_default_available",
+                    )? != 0,
+                    not_in_default_change_count: integer(
+                        row.get_value(17)?,
+                        "not_in_default_change_count",
+                    )?,
+                    not_in_default_added_lines: integer(
+                        row.get_value(18)?,
+                        "not_in_default_added_lines",
+                    )?,
+                    not_in_default_removed_lines: integer(
+                        row.get_value(19)?,
+                        "not_in_default_removed_lines",
+                    )?,
                     bookmarks: serde_json::from_str(&bookmarks).unwrap_or_default(),
                     bookmark_relation: parse_bookmark_relation(&text(
-                        row.get_value(10)?,
+                        row.get_value(20)?,
                         "bookmark_relation",
                     )?),
-                    unread_notes: integer(row.get_value(11)?, "unread_notes")?,
-                    active_agent_count: integer(row.get_value(12)?, "active_agent_count")?,
-                    agent_attention_state: parse_optional_agent_attention(row.get_value(13)?)?,
-                    recent_activity_at: integer(row.get_value(14)?, "recent_activity_at")?,
-                    diff_text: text(row.get_value(15)?, "diff_text")?,
+                    unread_notes: integer(row.get_value(21)?, "unread_notes")?,
+                    active_agent_count: integer(row.get_value(22)?, "active_agent_count")?,
+                    agent_attention_state: parse_optional_agent_attention(row.get_value(23)?)?,
+                    recent_activity_at: integer(row.get_value(24)?, "recent_activity_at")?,
+                    diff_text: text(row.get_value(25)?, "diff_text")?,
                     ..WorkspaceStatus::default()
                 },
-                created_at: integer(row.get_value(16)?, "created_at")?,
-                updated_at: integer(row.get_value(17)?, "updated_at")?,
-                last_opened_at: integer(row.get_value(18)?, "last_opened_at")?,
+                created_at: integer(row.get_value(26)?, "created_at")?,
+                updated_at: integer(row.get_value(27)?, "updated_at")?,
+                last_opened_at: integer(row.get_value(28)?, "last_opened_at")?,
             });
         }
         Ok(workspaces)

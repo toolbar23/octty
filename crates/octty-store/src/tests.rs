@@ -4,7 +4,7 @@ use octty_core::{
     create_default_snapshot, create_pane_state,
 };
 
-use crate::TursoStore;
+use crate::{StoreError, TursoStore};
 
 #[tokio::test]
 async fn migrates_and_round_trips_project_roots() {
@@ -60,6 +60,16 @@ async fn round_trips_workspace_summaries() {
         status: WorkspaceStatus {
             workspace_state: WorkspaceState::Draft,
             has_working_copy_changes: true,
+            effective_added_lines: 7,
+            effective_removed_lines: 2,
+            has_conflicts: true,
+            unpublished_change_count: 3,
+            unpublished_added_lines: 11,
+            unpublished_removed_lines: 4,
+            not_in_default_available: true,
+            not_in_default_change_count: 2,
+            not_in_default_added_lines: 9,
+            not_in_default_removed_lines: 1,
             bookmarks: vec!["main".to_owned()],
             bookmark_relation: WorkspaceBookmarkRelation::Exact,
             ..WorkspaceStatus::default()
@@ -221,4 +231,65 @@ async fn creates_parent_directories_for_file_databases() {
     let _store = TursoStore::open(&db_path).await.unwrap();
 
     assert!(db_path.exists());
+}
+
+#[tokio::test]
+async fn opens_databases_in_mvcc_journal_mode() {
+    let store = TursoStore::open_memory().await.unwrap();
+    let conn = store.connection().await.unwrap();
+    let mut rows = conn.query("PRAGMA journal_mode", ()).await.unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+
+    assert_eq!(row.get::<String>(0).unwrap(), "mvcc");
+}
+
+#[tokio::test]
+async fn supports_overlapping_store_operations() {
+    let store = std::sync::Arc::new(TursoStore::open_memory().await.unwrap());
+    let root = ProjectRootRecord {
+        id: "root-1".to_owned(),
+        root_path: "/tmp/repo".to_owned(),
+        display_name: "repo".to_owned(),
+        created_at: 1,
+        updated_at: 2,
+    };
+    store.upsert_project_root(&root).await.unwrap();
+    let workspace = WorkspaceSummary {
+        id: "workspace-1".to_owned(),
+        root_id: root.id,
+        root_path: "/tmp/repo".to_owned(),
+        project_display_name: "repo".to_owned(),
+        workspace_name: "default".to_owned(),
+        display_name: "default".to_owned(),
+        workspace_path: "/tmp/repo".to_owned(),
+        status: WorkspaceStatus::default(),
+        created_at: 3,
+        updated_at: 4,
+        last_opened_at: 5,
+    };
+    store.upsert_workspace(&workspace).await.unwrap();
+
+    let reader = {
+        let store = store.clone();
+        tokio::spawn(async move {
+            for _ in 0..50 {
+                store.list_workspaces().await?;
+            }
+            Ok::<_, StoreError>(())
+        })
+    };
+    let writer = {
+        let store = store.clone();
+        tokio::spawn(async move {
+            for index in 0..50 {
+                let mut workspace = workspace.clone();
+                workspace.updated_at = 10 + index;
+                store.upsert_workspace(&workspace).await?;
+            }
+            Ok::<_, StoreError>(())
+        })
+    };
+
+    reader.await.unwrap().unwrap();
+    writer.await.unwrap().unwrap();
 }
