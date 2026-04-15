@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+futures.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
 octty-core.workspace = true

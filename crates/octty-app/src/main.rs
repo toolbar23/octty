@@ -1,21 +1,23 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, VecDeque},
     path::{Path, PathBuf},
-    time::Duration,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
+use futures::{StreamExt, channel::mpsc};
 use gpui::{
     Action, App, Application, Bounds, Context, FocusHandle, Font, FontFallbacks, FontFeatures,
-    IntoElement, KeyBinding, KeyDownEvent, Menu, MenuItem, MouseButton, Render, Rgba, ScrollDelta,
-    ScrollWheelEvent, SharedString, Window, WindowBounds, WindowOptions, div, font, prelude::*, px,
-    rgb, size,
+    Hsla, IntoElement, KeyBinding, KeyDownEvent, Menu, MenuItem, MouseButton, Render, Rgba,
+    ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString, TextRun, UnderlineStyle, Window,
+    WindowBounds, WindowOptions, canvas, div, fill, font, point, prelude::*, px, rgb, size,
 };
 use gpui_component::Root;
 use octty_core::{
     PanePayload, PaneState, PaneType, ProjectRootRecord, SessionSnapshot, SessionState,
     TerminalPanePayload, WorkspaceSnapshot, WorkspaceState, WorkspaceSummary, add_pane,
     create_default_snapshot, create_pane_state, has_recorded_workspace_path, layout::now_ms,
-    workspace_shortcut_targets,
+    remove_pane, workspace_shortcut_targets,
 };
 use octty_jj::{discover_workspaces, read_workspace_status, resolve_repo_root};
 use octty_store::{TursoStore, default_store_path};
@@ -23,7 +25,8 @@ use octty_term::{
     TerminalSessionSpec, capture_tmux_pane, ensure_tmux_session, kill_tmux_session,
     live::{
         LiveTerminalHandle, LiveTerminalKey, LiveTerminalKeyInput, LiveTerminalModifiers,
-        TerminalGridSnapshot, TerminalResize, TerminalRgb, spawn_live_terminal,
+        LiveTerminalSnapshotNotifier, TerminalGridSnapshot, TerminalResize, TerminalRgb,
+        spawn_live_terminal, spawn_live_terminal_with_notifier,
     },
     resize_tmux_session, send_tmux_keys, send_tmux_keys_to_session, send_tmux_text,
     send_tmux_text_to_session, stable_tmux_session_name,
@@ -34,9 +37,18 @@ mod gpui_tokio;
 const TERMINAL_CELL_WIDTH: f32 = 8.0;
 const TERMINAL_CELL_HEIGHT: f32 = 18.0;
 const TERMINAL_FONT_SIZE: f32 = 14.0;
-const TERMINAL_GRID_HEIGHT: f32 = 520.0;
 const TERMINAL_PANE_CHROME_HEIGHT: f32 = 42.0;
+const TERMINAL_TASKSPACE_VERTICAL_CHROME_HEIGHT: f32 = 176.0;
+const WORKSPACE_SIDEBAR_WIDTH: f32 = 280.0;
+const TASKSPACE_HORIZONTAL_PADDING: f32 = 48.0;
+const TASKSPACE_PANEL_GAP: f32 = 12.0;
+const COLUMN_WIDTH_STEP_PX: f64 = 80.0;
+const MIN_COLUMN_WIDTH_PX: f64 = 240.0;
+const MAX_COLUMN_WIDTH_PX: f64 = 1_600.0;
 const DEFAULT_TERMINAL_FONT_FAMILY: &str = "JetBrains Mono";
+const TERMINAL_FOCUSED_FRAME_INTERVAL: Duration = Duration::from_millis(8);
+const TERMINAL_BACKGROUND_FRAME_INTERVAL: Duration = Duration::from_millis(100);
+const TERMINAL_LATENCY_SAMPLE_LIMIT: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
@@ -55,6 +67,40 @@ struct AddDiffPane;
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
 struct AddNotePane;
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
+struct PasteTerminalClipboard;
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
+struct NavigatePane {
+    direction: PaneNavigationDirection,
+}
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
+struct CloseActivePane;
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
+struct ResizeFocusedColumn {
+    direction: ColumnResizeDirection,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaneNavigationDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ColumnResizeDirection {
+    Slimmer,
+    Wider,
+}
 
 #[derive(Clone)]
 struct BootstrapState {
@@ -89,17 +135,30 @@ struct OcttyApp {
     terminal_flush_active: bool,
     live_terminals: HashMap<String, LiveTerminalPane>,
     failed_live_terminals: BTreeSet<String>,
-    terminal_poll_active: bool,
+    terminal_snapshot_tx: mpsc::UnboundedSender<()>,
+    terminal_snapshot_rx: Option<mpsc::UnboundedReceiver<()>>,
+    terminal_notifications_active: bool,
+    terminal_window_active: bool,
 }
 
 struct LiveTerminalPane {
     handle: LiveTerminalHandle,
     latest: Option<TerminalGridSnapshot>,
     last_resize: Option<(u16, u16)>,
+    last_input_at: Option<Instant>,
+    latency: TerminalLatencyStats,
+}
+
+#[derive(Default)]
+struct TerminalLatencyStats {
+    key_to_snapshot_micros: VecDeque<u64>,
+    pty_to_snapshot_micros: VecDeque<u64>,
+    snapshot_build_micros: VecDeque<u64>,
 }
 
 impl OcttyApp {
     fn new(bootstrap: BootstrapState, focus_handle: FocusHandle) -> Self {
+        let (terminal_snapshot_tx, terminal_snapshot_rx) = mpsc::unbounded();
         let mut app = Self {
             status: bootstrap.status.into(),
             workspaces: bootstrap.workspaces,
@@ -111,7 +170,10 @@ impl OcttyApp {
             terminal_flush_active: false,
             live_terminals: HashMap::new(),
             failed_live_terminals: BTreeSet::new(),
-            terminal_poll_active: false,
+            terminal_snapshot_tx,
+            terminal_snapshot_rx: Some(terminal_snapshot_rx),
+            terminal_notifications_active: false,
+            terminal_window_active: true,
         };
         app.ensure_live_terminals_for_active_snapshot();
         app
@@ -129,20 +191,45 @@ impl OcttyApp {
 
         self.active_workspace_index = Some(action.index);
         let workspace = self.workspaces[action.index].clone();
+        let workspace_id = workspace.id.clone();
         let workspace_display_name = workspace.display_name_or_workspace_name().to_owned();
-        match load_workspace_snapshot_sync(&self.store_path, &workspace) {
-            Ok(snapshot) => {
-                self.active_snapshot = Some(snapshot);
-                self.ensure_live_terminals_for_active_snapshot();
-                self.schedule_terminal_poll(cx);
-                self.status = format!("Opened {workspace_display_name}.").into();
-            }
-            Err(error) => {
-                self.status =
-                    format!("Failed to open {}: {error:#}", workspace.workspace_name).into();
-            }
-        }
+        self.active_snapshot = None;
+        self.status = format!("Opening {workspace_display_name}...").into();
         cx.notify();
+
+        let store_path = self.store_path.clone();
+        cx.spawn(async move |this, cx| {
+            let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
+                let store = TursoStore::open(store_path).await?;
+                load_workspace_snapshot(&store, &workspace).await
+            }) {
+                Ok(task) => task.await,
+                Err(error) => Err(error),
+            };
+
+            let _ = this.update(cx, |app, cx| {
+                let still_active = app
+                    .active_workspace()
+                    .is_some_and(|workspace| workspace.id == workspace_id);
+                if !still_active {
+                    return;
+                }
+                match result {
+                    Ok(snapshot) => {
+                        app.active_snapshot = Some(snapshot);
+                        app.ensure_live_terminals_for_active_snapshot();
+                        app.schedule_terminal_snapshot_notifications(cx);
+                        app.status = format!("Opened {workspace_display_name}.").into();
+                    }
+                    Err(error) => {
+                        app.status =
+                            format!("Failed to open {workspace_display_name}: {error:#}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn add_shell_pane(&mut self, _: &AddShellPane, _: &mut Window, cx: &mut Context<Self>) {
@@ -155,6 +242,118 @@ impl OcttyApp {
 
     fn add_note_pane(&mut self, _: &AddNotePane, _: &mut Window, cx: &mut Context<Self>) {
         self.add_pane(PaneType::Note, cx);
+    }
+
+    fn paste_terminal_clipboard(
+        &mut self,
+        _: &PasteTerminalClipboard,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(clipboard) = cx.read_from_clipboard()
+            && let Some(text) = clipboard.text()
+        {
+            self.send_bytes_to_active_terminal(terminal_paste_bytes(&text), cx);
+        }
+        cx.stop_propagation();
+    }
+
+    fn navigate_pane(
+        &mut self,
+        action: &NavigatePane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_handle.focus(window);
+        let Some(snapshot) = self.active_snapshot.as_mut() else {
+            return;
+        };
+        let Some(target_pane_id) = pane_navigation_target(snapshot, action.direction) else {
+            return;
+        };
+        if snapshot.active_pane_id.as_deref() == Some(target_pane_id.as_str()) {
+            return;
+        }
+
+        snapshot.active_pane_id = Some(target_pane_id);
+        snapshot.updated_at = now_ms();
+        let snapshot_to_save = snapshot.clone();
+        self.save_workspace_snapshot(
+            snapshot_to_save,
+            "Selected pane, but failed to save focus",
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn close_active_pane(&mut self, _: &CloseActivePane, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.active_snapshot.clone() else {
+            return;
+        };
+        let Some(pane_id) = snapshot.active_pane_id.clone() else {
+            return;
+        };
+
+        let terminal_session_id =
+            snapshot
+                .panes
+                .get(&pane_id)
+                .and_then(|pane| match &pane.payload {
+                    PanePayload::Terminal(payload) => payload.session_id.clone(),
+                    _ => None,
+                });
+
+        let workspace_id = snapshot.workspace_id.clone();
+
+        match remove_pane(snapshot, &pane_id) {
+            Ok(snapshot) => {
+                let live_key = live_terminal_key(&workspace_id, &pane_id);
+                let live_session_id = self
+                    .live_terminals
+                    .remove(&live_key)
+                    .map(|live| live.handle.session_id().to_owned());
+                self.status = format!("Closed pane {pane_id}.").into();
+                self.active_snapshot = Some(snapshot.clone());
+                self.ensure_live_terminals_for_active_snapshot();
+                self.schedule_terminal_snapshot_notifications(cx);
+                self.save_workspace_snapshot(
+                    snapshot,
+                    "Closed pane, but failed to save taskspace",
+                    cx,
+                );
+                if let Some(session_id) = live_session_id.or(terminal_session_id) {
+                    self.kill_terminal_session(session_id, cx);
+                }
+                cx.notify();
+            }
+            Err(error) => {
+                self.status = format!("Failed to close pane: {error:#}").into();
+                cx.notify();
+            }
+        }
+    }
+
+    fn resize_focused_column(
+        &mut self,
+        action: &ResizeFocusedColumn,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(snapshot) = self.active_snapshot.as_mut() else {
+            return;
+        };
+        let Some(width_px) = resize_focused_column_in_snapshot(snapshot, action.direction) else {
+            return;
+        };
+
+        let snapshot_to_save = snapshot.clone();
+        self.status = format!("Column width: {}px.", width_px.round() as u32).into();
+        self.save_workspace_snapshot(
+            snapshot_to_save,
+            "Resized column, but failed to save taskspace",
+            cx,
+        );
+        cx.notify();
     }
 
     fn add_pane(&mut self, pane_type: PaneType, cx: &mut Context<Self>) {
@@ -187,32 +386,25 @@ impl OcttyApp {
         } else {
             (snapshot, false)
         };
-        match save_workspace_snapshot_sync(&self.store_path, &snapshot) {
-            Ok(()) => {
-                if terminal_started {
-                    self.status = format!(
-                        "Started shell and saved {} pane(s) for {}.",
-                        snapshot.panes.len(),
-                        workspace.display_name_or_workspace_name()
-                    )
-                    .into();
-                } else {
-                    self.status = format!(
-                        "Saved {} pane(s) for {}.",
-                        snapshot.panes.len(),
-                        workspace.display_name_or_workspace_name()
-                    )
-                    .into();
-                }
-                self.active_snapshot = Some(snapshot);
-                self.ensure_live_terminals_for_active_snapshot();
-                self.schedule_terminal_poll(cx);
-            }
-            Err(error) => {
-                self.status = format!("Failed to save taskspace: {error:#}").into();
-                self.active_snapshot = Some(snapshot);
-            }
+        if terminal_started {
+            self.status = format!(
+                "Started shell and saved {} pane(s) for {}.",
+                snapshot.panes.len(),
+                workspace.display_name_or_workspace_name()
+            )
+            .into();
+        } else {
+            self.status = format!(
+                "Saved {} pane(s) for {}.",
+                snapshot.panes.len(),
+                workspace.display_name_or_workspace_name()
+            )
+            .into();
         }
+        self.active_snapshot = Some(snapshot.clone());
+        self.ensure_live_terminals_for_active_snapshot();
+        self.schedule_terminal_snapshot_notifications(cx);
+        self.save_workspace_snapshot(snapshot, "Failed to save taskspace", cx);
         cx.notify();
     }
 
@@ -224,12 +416,59 @@ impl OcttyApp {
             snapshot.clone()
         });
 
-        if let Some(snapshot) = snapshot_to_save
-            && let Err(error) = save_workspace_snapshot_sync(&self.store_path, &snapshot)
-        {
-            self.status = format!("Selected pane, but failed to save focus: {error:#}").into();
+        if let Some(snapshot) = snapshot_to_save {
+            self.save_workspace_snapshot(snapshot, "Selected pane, but failed to save focus", cx);
         }
         cx.notify();
+    }
+
+    fn save_workspace_snapshot(
+        &self,
+        snapshot: WorkspaceSnapshot,
+        error_context: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let store_path = self.store_path.clone();
+        cx.spawn(async move |this, cx| {
+            let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
+                let store = TursoStore::open(store_path).await?;
+                store.save_snapshot(&snapshot).await?;
+                Ok(())
+            }) {
+                Ok(task) => task.await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
+                let _ = this.update(cx, |app, cx| {
+                    app.status = format!("{error_context}: {error:#}").into();
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn kill_terminal_session(&self, session_id: String, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let session_id_for_error = session_id.clone();
+            let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
+                kill_tmux_session(&session_id).await?;
+                Ok(())
+            }) {
+                Ok(task) => task.await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
+                let _ = this.update(cx, |app, cx| {
+                    app.status = format!(
+                        "Closed pane, but failed to stop {session_id_for_error}: {error:#}"
+                    )
+                    .into();
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn handle_key_down(
@@ -260,19 +499,19 @@ impl OcttyApp {
         };
 
         let live_key = live_terminal_key(&workspace.id, &pane_id);
-        if let Some(live) = self.live_terminals.get(&live_key) {
+        if let Some(live) = self.live_terminals.get_mut(&live_key) {
             match &input {
                 TerminalInput::LiveKey(key_input) => {
                     if let Err(error) = live.handle.send_key(key_input.clone()) {
                         self.status = format!("Terminal input failed: {error:#}").into();
+                    } else {
+                        live.last_input_at = Some(Instant::now());
                     }
                 }
             }
             if let Some(snapshot) = self.active_snapshot.as_mut() {
                 snapshot.active_pane_id = Some(pane_id);
             }
-            self.schedule_terminal_poll(cx);
-            cx.notify();
             return;
         }
 
@@ -294,6 +533,35 @@ impl OcttyApp {
         });
         self.schedule_terminal_flush(cx);
         cx.notify();
+    }
+
+    fn send_bytes_to_active_terminal(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        if bytes.is_empty() {
+            return;
+        }
+        let Some(workspace) = self.active_workspace().cloned() else {
+            return;
+        };
+        let Some(snapshot) = self.active_snapshot.clone() else {
+            return;
+        };
+        let Some(pane_id) = active_terminal_pane_id(&snapshot) else {
+            return;
+        };
+
+        let live_key = live_terminal_key(&workspace.id, &pane_id);
+        let Some(live) = self.live_terminals.get_mut(&live_key) else {
+            return;
+        };
+        if let Err(error) = live.handle.send_bytes(bytes) {
+            self.status = format!("Terminal paste failed: {error:#}").into();
+            cx.notify();
+            return;
+        }
+        live.last_input_at = Some(Instant::now());
+        if let Some(snapshot) = self.active_snapshot.as_mut() {
+            snapshot.active_pane_id = Some(pane_id);
+        }
     }
 
     fn schedule_terminal_flush(&mut self, cx: &mut Context<Self>) {
@@ -422,7 +690,13 @@ impl OcttyApp {
             if self.live_terminals.contains_key(&key) || self.failed_live_terminals.contains(&key) {
                 continue;
             }
-            match spawn_live_terminal(spec) {
+            let notify_tx = Arc::new(Mutex::new(self.terminal_snapshot_tx.clone()));
+            let notifier = LiveTerminalSnapshotNotifier::new(move || {
+                if let Ok(tx) = notify_tx.lock() {
+                    let _ = tx.unbounded_send(());
+                }
+            });
+            match spawn_live_terminal_with_notifier(spec, notifier) {
                 Ok(handle) => {
                     self.failed_live_terminals.remove(&key);
                     self.live_terminals.insert(
@@ -431,6 +705,8 @@ impl OcttyApp {
                             handle,
                             latest: None,
                             last_resize: None,
+                            last_input_at: None,
+                            latency: TerminalLatencyStats::default(),
                         },
                     );
                 }
@@ -442,36 +718,44 @@ impl OcttyApp {
         }
     }
 
-    fn schedule_terminal_poll(&mut self, cx: &mut Context<Self>) {
-        if self.terminal_poll_active || self.live_terminals.is_empty() {
+    fn schedule_terminal_snapshot_notifications(&mut self, cx: &mut Context<Self>) {
+        if self.terminal_notifications_active {
             return;
         }
+        let Some(mut notification_rx) = self.terminal_snapshot_rx.take() else {
+            return;
+        };
 
-        self.terminal_poll_active = true;
+        self.terminal_notifications_active = true;
         cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(16))
-                    .await;
-                let keep_polling = this
-                    .update(cx, |app, cx| {
-                        let changed = app.drain_live_terminal_snapshots();
-                        if changed {
-                            cx.notify();
-                        }
-                        let keep_polling = !app.live_terminals.is_empty();
-                        if !keep_polling {
-                            app.terminal_poll_active = false;
-                        }
-                        keep_polling
-                    })
-                    .unwrap_or(false);
-                if !keep_polling {
-                    break;
-                }
+            while notification_rx.next().await.is_some() {
+                drain_pending_terminal_notifications(&mut notification_rx);
+                let delay = this
+                    .update(cx, |app, _cx| app.terminal_snapshot_coalesce_interval())
+                    .unwrap_or(TERMINAL_BACKGROUND_FRAME_INTERVAL);
+                cx.background_executor().timer(delay).await;
+                drain_pending_terminal_notifications(&mut notification_rx);
+                let _ = this.update(cx, |app, cx| {
+                    let changed = app.drain_live_terminal_snapshots();
+                    if changed {
+                        cx.notify();
+                    }
+                });
             }
+
+            let _ = this.update(cx, |app, _cx| {
+                app.terminal_notifications_active = false;
+            });
         })
         .detach();
+    }
+
+    fn terminal_snapshot_coalesce_interval(&self) -> Duration {
+        if self.terminal_window_active {
+            TERMINAL_FOCUSED_FRAME_INTERVAL
+        } else {
+            TERMINAL_BACKGROUND_FRAME_INTERVAL
+        }
     }
 
     fn drain_live_terminal_snapshots(&mut self) -> bool {
@@ -481,7 +765,14 @@ impl OcttyApp {
         };
         let mut updates = Vec::new();
         for (key, live) in &mut self.live_terminals {
-            for snapshot in live.handle.drain_snapshots() {
+            if let Some(snapshot) = live.handle.drain_latest_snapshot() {
+                if let Some(input_at) = live.last_input_at.take() {
+                    live.latency.record_key_to_snapshot(input_at.elapsed());
+                }
+                live.latency
+                    .record_pty_to_snapshot(snapshot.timing.pty_to_snapshot_micros);
+                live.latency
+                    .record_snapshot_build(snapshot.timing.snapshot_build_micros);
                 live.latest = Some(snapshot.clone());
                 updates.push((key.clone(), snapshot));
             }
@@ -546,17 +837,57 @@ impl OcttyApp {
             return;
         }
         let _ = live.handle.scroll(lines);
-        self.schedule_terminal_poll(cx);
         cx.stop_propagation();
     }
 }
 
+impl TerminalLatencyStats {
+    fn record_key_to_snapshot(&mut self, duration: Duration) {
+        push_latency_sample(
+            &mut self.key_to_snapshot_micros,
+            duration.as_micros().min(u128::from(u64::MAX)) as u64,
+        );
+    }
+
+    fn record_pty_to_snapshot(&mut self, micros: Option<u64>) {
+        if let Some(micros) = micros {
+            push_latency_sample(&mut self.pty_to_snapshot_micros, micros);
+        }
+    }
+
+    fn record_snapshot_build(&mut self, micros: u64) {
+        push_latency_sample(&mut self.snapshot_build_micros, micros);
+    }
+
+    fn summary_label(&self) -> Option<String> {
+        let key = latency_summary(&self.key_to_snapshot_micros)?;
+        let pty = latency_summary(&self.pty_to_snapshot_micros);
+        let build = latency_summary(&self.snapshot_build_micros);
+        Some(match (pty, build) {
+            (Some(pty), Some(build)) => {
+                format!("key {key} · pty {pty} · snap {build}")
+            }
+            (Some(pty), None) => format!("key {key} · pty {pty}"),
+            (None, Some(build)) => format!("key {key} · snap {build}"),
+            (None, None) => format!("key {key}"),
+        })
+    }
+}
+
+fn drain_pending_terminal_notifications(notification_rx: &mut mpsc::UnboundedReceiver<()>) {
+    while notification_rx.try_recv().is_ok() {}
+}
+
 impl Render for OcttyApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_live_terminals_for_active_snapshot();
-        self.schedule_terminal_poll(cx);
+        self.terminal_window_active = window.is_window_active();
+        self.schedule_terminal_snapshot_notifications(cx);
+        let taskspace_height =
+            taskspace_height_for_viewport(f32::from(window.viewport_size().height));
+        let taskspace_width = taskspace_width_for_viewport(f32::from(window.viewport_size().width));
         for (workspace_id, pane_id, cols, rows) in
-            terminal_resize_requests(self.active_snapshot.as_ref())
+            terminal_resize_requests(self.active_snapshot.as_ref(), taskspace_height)
         {
             self.resize_live_terminal(&workspace_id, &pane_id, cols, rows);
         }
@@ -614,7 +945,12 @@ impl Render for OcttyApp {
             );
         }
 
-        let taskspace = render_taskspace(self.active_snapshot.as_ref(), &self.live_terminals, cx);
+        let taskspace = render_taskspace(
+            self.active_snapshot.as_ref(),
+            &self.live_terminals,
+            taskspace_width,
+            cx,
+        );
 
         div()
             .id("octty-rs-root")
@@ -624,6 +960,10 @@ impl Render for OcttyApp {
             .on_action(cx.listener(Self::add_shell_pane))
             .on_action(cx.listener(Self::add_diff_pane))
             .on_action(cx.listener(Self::add_note_pane))
+            .on_action(cx.listener(Self::paste_terminal_clipboard))
+            .on_action(cx.listener(Self::navigate_pane))
+            .on_action(cx.listener(Self::close_active_pane))
+            .on_action(cx.listener(Self::resize_focused_column))
             .on_key_down(cx.listener(Self::handle_key_down))
             .flex()
             .size_full()
@@ -631,7 +971,7 @@ impl Render for OcttyApp {
             .text_color(rgb(0xf2f2f2))
             .child(
                 div()
-                    .w(px(280.0))
+                    .w(px(WORKSPACE_SIDEBAR_WIDTH))
                     .h_full()
                     .border_r_1()
                     .border_color(rgb(0x3a3a3a))
@@ -657,6 +997,7 @@ impl Render for OcttyApp {
                     .h_full()
                     .flex()
                     .flex_col()
+                    .overflow_hidden()
                     .p_6()
                     .child(div().text_xl().child("Taskspace"))
                     .child(
@@ -1207,29 +1548,6 @@ fn terminal_spec_for_payload(
     }
 }
 
-fn load_workspace_snapshot_sync(
-    store_path: &Path,
-    workspace: &WorkspaceSummary,
-) -> anyhow::Result<WorkspaceSnapshot> {
-    let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(async {
-        let store = TursoStore::open(store_path).await?;
-        load_workspace_snapshot(&store, workspace).await
-    })
-}
-
-fn save_workspace_snapshot_sync(
-    store_path: &Path,
-    snapshot: &WorkspaceSnapshot,
-) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(async {
-        let store = TursoStore::open(store_path).await?;
-        store.save_snapshot(snapshot).await?;
-        Ok(())
-    })
-}
-
 fn project_root_from_path(root_path: &Path) -> ProjectRootRecord {
     let root_path_string = root_path.to_string_lossy().to_string();
     let now = now_ms();
@@ -1278,8 +1596,8 @@ fn workspace_menu_items(workspaces: &[WorkspaceSummary]) -> Vec<MenuItem> {
         .collect()
 }
 
-fn workspace_key_bindings() -> [KeyBinding; 10] {
-    [
+fn workspace_key_bindings() -> Vec<KeyBinding> {
+    vec![
         KeyBinding::new("ctrl-shift-1", OpenWorkspaceShortcut { index: 0 }, None),
         KeyBinding::new("ctrl-shift-2", OpenWorkspaceShortcut { index: 1 }, None),
         KeyBinding::new("ctrl-shift-3", OpenWorkspaceShortcut { index: 2 }, None),
@@ -1290,6 +1608,51 @@ fn workspace_key_bindings() -> [KeyBinding; 10] {
         KeyBinding::new("ctrl-shift-8", OpenWorkspaceShortcut { index: 7 }, None),
         KeyBinding::new("ctrl-shift-9", OpenWorkspaceShortcut { index: 8 }, None),
         KeyBinding::new("ctrl-shift-0", OpenWorkspaceShortcut { index: 9 }, None),
+        KeyBinding::new("ctrl-shift-v", PasteTerminalClipboard, None),
+        KeyBinding::new("cmd-v", PasteTerminalClipboard, None),
+        KeyBinding::new(
+            "ctrl-shift-left",
+            NavigatePane {
+                direction: PaneNavigationDirection::Left,
+            },
+            None,
+        ),
+        KeyBinding::new(
+            "ctrl-shift-right",
+            NavigatePane {
+                direction: PaneNavigationDirection::Right,
+            },
+            None,
+        ),
+        KeyBinding::new(
+            "ctrl-shift-up",
+            NavigatePane {
+                direction: PaneNavigationDirection::Up,
+            },
+            None,
+        ),
+        KeyBinding::new(
+            "ctrl-shift-down",
+            NavigatePane {
+                direction: PaneNavigationDirection::Down,
+            },
+            None,
+        ),
+        KeyBinding::new("ctrl-shift-w", CloseActivePane, None),
+        KeyBinding::new(
+            "ctrl-alt-left",
+            ResizeFocusedColumn {
+                direction: ColumnResizeDirection::Slimmer,
+            },
+            None,
+        ),
+        KeyBinding::new(
+            "ctrl-alt-right",
+            ResizeFocusedColumn {
+                direction: ColumnResizeDirection::Wider,
+            },
+            None,
+        ),
     ]
 }
 
@@ -1336,6 +1699,15 @@ fn live_terminal_input_from_key_parts(
             "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
         )
     {
+        return None;
+    }
+    if control && shift && key.eq_ignore_ascii_case("v") {
+        return None;
+    }
+    if control && shift && is_pane_action_key(key) {
+        return None;
+    }
+    if control && alt && is_column_resize_key(key) {
         return None;
     }
 
@@ -1411,6 +1783,28 @@ fn live_terminal_input_from_key_parts(
     })
 }
 
+fn is_pane_action_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "left"
+            | "right"
+            | "up"
+            | "down"
+            | "arrowleft"
+            | "arrowright"
+            | "arrowup"
+            | "arrowdown"
+            | "w"
+    )
+}
+
+fn is_column_resize_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "left" | "right" | "arrowleft" | "arrowright"
+    )
+}
+
 fn unshifted_character(character: char) -> char {
     match character {
         'A'..='Z' => character.to_ascii_lowercase(),
@@ -1459,6 +1853,116 @@ fn active_terminal_pane_id(snapshot: &WorkspaceSnapshot) -> Option<String> {
         })
 }
 
+fn pane_navigation_target(
+    snapshot: &WorkspaceSnapshot,
+    direction: PaneNavigationDirection,
+) -> Option<String> {
+    let active_pane_id = snapshot
+        .active_pane_id
+        .as_deref()
+        .or_else(|| first_center_pane_id(snapshot))?;
+
+    let (column_index, pane_index) = pane_layout_position(snapshot, active_pane_id)?;
+    let target = match direction {
+        PaneNavigationDirection::Up => {
+            let column = center_column(snapshot, column_index)?;
+            pane_index
+                .checked_sub(1)
+                .and_then(|index| column.pane_ids.get(index))
+        }
+        PaneNavigationDirection::Down => {
+            let column = center_column(snapshot, column_index)?;
+            column.pane_ids.get(pane_index + 1)
+        }
+        PaneNavigationDirection::Left => column_index
+            .checked_sub(1)
+            .and_then(|index| pane_in_neighbor_column(snapshot, index, pane_index)),
+        PaneNavigationDirection::Right => {
+            pane_in_neighbor_column(snapshot, column_index + 1, pane_index)
+        }
+    };
+
+    target.cloned()
+}
+
+fn first_center_pane_id(snapshot: &WorkspaceSnapshot) -> Option<&str> {
+    snapshot
+        .center_column_ids
+        .iter()
+        .filter_map(|column_id| snapshot.columns.get(column_id))
+        .flat_map(|column| column.pane_ids.iter())
+        .next()
+        .map(String::as_str)
+}
+
+fn pane_layout_position(snapshot: &WorkspaceSnapshot, pane_id: &str) -> Option<(usize, usize)> {
+    for (column_index, column_id) in snapshot.center_column_ids.iter().enumerate() {
+        let column = snapshot.columns.get(column_id)?;
+        if let Some(pane_index) = column.pane_ids.iter().position(|id| id == pane_id) {
+            return Some((column_index, pane_index));
+        }
+    }
+    None
+}
+
+fn center_column(
+    snapshot: &WorkspaceSnapshot,
+    column_index: usize,
+) -> Option<&octty_core::WorkspaceColumn> {
+    snapshot
+        .center_column_ids
+        .get(column_index)
+        .and_then(|column_id| snapshot.columns.get(column_id))
+}
+
+fn pane_in_neighbor_column(
+    snapshot: &WorkspaceSnapshot,
+    column_index: usize,
+    source_pane_index: usize,
+) -> Option<&String> {
+    let column = center_column(snapshot, column_index)?;
+    let target_index = source_pane_index.min(column.pane_ids.len().saturating_sub(1));
+    column.pane_ids.get(target_index)
+}
+
+fn resize_focused_column_in_snapshot(
+    snapshot: &mut WorkspaceSnapshot,
+    direction: ColumnResizeDirection,
+) -> Option<f64> {
+    let column_id = active_column_id(snapshot)?;
+    let column = snapshot.columns.get_mut(&column_id)?;
+    let delta = match direction {
+        ColumnResizeDirection::Slimmer => -COLUMN_WIDTH_STEP_PX,
+        ColumnResizeDirection::Wider => COLUMN_WIDTH_STEP_PX,
+    };
+    let next_width = (column.width_px + delta).clamp(MIN_COLUMN_WIDTH_PX, MAX_COLUMN_WIDTH_PX);
+    if (next_width - column.width_px).abs() < f64::EPSILON {
+        return None;
+    }
+    column.width_px = next_width;
+    snapshot.updated_at = now_ms();
+    Some(next_width)
+}
+
+fn active_column_id(snapshot: &WorkspaceSnapshot) -> Option<String> {
+    let active_pane_id = snapshot
+        .active_pane_id
+        .as_deref()
+        .or_else(|| first_center_pane_id(snapshot))?;
+    snapshot
+        .center_column_ids
+        .iter()
+        .find(|column_id| {
+            snapshot.columns.get(*column_id).is_some_and(|column| {
+                column
+                    .pane_ids
+                    .iter()
+                    .any(|pane_id| pane_id == active_pane_id)
+            })
+        })
+        .cloned()
+}
+
 fn preview_terminal_input(snapshot: &mut WorkspaceSnapshot, pane_id: &str, input: &TerminalInput) {
     let Some(pane) = snapshot.panes.get_mut(pane_id) else {
         return;
@@ -1490,19 +1994,30 @@ fn preview_terminal_input(snapshot: &mut WorkspaceSnapshot, pane_id: &str, input
 fn render_taskspace(
     snapshot: Option<&WorkspaceSnapshot>,
     live_terminals: &HashMap<String, LiveTerminalPane>,
+    viewport_width: f32,
     cx: &mut Context<OcttyApp>,
 ) -> gpui::Div {
-    let mut taskspace = div().mt_4().flex().gap_3().flex_1().h_full();
+    let taskspace = div().mt_4().flex_1().h_full().overflow_hidden();
     let Some(snapshot) = snapshot else {
-        return taskspace.child(
+        return taskspace.flex().child(
             div()
                 .text_color(rgb(0xa0a0a0))
                 .child("Open a workspace to start."),
         );
     };
     if snapshot.panes.is_empty() {
-        return taskspace.child(div().text_color(rgb(0xa0a0a0)).child("No panes are open."));
+        return taskspace
+            .flex()
+            .child(div().text_color(rgb(0xa0a0a0)).child("No panes are open."));
     }
+
+    let viewport_offset = taskspace_viewport_offset(snapshot, viewport_width);
+    let mut panel_strip = div()
+        .flex()
+        .gap_3()
+        .h_full()
+        .ml(px(-viewport_offset))
+        .flex_none();
 
     for column_id in &snapshot.center_column_ids {
         let Some(column) = snapshot.columns.get(column_id) else {
@@ -1513,32 +2028,33 @@ fn render_taskspace(
             .flex_col()
             .gap_3()
             .h_full()
+            .overflow_hidden()
+            .flex_none()
             .w(px(column.width_px as f32));
         for pane_id in &column.pane_ids {
             if let Some(pane) = snapshot.panes.get(pane_id) {
                 let active = snapshot.active_pane_id.as_deref() == Some(pane.id.as_str());
-                let terminal_snapshot = live_terminals
-                    .get(&live_terminal_key(&snapshot.workspace_id, &pane.id))
-                    .and_then(|live| live.latest.as_ref());
+                let terminal_live =
+                    live_terminals.get(&live_terminal_key(&snapshot.workspace_id, &pane.id));
                 column_el = column_el.child(render_pane(
                     &snapshot.workspace_id,
                     pane,
                     active,
-                    terminal_snapshot,
+                    terminal_live,
                     cx,
                 ));
             }
         }
-        taskspace = taskspace.child(column_el);
+        panel_strip = panel_strip.child(column_el);
     }
-    taskspace
+    taskspace.child(panel_strip)
 }
 
 fn render_pane(
     workspace_id: &str,
     pane: &PaneState,
     active: bool,
-    terminal_snapshot: Option<&TerminalGridSnapshot>,
+    terminal_live: Option<&LiveTerminalPane>,
     cx: &mut Context<OcttyApp>,
 ) -> gpui::Div {
     let pane_id = pane.id.clone();
@@ -1569,18 +2085,16 @@ fn render_pane(
                 .text_sm()
                 .child(pane.title.clone()),
         )
-        .child(render_pane_body(pane, active, terminal_snapshot))
+        .child(render_pane_body(pane, active, terminal_live))
 }
 
 fn render_pane_body(
     pane: &PaneState,
     active: bool,
-    terminal_snapshot: Option<&TerminalGridSnapshot>,
+    terminal_live: Option<&LiveTerminalPane>,
 ) -> gpui::Div {
     match &pane.payload {
-        PanePayload::Terminal(payload) => {
-            render_terminal_surface(payload, active, terminal_snapshot)
-        }
+        PanePayload::Terminal(payload) => render_terminal_surface(payload, active, terminal_live),
         _ => div()
             .flex_1()
             .overflow_hidden()
@@ -1594,8 +2108,9 @@ fn render_pane_body(
 fn render_terminal_surface(
     payload: &TerminalPanePayload,
     active: bool,
-    terminal_snapshot: Option<&TerminalGridSnapshot>,
+    terminal_live: Option<&LiveTerminalPane>,
 ) -> gpui::Div {
+    let terminal_snapshot = terminal_live.and_then(|live| live.latest.as_ref());
     let Some(snapshot) = terminal_snapshot else {
         return div()
             .flex_1()
@@ -1611,7 +2126,15 @@ fn render_terminal_surface(
 
     let default_fg = terminal_rgb_to_rgba(snapshot.default_fg);
     let default_bg = terminal_rgb_to_rgba(snapshot.default_bg);
-    let mut surface = div()
+    let mut terminal_meta = format!(
+        "{:?} · {}x{} · {}",
+        payload.kind, snapshot.cols, snapshot.rows, payload.cwd
+    );
+    if let Some(label) = terminal_live.and_then(|live| live.latency.summary_label()) {
+        terminal_meta.push_str(" · ");
+        terminal_meta.push_str(&label);
+    }
+    div()
         .flex_1()
         .overflow_hidden()
         .p_2()
@@ -1624,56 +2147,10 @@ fn render_terminal_surface(
                 .text_xs()
                 .mb_1()
                 .text_color(rgb(if active { 0x8fd694 } else { 0x5f6b78 }))
-                .child(format!(
-                    "{:?} · {}x{} · {}",
-                    payload.kind, snapshot.cols, snapshot.rows, payload.cwd
-                )),
-        );
-
-    for (row_index, row) in snapshot.rows_data.iter().enumerate() {
-        surface = surface.child(render_terminal_row(
-            row_index as u16,
-            row,
-            snapshot,
-            default_fg,
-            default_bg,
-        ));
-    }
-    surface
-}
-
-fn render_terminal_row(
-    row_index: u16,
-    row: &octty_term::live::TerminalRowSnapshot,
-    snapshot: &TerminalGridSnapshot,
-    default_fg: Rgba,
-    default_bg: Rgba,
-) -> gpui::Div {
-    let mut row_el = div()
-        .flex()
-        .h(px(TERMINAL_CELL_HEIGHT))
-        .line_height(px(TERMINAL_CELL_HEIGHT));
-
-    for run in terminal_cell_runs(row_index, row, snapshot) {
-        let mut run_el = div()
-            .h(px(TERMINAL_CELL_HEIGHT))
-            .w(px(TERMINAL_CELL_WIDTH * run.cell_count as f32))
-            .overflow_hidden()
-            .text_color(run.fg.unwrap_or(default_fg))
-            .bg(run.bg.unwrap_or(default_bg))
-            .child(run.text);
-        if run.bold {
-            run_el = run_el.font_weight(gpui::FontWeight::BOLD);
-        }
-        if run.italic {
-            run_el = run_el.italic();
-        }
-        if run.underline {
-            run_el = run_el.underline();
-        }
-        row_el = row_el.child(run_el);
-    }
-    row_el
+                .truncate()
+                .child(terminal_meta),
+        )
+        .child(render_terminal_grid(snapshot, default_fg, default_bg))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1685,6 +2162,176 @@ struct TerminalCellRun {
     bold: bool,
     italic: bool,
     underline: bool,
+}
+
+struct TerminalGridPaintInput {
+    cols: u16,
+    rows: u16,
+    default_bg: Rgba,
+    rows_data: Vec<TerminalPaintRowInput>,
+}
+
+struct TerminalPaintRowInput {
+    text: SharedString,
+    text_runs: Vec<TextRun>,
+    background_runs: Vec<TerminalPaintBackgroundRun>,
+}
+
+struct TerminalPaintBackgroundRun {
+    start_col: usize,
+    cell_count: usize,
+    color: Rgba,
+}
+
+struct TerminalPaintSurface {
+    input: TerminalGridPaintInput,
+    shaped_lines: Vec<ShapedLine>,
+}
+
+struct TerminalPaintFonts {
+    normal: Font,
+    bold: Font,
+    italic: Font,
+    bold_italic: Font,
+}
+
+fn render_terminal_grid(
+    snapshot: &TerminalGridSnapshot,
+    default_fg: Rgba,
+    default_bg: Rgba,
+) -> impl IntoElement {
+    let input = terminal_paint_input(snapshot, default_fg, default_bg);
+    let width = TERMINAL_CELL_WIDTH * input.cols as f32;
+    let height = TERMINAL_CELL_HEIGHT * input.rows as f32;
+
+    canvas(
+        move |_bounds, window, _cx| {
+            let shaped_lines = input
+                .rows_data
+                .iter()
+                .map(|row| {
+                    window.text_system().shape_line(
+                        row.text.clone(),
+                        px(TERMINAL_FONT_SIZE),
+                        &row.text_runs,
+                        Some(px(TERMINAL_CELL_WIDTH)),
+                    )
+                })
+                .collect();
+            TerminalPaintSurface {
+                input,
+                shaped_lines,
+            }
+        },
+        move |bounds, surface, window, cx| {
+            paint_terminal_surface(bounds, surface, window, cx);
+        },
+    )
+    .w(px(width))
+    .h(px(height))
+    .overflow_hidden()
+}
+
+fn terminal_paint_input(
+    snapshot: &TerminalGridSnapshot,
+    default_fg: Rgba,
+    default_bg: Rgba,
+) -> TerminalGridPaintInput {
+    let normal_font = terminal_font();
+    let fonts = TerminalPaintFonts {
+        normal: normal_font.clone(),
+        bold: normal_font.clone().bold(),
+        italic: normal_font.clone().italic(),
+        bold_italic: normal_font.bold().italic(),
+    };
+    let mut rows_data = Vec::with_capacity(snapshot.rows_data.len());
+
+    for (row_index, row) in snapshot.rows_data.iter().enumerate() {
+        let mut text = String::with_capacity(row.cells.len());
+        let mut text_runs = Vec::new();
+        let mut background_runs = Vec::new();
+        let mut start_col = 0usize;
+
+        for run in terminal_cell_runs(row_index as u16, row, snapshot) {
+            let run_len = run.text.len();
+            text.push_str(&run.text);
+            text_runs.push(TextRun {
+                len: run_len,
+                font: terminal_paint_font(&fonts, &run),
+                color: Hsla::from(run.fg.unwrap_or(default_fg)),
+                background_color: None,
+                underline: run.underline.then(|| UnderlineStyle {
+                    thickness: px(1.0),
+                    color: Some(Hsla::from(run.fg.unwrap_or(default_fg))),
+                    wavy: false,
+                }),
+                strikethrough: None,
+            });
+            if let Some(bg) = run.bg
+                && bg != default_bg
+            {
+                background_runs.push(TerminalPaintBackgroundRun {
+                    start_col,
+                    cell_count: run.cell_count,
+                    color: bg,
+                });
+            }
+            start_col += run.cell_count;
+        }
+
+        rows_data.push(TerminalPaintRowInput {
+            text: SharedString::from(text),
+            text_runs,
+            background_runs,
+        });
+    }
+
+    TerminalGridPaintInput {
+        cols: snapshot.cols,
+        rows: snapshot.rows,
+        default_bg,
+        rows_data,
+    }
+}
+
+fn terminal_paint_font(fonts: &TerminalPaintFonts, run: &TerminalCellRun) -> Font {
+    match (run.bold, run.italic) {
+        (true, true) => fonts.bold_italic.clone(),
+        (true, false) => fonts.bold.clone(),
+        (false, true) => fonts.italic.clone(),
+        (false, false) => fonts.normal.clone(),
+    }
+}
+
+fn paint_terminal_surface(
+    bounds: Bounds<gpui::Pixels>,
+    surface: TerminalPaintSurface,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    window.paint_quad(fill(bounds, surface.input.default_bg));
+    for (row_index, row) in surface.input.rows_data.iter().enumerate() {
+        let row_top = bounds.origin.y + px(row_index as f32 * TERMINAL_CELL_HEIGHT);
+        for run in &row.background_runs {
+            let origin = point(
+                bounds.origin.x + px(run.start_col as f32 * TERMINAL_CELL_WIDTH),
+                row_top,
+            );
+            let size = size(
+                px(run.cell_count as f32 * TERMINAL_CELL_WIDTH),
+                px(TERMINAL_CELL_HEIGHT),
+            );
+            window.paint_quad(fill(Bounds { origin, size }, run.color));
+        }
+    }
+
+    for (row_index, line) in surface.shaped_lines.iter().enumerate() {
+        let origin = point(
+            bounds.origin.x,
+            bounds.origin.y + px(row_index as f32 * TERMINAL_CELL_HEIGHT),
+        );
+        let _ = line.paint(origin, px(TERMINAL_CELL_HEIGHT), window, cx);
+    }
 }
 
 fn terminal_cell_runs(
@@ -1766,6 +2413,48 @@ fn terminal_screen_excerpt(screen: &str) -> String {
     lines[start..].join("\n")
 }
 
+fn terminal_paste_bytes(text: &str) -> Vec<u8> {
+    text.replace("\r\n", "\n").replace('\n', "\r").into_bytes()
+}
+
+fn push_latency_sample(samples: &mut VecDeque<u64>, micros: u64) {
+    if samples.len() == TERMINAL_LATENCY_SAMPLE_LIMIT {
+        samples.pop_front();
+    }
+    samples.push_back(micros);
+}
+
+fn latency_summary(samples: &VecDeque<u64>) -> Option<String> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<_> = samples.iter().copied().collect();
+    sorted.sort_unstable();
+    let p50 = latency_percentile(&sorted, 50);
+    let p95 = latency_percentile(&sorted, 95);
+    let max = *sorted.last().unwrap_or(&p95);
+    Some(format!(
+        "p50 {} p95 {} max {}",
+        format_latency_micros(p50),
+        format_latency_micros(p95),
+        format_latency_micros(max)
+    ))
+}
+
+fn latency_percentile(sorted_micros: &[u64], percentile: usize) -> u64 {
+    let index = ((sorted_micros.len().saturating_sub(1) * percentile) / 100)
+        .min(sorted_micros.len().saturating_sub(1));
+    sorted_micros[index]
+}
+
+fn format_latency_micros(micros: u64) -> String {
+    if micros >= 1_000 {
+        format!("{:.1}ms", micros as f64 / 1_000.0)
+    } else {
+        format!("{micros}us")
+    }
+}
+
 fn terminal_font() -> Font {
     let mut terminal_font = font(terminal_font_family());
     terminal_font.features = FontFeatures::disable_ligatures();
@@ -1804,8 +2493,59 @@ fn default_terminal_grid_for_pane() -> (u16, u16) {
     )
 }
 
+fn taskspace_height_for_viewport(viewport_height: f32) -> f32 {
+    (viewport_height - TERMINAL_TASKSPACE_VERTICAL_CHROME_HEIGHT).max(160.0)
+}
+
+fn taskspace_width_for_viewport(viewport_width: f32) -> f32 {
+    (viewport_width - WORKSPACE_SIDEBAR_WIDTH - TASKSPACE_HORIZONTAL_PADDING).max(240.0)
+}
+
+fn taskspace_viewport_offset(snapshot: &WorkspaceSnapshot, viewport_width: f32) -> f32 {
+    let Some((active_left, active_width, total_width)) = active_column_metrics(snapshot) else {
+        return 0.0;
+    };
+    let max_offset = (total_width - viewport_width).max(0.0);
+    let centered_offset = active_left + (active_width / 2.0) - (viewport_width / 2.0);
+    centered_offset.clamp(0.0, max_offset)
+}
+
+fn active_column_metrics(snapshot: &WorkspaceSnapshot) -> Option<(f32, f32, f32)> {
+    let active_pane_id = snapshot
+        .active_pane_id
+        .as_deref()
+        .or_else(|| first_center_pane_id(snapshot))?;
+
+    let mut total_width = 0.0;
+    let mut active_left = None;
+    let mut active_width = None;
+    let mut visible_column_count = 0usize;
+
+    for column_id in &snapshot.center_column_ids {
+        let Some(column) = snapshot.columns.get(column_id) else {
+            continue;
+        };
+        if visible_column_count > 0 {
+            total_width += TASKSPACE_PANEL_GAP;
+        }
+        if column
+            .pane_ids
+            .iter()
+            .any(|pane_id| pane_id == active_pane_id)
+        {
+            active_left = Some(total_width);
+            active_width = Some(column.width_px as f32);
+        }
+        total_width += column.width_px as f32;
+        visible_column_count += 1;
+    }
+
+    Some((active_left?, active_width?, total_width))
+}
+
 fn terminal_resize_requests(
     snapshot: Option<&WorkspaceSnapshot>,
+    taskspace_height: f32,
 ) -> Vec<(String, String, u16, u16)> {
     let Some(snapshot) = snapshot else {
         return Vec::new();
@@ -1816,8 +2556,8 @@ fn terminal_resize_requests(
             continue;
         };
         let pane_count = column.pane_ids.len().max(1);
-        let pane_height = (TERMINAL_GRID_HEIGHT - (pane_count.saturating_sub(1) as f32 * 12.0))
-            / pane_count as f32;
+        let pane_height =
+            (taskspace_height - (pane_count.saturating_sub(1) as f32 * 12.0)) / pane_count as f32;
         let terminal_height = (pane_height - TERMINAL_PANE_CHROME_HEIGHT).max(TERMINAL_CELL_HEIGHT);
         let cols = ((column.width_px as f32 - 24.0) / TERMINAL_CELL_WIDTH)
             .floor()
@@ -1925,10 +2665,252 @@ mod tests {
     }
 
     #[test]
+    fn terminal_input_preserves_paste_shortcut() {
+        assert_eq!(
+            live_terminal_input_from_key_parts("v", Some("V"), true, false, true, false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn terminal_input_preserves_pane_action_shortcuts() {
+        assert_eq!(
+            live_terminal_input_from_key_parts("left", None, true, false, true, false, false),
+            None
+        );
+        assert_eq!(
+            live_terminal_input_from_key_parts("w", Some("W"), true, false, true, false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn terminal_input_preserves_column_resize_shortcuts() {
+        assert_eq!(
+            live_terminal_input_from_key_parts("left", None, true, true, false, false, false),
+            None
+        );
+        assert_eq!(
+            live_terminal_input_from_key_parts("right", None, true, true, false, false, false),
+            None
+        );
+    }
+
+    #[test]
     fn control_letters_keep_control_modifier_for_encoder() {
         let input = live_terminal_input_from_key_parts("c", None, true, false, false, false, false)
             .expect("control input");
         assert_eq!(input.key, LiveTerminalKey::Character('c'));
         assert!(input.modifiers.control);
+    }
+
+    #[test]
+    fn css_font_stack_prefers_first_real_family() {
+        assert_eq!(
+            first_font_family("\"Iosevka Term\", monospace").as_deref(),
+            Some("Iosevka Term")
+        );
+        assert_eq!(
+            first_font_family("monospace, \"JetBrains Mono\"").as_deref(),
+            Some("JetBrains Mono")
+        );
+    }
+
+    #[test]
+    fn terminal_paste_normalizes_newlines_to_carriage_returns() {
+        assert_eq!(
+            terminal_paste_bytes("one\ntwo\r\nthree"),
+            b"one\rtwo\rthree"
+        );
+    }
+
+    #[test]
+    fn latency_summary_reports_millisecond_percentiles() {
+        let samples = VecDeque::from([500, 1_500, 8_000]);
+        let summary = latency_summary(&samples).expect("latency summary");
+        assert!(summary.contains("p50 1.5ms"));
+        assert!(summary.contains("max 8.0ms"));
+    }
+
+    #[test]
+    fn terminal_notification_drain_coalesces_queued_wakeups() {
+        let (tx, mut rx) = mpsc::unbounded();
+        tx.unbounded_send(()).expect("first wakeup");
+        tx.unbounded_send(()).expect("second wakeup");
+
+        drain_pending_terminal_notifications(&mut rx);
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn terminal_paint_input_keeps_fixed_width_cells() {
+        let default_fg = TerminalRgb {
+            r: 200,
+            g: 200,
+            b: 200,
+        };
+        let default_bg = TerminalRgb { r: 0, g: 0, b: 0 };
+        let snapshot = TerminalGridSnapshot {
+            session_id: "session-1".to_owned(),
+            cols: 3,
+            rows: 1,
+            default_fg,
+            default_bg,
+            cursor: None,
+            rows_data: vec![octty_term::live::TerminalRowSnapshot {
+                cells: vec![
+                    octty_term::live::TerminalCellSnapshot {
+                        text: String::new(),
+                        fg: None,
+                        bg: None,
+                        bold: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                    },
+                    octty_term::live::TerminalCellSnapshot {
+                        text: "a".to_owned(),
+                        fg: None,
+                        bg: None,
+                        bold: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                    },
+                    octty_term::live::TerminalCellSnapshot {
+                        text: String::new(),
+                        fg: None,
+                        bg: None,
+                        bold: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                    },
+                ],
+            }],
+            plain_text: " a\n".to_owned(),
+            timing: octty_term::live::TerminalSnapshotTiming::default(),
+        };
+
+        let input = terminal_paint_input(
+            &snapshot,
+            terminal_rgb_to_rgba(default_fg),
+            terminal_rgb_to_rgba(default_bg),
+        );
+
+        assert_eq!(input.rows_data[0].text.as_ref(), " a ");
+        assert_eq!(
+            input.rows_data[0]
+                .text_runs
+                .iter()
+                .map(|run| run.len)
+                .sum::<usize>(),
+            3
+        );
+    }
+
+    #[test]
+    fn pane_navigation_moves_between_columns() {
+        let mut snapshot = create_default_snapshot("workspace-1");
+        snapshot = add_pane(snapshot, create_pane_state(PaneType::Note, "/tmp", None));
+        let first = snapshot.active_pane_id.clone().expect("first pane");
+        snapshot = add_pane(snapshot, create_pane_state(PaneType::Diff, "/tmp", None));
+        let second = snapshot.active_pane_id.clone().expect("second pane");
+
+        snapshot.active_pane_id = Some(first.clone());
+        assert_eq!(
+            pane_navigation_target(&snapshot, PaneNavigationDirection::Right).as_deref(),
+            Some(second.as_str())
+        );
+
+        snapshot.active_pane_id = Some(second);
+        assert_eq!(
+            pane_navigation_target(&snapshot, PaneNavigationDirection::Left).as_deref(),
+            Some(first.as_str())
+        );
+    }
+
+    #[test]
+    fn taskspace_viewport_offset_keeps_focused_column_visible() {
+        let mut snapshot = create_default_snapshot("workspace-1");
+        snapshot = add_pane(snapshot, create_pane_state(PaneType::Note, "/tmp", None));
+        let first = snapshot.active_pane_id.clone().expect("first pane");
+        snapshot = add_pane(snapshot, create_pane_state(PaneType::Diff, "/tmp", None));
+        let second = snapshot.active_pane_id.clone().expect("second pane");
+
+        snapshot.active_pane_id = Some(first);
+        assert_eq!(taskspace_viewport_offset(&snapshot, 560.0), 0.0);
+
+        snapshot.active_pane_id = Some(second);
+        assert_eq!(taskspace_viewport_offset(&snapshot, 560.0), 602.0);
+    }
+
+    #[test]
+    fn taskspace_viewport_offset_stays_zero_when_columns_fit() {
+        let mut snapshot = create_default_snapshot("workspace-1");
+        snapshot = add_pane(snapshot, create_pane_state(PaneType::Note, "/tmp", None));
+        snapshot = add_pane(snapshot, create_pane_state(PaneType::Diff, "/tmp", None));
+
+        assert_eq!(taskspace_viewport_offset(&snapshot, 1_400.0), 0.0);
+    }
+
+    #[test]
+    fn resize_focused_column_only_changes_active_column_width() {
+        let mut snapshot = create_default_snapshot("workspace-1");
+        snapshot = add_pane(snapshot, create_pane_state(PaneType::Note, "/tmp", None));
+        let first_column_id = snapshot.center_column_ids[0].clone();
+        snapshot = add_pane(snapshot, create_pane_state(PaneType::Diff, "/tmp", None));
+        let second_column_id = snapshot.center_column_ids[1].clone();
+        let first_width = snapshot.columns[&first_column_id].width_px;
+        let second_width = snapshot.columns[&second_column_id].width_px;
+
+        let resized =
+            resize_focused_column_in_snapshot(&mut snapshot, ColumnResizeDirection::Wider)
+                .expect("resized focused column");
+
+        assert_eq!(snapshot.columns[&first_column_id].width_px, first_width);
+        assert_eq!(resized, second_width + COLUMN_WIDTH_STEP_PX);
+        assert_eq!(snapshot.columns[&second_column_id].width_px, resized);
+    }
+
+    #[test]
+    fn resize_focused_column_clamps_to_minimum_width() {
+        let mut snapshot = create_default_snapshot("workspace-1");
+        snapshot = add_pane(snapshot, create_pane_state(PaneType::Note, "/tmp", None));
+        let column_id = snapshot.center_column_ids[0].clone();
+        snapshot.columns.get_mut(&column_id).unwrap().width_px = MIN_COLUMN_WIDTH_PX;
+
+        assert_eq!(
+            resize_focused_column_in_snapshot(&mut snapshot, ColumnResizeDirection::Slimmer),
+            None
+        );
+        assert_eq!(snapshot.columns[&column_id].width_px, MIN_COLUMN_WIDTH_PX);
+    }
+
+    #[test]
+    fn pane_navigation_moves_within_column() {
+        let mut snapshot = create_default_snapshot("workspace-1");
+        snapshot = add_pane(snapshot, create_pane_state(PaneType::Note, "/tmp", None));
+        let first = snapshot.active_pane_id.clone().expect("first pane");
+        let second_pane = create_pane_state(PaneType::Diff, "/tmp", None);
+        let second = second_pane.id.clone();
+        let column_id = snapshot.center_column_ids[0].clone();
+        snapshot.panes.insert(second.clone(), second_pane);
+        let column = snapshot.columns.get_mut(&column_id).expect("center column");
+        column.pane_ids.push(second.clone());
+        column.height_fractions = vec![0.5, 0.5];
+
+        snapshot.active_pane_id = Some(first.clone());
+        assert_eq!(
+            pane_navigation_target(&snapshot, PaneNavigationDirection::Down).as_deref(),
+            Some(second.as_str())
+        );
+
+        snapshot.active_pane_id = Some(second);
+        assert_eq!(
+            pane_navigation_target(&snapshot, PaneNavigationDirection::Up).as_deref(),
+            Some(first.as_str())
+        );
     }
 }

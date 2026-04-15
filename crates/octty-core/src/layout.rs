@@ -8,7 +8,11 @@ use crate::types::{
     SessionState, TerminalKind, TerminalPanePayload, WorkspaceColumn, WorkspaceSnapshot,
 };
 
-const DEFAULT_COLUMN_WIDTH_PX: f64 = 560.0;
+const TERMINAL_COLUMN_WIDTH_PX: f64 = 720.0;
+const AGENT_TERMINAL_COLUMN_WIDTH_PX: f64 = 840.0;
+const NOTE_COLUMN_WIDTH_PX: f64 = 420.0;
+const BROWSER_COLUMN_WIDTH_PX: f64 = 960.0;
+const DIFF_COLUMN_WIDTH_PX: f64 = 900.0;
 const LAYOUT_VERSION: u32 = 1;
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -85,13 +89,14 @@ pub fn create_pane_state(
 pub fn add_pane(mut snapshot: WorkspaceSnapshot, pane: PaneState) -> WorkspaceSnapshot {
     let pane_id = pane.id.clone();
     let column_id = next_id("column");
+    let column_width_px = default_column_width_px(&pane);
     snapshot.panes.insert(pane_id.clone(), pane);
     snapshot.columns.insert(
         column_id.clone(),
         WorkspaceColumn {
             id: column_id.clone(),
             pane_ids: vec![pane_id.clone()],
-            width_px: DEFAULT_COLUMN_WIDTH_PX,
+            width_px: column_width_px,
             height_fractions: vec![1.0],
             pinned: None,
         },
@@ -145,6 +150,16 @@ pub fn remove_pane(
     }
     snapshot.updated_at = now_ms();
     Ok(snapshot)
+}
+
+fn default_column_width_px(pane: &PaneState) -> f64 {
+    match pane.pane_type {
+        PaneType::Shell => TERMINAL_COLUMN_WIDTH_PX,
+        PaneType::AgentShell => AGENT_TERMINAL_COLUMN_WIDTH_PX,
+        PaneType::Note => NOTE_COLUMN_WIDTH_PX,
+        PaneType::Browser => BROWSER_COLUMN_WIDTH_PX,
+        PaneType::Diff => DIFF_COLUMN_WIDTH_PX,
+    }
 }
 
 fn terminal_payload(kind: TerminalKind, cwd: String) -> PanePayload {
@@ -232,6 +247,36 @@ mod tests {
             snapshot.panes[&pane_id].payload,
             PanePayload::Terminal(_)
         ));
+        let column = snapshot
+            .columns
+            .get(&snapshot.center_column_ids[0])
+            .expect("created column");
+        assert_eq!(column.width_px, TERMINAL_COLUMN_WIDTH_PX);
+    }
+
+    #[test]
+    fn pane_types_get_individual_default_widths() {
+        let mut snapshot = create_default_snapshot("workspace-1");
+        snapshot = add_pane(snapshot, create_pane_state(PaneType::Note, "/tmp/ws", None));
+        snapshot = add_pane(snapshot, create_pane_state(PaneType::Diff, "/tmp/ws", None));
+        snapshot = add_pane(
+            snapshot,
+            create_pane_state(PaneType::Browser, "/tmp/ws", None),
+        );
+
+        let widths: Vec<_> = snapshot
+            .center_column_ids
+            .iter()
+            .map(|column_id| snapshot.columns[column_id].width_px)
+            .collect();
+        assert_eq!(
+            widths,
+            vec![
+                NOTE_COLUMN_WIDTH_PX,
+                DIFF_COLUMN_WIDTH_PX,
+                BROWSER_COLUMN_WIDTH_PX
+            ]
+        );
     }
 
     #[test]

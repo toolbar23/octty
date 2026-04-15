@@ -2,9 +2,9 @@ use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
     io::{Read, Write},
-    sync::mpsc,
+    sync::{Arc, mpsc},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use libghostty_vt::{
@@ -22,8 +22,11 @@ use crate::{TerminalError, TerminalSessionSpec, build_tmux_pty_launch};
 
 const DEFAULT_CELL_WIDTH: u16 = 8;
 const DEFAULT_CELL_HEIGHT: u16 = 18;
-const MAX_OUTPUT_BATCHES_PER_TICK: usize = 256;
+const MAX_COMMANDS_PER_TICK: usize = 512;
 const MAX_INITIAL_SNAPSHOTS: usize = 2;
+const LIVE_TERMINAL_IDLE_TIMEOUT: Duration = Duration::from_millis(100);
+const LIVE_TERMINAL_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(33);
+const LIVE_TERMINAL_INTERACTIVE_OUTPUT_WINDOW: Duration = Duration::from_millis(150);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TerminalRgb {
@@ -65,6 +68,13 @@ pub struct TerminalGridSnapshot {
     pub cursor: Option<TerminalCursorSnapshot>,
     pub rows_data: Vec<TerminalRowSnapshot>,
     pub plain_text: String,
+    pub timing: TerminalSnapshotTiming,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TerminalSnapshotTiming {
+    pub pty_to_snapshot_micros: Option<u64>,
+    pub snapshot_build_micros: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -118,10 +128,34 @@ pub struct LiveTerminalHandle {
     snapshot_rx: mpsc::Receiver<TerminalGridSnapshot>,
 }
 
+#[derive(Clone)]
+pub struct LiveTerminalSnapshotNotifier {
+    notify: Arc<dyn Fn() + Send + Sync + 'static>,
+}
+
+impl LiveTerminalSnapshotNotifier {
+    pub fn new(notify: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            notify: Arc::new(notify),
+        }
+    }
+
+    fn notify(&self) {
+        (self.notify)();
+    }
+}
+
+impl Default for LiveTerminalSnapshotNotifier {
+    fn default() -> Self {
+        Self::new(|| {})
+    }
+}
+
 #[derive(Debug)]
 enum LiveTerminalCommand {
     Key(LiveTerminalKeyInput),
     Bytes(Vec<u8>),
+    Output(Vec<u8>),
     Resize(TerminalResize),
     Scroll(isize),
     Shutdown,
@@ -163,6 +197,14 @@ impl LiveTerminalHandle {
         }
         snapshots
     }
+
+    pub fn drain_latest_snapshot(&mut self) -> Option<TerminalGridSnapshot> {
+        let mut latest = None;
+        while let Ok(snapshot) = self.snapshot_rx.try_recv() {
+            latest = Some(snapshot);
+        }
+        latest
+    }
 }
 
 impl Drop for LiveTerminalHandle {
@@ -172,6 +214,13 @@ impl Drop for LiveTerminalHandle {
 }
 
 pub fn spawn_live_terminal(spec: TerminalSessionSpec) -> Result<LiveTerminalHandle, TerminalError> {
+    spawn_live_terminal_with_notifier(spec, LiveTerminalSnapshotNotifier::default())
+}
+
+pub fn spawn_live_terminal_with_notifier(
+    spec: TerminalSessionSpec,
+    snapshot_notifier: LiveTerminalSnapshotNotifier,
+) -> Result<LiveTerminalHandle, TerminalError> {
     let launch = build_tmux_pty_launch(&spec);
     let session_id = launch.session_name.clone();
     let pty_system = native_pty_system();
@@ -206,13 +255,15 @@ pub fn spawn_live_terminal(spec: TerminalSessionSpec) -> Result<LiveTerminalHand
         .take_writer()
         .map_err(|error| TerminalError::Pty(error.to_string()))?;
 
-    let (output_tx, output_rx) = mpsc::channel();
     let (command_tx, command_rx) = mpsc::channel();
     let (snapshot_tx, snapshot_rx) = mpsc::channel();
 
     thread::Builder::new()
         .name(format!("octty-pty-read-{session_id}"))
-        .spawn(move || read_pty_loop(reader, output_tx))
+        .spawn({
+            let command_tx = command_tx.clone();
+            move || read_pty_loop(reader, command_tx)
+        })
         .map_err(|error| TerminalError::Pty(error.to_string()))?;
 
     thread::Builder::new()
@@ -226,9 +277,9 @@ pub fn spawn_live_terminal(spec: TerminalSessionSpec) -> Result<LiveTerminalHand
                     master: pair.master,
                     writer,
                     child,
-                    output_rx,
                     command_rx,
                     snapshot_tx,
+                    snapshot_notifier,
                 };
                 if let Err(error) = runtime.run() {
                     eprintln!("[octty-term] live terminal failed: {error}");
@@ -244,13 +295,16 @@ pub fn spawn_live_terminal(spec: TerminalSessionSpec) -> Result<LiveTerminalHand
     })
 }
 
-fn read_pty_loop(mut reader: Box<dyn Read + Send>, output_tx: mpsc::Sender<Vec<u8>>) {
+fn read_pty_loop(mut reader: Box<dyn Read + Send>, command_tx: mpsc::Sender<LiveTerminalCommand>) {
     let mut buffer = vec![0; 8192];
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(size) => {
-                if output_tx.send(buffer[..size].to_vec()).is_err() {
+                if command_tx
+                    .send(LiveTerminalCommand::Output(buffer[..size].to_vec()))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -266,9 +320,9 @@ struct LiveTerminalRuntime {
     master: Box<dyn portable_pty::MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
-    output_rx: mpsc::Receiver<Vec<u8>>,
     command_rx: mpsc::Receiver<LiveTerminalCommand>,
     snapshot_tx: mpsc::Sender<TerminalGridSnapshot>,
+    snapshot_notifier: LiveTerminalSnapshotNotifier,
 }
 
 impl LiveTerminalRuntime {
@@ -295,37 +349,85 @@ impl LiveTerminalRuntime {
         let mut renderer = SnapshotExtractor::new()?;
         let mut input = KeyInputEncoder::new()?;
         let mut terminal_changed = true;
+        let mut force_snapshot = true;
         let mut emitted_snapshots = 0usize;
+        let mut last_snapshot_at: Option<Instant> = None;
+        let mut last_pty_output_at: Option<Instant> = None;
+        let mut interactive_output_until: Option<Instant> = None;
 
         loop {
-            let mut did_work = false;
-
-            while let Ok(command) = self.command_rx.try_recv() {
-                did_work = true;
-                if self.handle_command(command, &mut terminal, &mut input, &grid_size)? {
+            let mut processed_commands = 0usize;
+            while processed_commands < MAX_COMMANDS_PER_TICK {
+                let command = if processed_commands == 0 {
+                    let timeout = terminal_command_wait_timeout(
+                        terminal_changed,
+                        force_snapshot,
+                        emitted_snapshots,
+                        last_snapshot_at,
+                        Instant::now(),
+                    );
+                    match self.command_rx.recv_timeout(timeout) {
+                        Ok(command) => command,
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                    }
+                } else {
+                    match self.command_rx.try_recv() {
+                        Ok(command) => command,
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
+                    }
+                };
+                let is_pty_output = matches!(&command, LiveTerminalCommand::Output(_));
+                let is_interactive_input = matches!(
+                    &command,
+                    LiveTerminalCommand::Key(_) | LiveTerminalCommand::Bytes(_)
+                );
+                let command_received_at = Instant::now();
+                processed_commands += 1;
+                let effect = self.handle_command(command, &mut terminal, &mut input, &grid_size)?;
+                if effect.shutdown {
                     return Ok(());
                 }
                 drain_pty_responses(&mut self.writer, &pty_responses)?;
-                terminal_changed = true;
-            }
-
-            for _ in 0..MAX_OUTPUT_BATCHES_PER_TICK {
-                match self.output_rx.try_recv() {
-                    Ok(bytes) => {
-                        did_work = true;
-                        terminal.vt_write(&bytes);
-                        drain_pty_responses(&mut self.writer, &pty_responses)?;
-                        terminal_changed = true;
-                    }
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
+                if is_interactive_input {
+                    interactive_output_until =
+                        Some(command_received_at + LIVE_TERMINAL_INTERACTIVE_OUTPUT_WINDOW);
                 }
+                if is_pty_output {
+                    last_pty_output_at.get_or_insert(command_received_at);
+                    if interactive_output_until
+                        .is_some_and(|deadline| command_received_at <= deadline)
+                    {
+                        force_snapshot = true;
+                    }
+                }
+                terminal_changed |= effect.terminal_changed;
+                force_snapshot |= effect.force_snapshot;
             }
 
-            if terminal_changed {
-                let snapshot = renderer.snapshot(&self.session_id, &terminal)?;
-                let _ = self.snapshot_tx.send(snapshot);
+            let now = Instant::now();
+            if terminal_snapshot_due(
+                terminal_changed,
+                force_snapshot,
+                emitted_snapshots,
+                last_snapshot_at,
+                now,
+            ) {
+                let snapshot_started_at = Instant::now();
+                let mut snapshot = renderer.snapshot(&self.session_id, &terminal)?;
+                snapshot.timing = TerminalSnapshotTiming {
+                    pty_to_snapshot_micros: last_pty_output_at
+                        .map(|output_at| micros_since(output_at, snapshot_started_at)),
+                    snapshot_build_micros: micros_since(snapshot_started_at, Instant::now()),
+                };
+                if self.snapshot_tx.send(snapshot).is_ok() {
+                    self.snapshot_notifier.notify();
+                }
                 terminal_changed = false;
+                force_snapshot = false;
+                last_pty_output_at = None;
+                last_snapshot_at = Some(snapshot_started_at);
                 emitted_snapshots += 1;
                 if emitted_snapshots >= MAX_INITIAL_SNAPSHOTS {
                     renderer.mark_clean(&terminal)?;
@@ -334,18 +436,6 @@ impl LiveTerminalRuntime {
 
             if let Ok(Some(_status)) = self.child.try_wait() {
                 return Ok(());
-            }
-
-            if !did_work {
-                match self.output_rx.recv_timeout(Duration::from_millis(8)) {
-                    Ok(bytes) => {
-                        terminal.vt_write(&bytes);
-                        drain_pty_responses(&mut self.writer, &pty_responses)?;
-                        terminal_changed = true;
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
-                }
             }
         }
     }
@@ -356,7 +446,7 @@ impl LiveTerminalRuntime {
         terminal: &mut Terminal<'a, 'a>,
         input: &mut KeyInputEncoder<'a>,
         grid_size: &Cell<(u16, u16)>,
-    ) -> Result<bool, TerminalError> {
+    ) -> Result<LiveTerminalCommandEffect, TerminalError> {
         match command {
             LiveTerminalCommand::Key(key_input) => {
                 let bytes = input.encode(terminal, key_input)?;
@@ -364,10 +454,16 @@ impl LiveTerminalRuntime {
                     self.writer.write_all(&bytes)?;
                     self.writer.flush()?;
                 }
+                Ok(LiveTerminalCommandEffect::unchanged())
             }
             LiveTerminalCommand::Bytes(bytes) => {
                 self.writer.write_all(&bytes)?;
                 self.writer.flush()?;
+                Ok(LiveTerminalCommandEffect::unchanged())
+            }
+            LiveTerminalCommand::Output(bytes) => {
+                terminal.vt_write(&bytes);
+                Ok(LiveTerminalCommandEffect::changed())
             }
             LiveTerminalCommand::Resize(resize) => {
                 let cols = resize.cols.max(1);
@@ -389,14 +485,90 @@ impl LiveTerminalRuntime {
                         pixel_height: resize.pixel_height,
                     })
                     .map_err(|error| TerminalError::Pty(error.to_string()))?;
+                Ok(LiveTerminalCommandEffect::changed_now())
             }
             LiveTerminalCommand::Scroll(lines) => {
                 terminal.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(lines));
+                Ok(LiveTerminalCommandEffect::changed_now())
             }
-            LiveTerminalCommand::Shutdown => return Ok(true),
+            LiveTerminalCommand::Shutdown => Ok(LiveTerminalCommandEffect {
+                terminal_changed: false,
+                force_snapshot: false,
+                shutdown: true,
+            }),
         }
-        Ok(false)
     }
+}
+
+struct LiveTerminalCommandEffect {
+    terminal_changed: bool,
+    force_snapshot: bool,
+    shutdown: bool,
+}
+
+impl LiveTerminalCommandEffect {
+    fn changed() -> Self {
+        Self {
+            terminal_changed: true,
+            force_snapshot: false,
+            shutdown: false,
+        }
+    }
+
+    fn changed_now() -> Self {
+        Self {
+            terminal_changed: true,
+            force_snapshot: true,
+            shutdown: false,
+        }
+    }
+
+    fn unchanged() -> Self {
+        Self {
+            terminal_changed: false,
+            force_snapshot: false,
+            shutdown: false,
+        }
+    }
+}
+
+fn terminal_command_wait_timeout(
+    terminal_changed: bool,
+    force_snapshot: bool,
+    emitted_snapshots: usize,
+    last_snapshot_at: Option<Instant>,
+    now: Instant,
+) -> Duration {
+    if !terminal_changed {
+        return LIVE_TERMINAL_IDLE_TIMEOUT;
+    }
+    if force_snapshot || emitted_snapshots < MAX_INITIAL_SNAPSHOTS {
+        return Duration::ZERO;
+    }
+    last_snapshot_at
+        .map(|last_snapshot_at| {
+            LIVE_TERMINAL_SNAPSHOT_INTERVAL
+                .saturating_sub(now.saturating_duration_since(last_snapshot_at))
+        })
+        .unwrap_or(Duration::ZERO)
+}
+
+fn terminal_snapshot_due(
+    terminal_changed: bool,
+    force_snapshot: bool,
+    emitted_snapshots: usize,
+    last_snapshot_at: Option<Instant>,
+    now: Instant,
+) -> bool {
+    terminal_changed
+        && terminal_command_wait_timeout(
+            terminal_changed,
+            force_snapshot,
+            emitted_snapshots,
+            last_snapshot_at,
+            now,
+        )
+        .is_zero()
 }
 
 fn install_terminal_effects<'a>(
@@ -537,6 +709,7 @@ impl<'alloc> SnapshotExtractor<'alloc> {
             cursor,
             rows_data,
             plain_text,
+            timing: TerminalSnapshotTiming::default(),
         })
     }
 
@@ -690,4 +863,59 @@ fn terminal_rgb(color: RgbColor) -> TerminalRgb {
 
 fn renderer_error(error: libghostty_vt::Error) -> TerminalError {
     TerminalError::Renderer(error.to_string())
+}
+
+fn micros_since(start: Instant, end: Instant) -> u64 {
+    end.saturating_duration_since(start)
+        .as_micros()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn changed_terminal_waits_until_snapshot_interval() {
+        let now = Instant::now();
+        let last_snapshot_at = now - Duration::from_millis(10);
+
+        assert_eq!(
+            terminal_command_wait_timeout(
+                true,
+                false,
+                MAX_INITIAL_SNAPSHOTS,
+                Some(last_snapshot_at),
+                now,
+            ),
+            Duration::from_millis(23)
+        );
+    }
+
+    #[test]
+    fn forced_snapshot_is_due_immediately() {
+        let now = Instant::now();
+
+        assert!(terminal_snapshot_due(
+            true,
+            true,
+            MAX_INITIAL_SNAPSHOTS,
+            Some(now),
+            now,
+        ));
+    }
+
+    #[test]
+    fn idle_terminal_uses_idle_timeout() {
+        assert_eq!(
+            terminal_command_wait_timeout(
+                false,
+                false,
+                MAX_INITIAL_SNAPSHOTS,
+                None,
+                Instant::now()
+            ),
+            LIVE_TERMINAL_IDLE_TIMEOUT
+        );
+    }
 }

@@ -4396,6 +4396,7 @@ name = "octty-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures",
  "gpui",
  "gpui-component",
  "octty-core",
