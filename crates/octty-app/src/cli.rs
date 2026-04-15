@@ -60,22 +60,29 @@ pub fn run() {
         return;
     }
 
-    let bootstrap = runtime
-        .block_on(load_bootstrap(true))
-        .unwrap_or_else(|error| BootstrapState {
-            status: format!("Startup failed: {error:#}"),
-            project_roots: Vec::new(),
-            workspaces: Vec::new(),
-            active_workspace_index: None,
-            active_snapshot: None,
-            pane_activity: Vec::new(),
-        });
+    let (store, bootstrap) = runtime.block_on(load_app_state()).unwrap_or_else(|error| {
+        let store = runtime
+            .block_on(TursoStore::open_memory())
+            .expect("open in-memory fallback store");
+        (
+            Arc::new(store),
+            BootstrapState {
+                status: format!("Startup failed: {error:#}"),
+                project_roots: Vec::new(),
+                workspaces: Vec::new(),
+                active_workspace_index: None,
+                active_snapshot: None,
+                pane_activity: Vec::new(),
+            },
+        )
+    });
 
     Application::new().run(move |cx: &mut App| {
         gpui_component::init(cx);
         gpui_tokio::init_from_runtime(cx, runtime.clone());
         cx.bind_keys(workspace_key_bindings());
         set_workspace_menu(cx, &bootstrap.workspaces);
+        let store = store.clone();
 
         let bounds = Bounds::centered(None, size(px(1200.0), px(760.0)), cx);
         cx.open_window(
@@ -90,7 +97,7 @@ pub fn run() {
             |window, cx| {
                 let focus_handle = cx.focus_handle();
                 focus_handle.focus(window);
-                let view = cx.new(|cx| OcttyApp::new(bootstrap, focus_handle, cx));
+                let view = cx.new(|cx| OcttyApp::new(bootstrap, store, focus_handle, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             },
         )
@@ -99,8 +106,15 @@ pub fn run() {
     });
 }
 
+async fn load_app_state() -> anyhow::Result<(Arc<TursoStore>, BootstrapState)> {
+    let store = Arc::new(TursoStore::open(default_store_path()).await?);
+    let bootstrap = load_bootstrap_from_store(&store, true, None).await?;
+    Ok((store, bootstrap))
+}
+
 pub(crate) async fn pane_persistence_check() -> anyhow::Result<usize> {
-    let bootstrap = load_bootstrap(true).await?;
+    let store = TursoStore::open(default_store_path()).await?;
+    let bootstrap = load_bootstrap_from_store(&store, true, None).await?;
     let Some(index) = bootstrap.active_workspace_index else {
         anyhow::bail!("no active workspace");
     };
@@ -113,14 +127,14 @@ pub(crate) async fn pane_persistence_check() -> anyhow::Result<usize> {
         create_pane_state(PaneType::Shell, workspace.workspace_path.clone(), None),
     );
 
-    let store = TursoStore::open(default_store_path()).await?;
     store.save_snapshot(&snapshot).await?;
     let saved = load_workspace_snapshot(&store, workspace).await?;
     Ok(saved.panes.len())
 }
 
 pub(crate) async fn shell_session_check() -> anyhow::Result<String> {
-    let bootstrap = load_bootstrap(true).await?;
+    let store = TursoStore::open(default_store_path()).await?;
+    let bootstrap = load_bootstrap_from_store(&store, true, None).await?;
     let Some(index) = bootstrap.active_workspace_index else {
         anyhow::bail!("no active workspace");
     };
@@ -131,13 +145,7 @@ pub(crate) async fn shell_session_check() -> anyhow::Result<String> {
     let pane = create_pane_state(PaneType::Shell, workspace.workspace_path.clone(), None);
     let pane_id = pane.id.clone();
     let snapshot = add_pane(snapshot, pane);
-    let snapshot = start_terminal_session(
-        &TursoStore::open(default_store_path()).await?,
-        workspace,
-        snapshot,
-        &pane_id,
-    )
-    .await?;
+    let snapshot = start_terminal_session(&store, workspace, snapshot, &pane_id).await?;
     Ok(snapshot
         .panes
         .get(&pane_id)
@@ -149,7 +157,8 @@ pub(crate) async fn shell_session_check() -> anyhow::Result<String> {
 }
 
 pub(crate) async fn terminal_io_check() -> anyhow::Result<String> {
-    let bootstrap = load_bootstrap(true).await?;
+    let store = TursoStore::open(default_store_path()).await?;
+    let bootstrap = load_bootstrap_from_store(&store, true, None).await?;
     let Some(index) = bootstrap.active_workspace_index else {
         anyhow::bail!("no active workspace");
     };
@@ -160,7 +169,6 @@ pub(crate) async fn terminal_io_check() -> anyhow::Result<String> {
     let pane = create_pane_state(PaneType::Shell, workspace.workspace_path.clone(), None);
     let pane_id = pane.id.clone();
     let snapshot = add_pane(snapshot, pane);
-    let store = TursoStore::open(default_store_path()).await?;
     let mut snapshot = start_terminal_session(&store, workspace, snapshot, &pane_id).await?;
 
     let payload = terminal_payload_for_pane(&snapshot, &pane_id)?.clone();

@@ -118,7 +118,7 @@ const TERMINAL_INTERACTIVE_SNAPSHOT_WINDOW: Duration = Duration::from_millis(150
 const TERMINAL_LATENCY_SAMPLE_LIMIT: usize = 256;
 const PANE_ACTIVITY_ACTIVE_WINDOW_MS: i64 = 3_000;
 const PANE_ACTIVITY_PERSIST_DELAY: Duration = Duration::from_millis(500);
-const PANE_ACTIVITY_RECONCILE_INTERVAL: Duration = Duration::from_secs(10);
+const PANE_ACTIVITY_RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 
 #[cfg(test)]
 mod tests;

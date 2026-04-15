@@ -1,10 +1,9 @@
 use super::*;
 
 pub(crate) async fn flush_terminal_inputs(
-    store_path: PathBuf,
+    store: Arc<TursoStore>,
     pending: Vec<PendingTerminalInput>,
 ) -> anyhow::Result<Vec<WorkspaceSnapshot>> {
-    let store = TursoStore::open(store_path).await?;
     let mut touched = Vec::<PendingTerminalInput>::new();
 
     for input in pending {

@@ -6,27 +6,6 @@ impl OcttyApp {
             .and_then(|index| self.workspaces.get(index))
     }
 
-    pub(crate) fn record_pane_activity(
-        &mut self,
-        workspace_id: &str,
-        pane_id: &str,
-        at_ms: i64,
-        tmux_activity_at_s: Option<i64>,
-        screen_text: Option<&str>,
-        cx: &mut Context<Self>,
-    ) {
-        let key = (workspace_id.to_owned(), pane_id.to_owned());
-        let screen_fingerprint = screen_text.map(screen_fingerprint);
-        let activity = self
-            .pane_activity
-            .entry(key.clone())
-            .or_insert_with(|| PaneActivity::new(workspace_id, pane_id, at_ms));
-        activity.record_activity(at_ms, tmux_activity_at_s, screen_fingerprint);
-        self.pending_pane_activity_persistence
-            .insert(key, activity.clone());
-        self.schedule_pane_activity_persistence(cx);
-    }
-
     pub(crate) fn record_pane_seen(
         &mut self,
         workspace_id: &str,
@@ -71,12 +50,11 @@ impl OcttyApp {
         let key = (workspace_id.to_owned(), pane_id.to_owned());
         self.pane_activity.remove(&key);
         self.pending_pane_activity_persistence.remove(&key);
-        let store_path = self.store_path.clone();
+        let store = self.store.clone();
         let workspace_id = workspace_id.to_owned();
         let pane_id = pane_id.to_owned();
         cx.spawn(async move |this, cx| {
             let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
-                let store = TursoStore::open(store_path).await?;
                 store.delete_pane_activity(&workspace_id, &pane_id).await?;
                 Ok(())
             }) {
@@ -104,7 +82,7 @@ impl OcttyApp {
                 cx.background_executor()
                     .timer(PANE_ACTIVITY_PERSIST_DELAY)
                     .await;
-                let Some((store_path, activities)) = this
+                let Some((store, activities)) = this
                     .update(cx, |app, _cx| {
                         let activities = std::mem::take(&mut app.pending_pane_activity_persistence)
                             .into_values()
@@ -113,7 +91,7 @@ impl OcttyApp {
                             app.pane_activity_persist_active = false;
                             None
                         } else {
-                            Some((app.store_path.clone(), activities))
+                            Some((app.store.clone(), activities))
                         }
                     })
                     .ok()
@@ -123,7 +101,6 @@ impl OcttyApp {
                 };
 
                 let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
-                    let store = TursoStore::open(store_path).await?;
                     store.upsert_pane_activities(&activities).await?;
                     Ok(())
                 }) {
@@ -160,12 +137,19 @@ impl OcttyApp {
         self.pane_activity_reconcile_active = true;
         cx.spawn(async move |this, cx| {
             loop {
-                let Some(store_path) = this.update(cx, |app, _cx| app.store_path.clone()).ok()
+                let Some((store, active_workspace_id)) = this
+                    .update(cx, |app, _cx| {
+                        (
+                            app.store.clone(),
+                            app.active_workspace().map(|workspace| workspace.id.clone()),
+                        )
+                    })
+                    .ok()
                 else {
                     break;
                 };
                 let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
-                    reconcile_pane_activity(store_path).await
+                    reconcile_pane_activity(store, active_workspace_id).await
                 }) {
                     Ok(task) => task.await,
                     Err(error) => Err(error),

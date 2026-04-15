@@ -396,10 +396,9 @@ impl OcttyApp {
         error_context: &'static str,
         cx: &mut Context<Self>,
     ) {
-        let store_path = self.store_path.clone();
+        let store = self.store.clone();
         cx.spawn(async move |this, cx| {
             let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
-                let store = TursoStore::open(store_path).await?;
                 store.save_snapshot(&snapshot).await?;
                 Ok(())
             }) {
@@ -596,14 +595,14 @@ impl OcttyApp {
         cx.spawn(async move |this, cx| {
             timer.await;
             loop {
-                let Some((store_path, pending)) = this
+                let Some((store, pending)) = this
                     .update(cx, |app, _cx| {
                         let pending = std::mem::take(&mut app.pending_terminal_inputs);
                         if pending.is_empty() {
                             app.terminal_flush_active = false;
                             None
                         } else {
-                            Some((app.store_path.clone(), pending))
+                            Some((app.store.clone(), pending))
                         }
                     })
                     .ok()
@@ -614,7 +613,7 @@ impl OcttyApp {
 
                 let result = match gpui_tokio::Tokio::spawn_result(
                     cx,
-                    flush_terminal_inputs(store_path, pending),
+                    flush_terminal_inputs(store, pending),
                 ) {
                     Ok(flush) => flush.await,
                     Err(error) => Err(error),
