@@ -272,24 +272,34 @@ pub(crate) fn coalesce_terminal_snapshots(
     }
 
     if force_full {
-        latest.damage.rows = (0..latest.rows).collect();
-        latest.damage.full = true;
+        mark_terminal_snapshot_full_damage(&mut latest);
     } else {
         latest.damage.rows = dirty_rows
             .into_iter()
             .filter(|row| *row < latest.rows)
             .collect();
         latest.damage.full = latest.damage.rows.len() == usize::from(latest.rows);
+        latest.damage.cells = latest
+            .damage
+            .rows
+            .len()
+            .saturating_mul(usize::from(latest.cols)) as u32;
+        latest.timing.dirty_rows = latest.damage.rows.len() as u32;
+        latest.timing.dirty_cells = latest.damage.cells;
     }
+    Some(latest)
+}
 
-    latest.damage.cells = latest
+pub(crate) fn mark_terminal_snapshot_full_damage(snapshot: &mut TerminalGridSnapshot) {
+    snapshot.damage.rows = (0..snapshot.rows).collect();
+    snapshot.damage.full = true;
+    snapshot.damage.cells = snapshot
         .damage
         .rows
         .len()
-        .saturating_mul(usize::from(latest.cols)) as u32;
-    latest.timing.dirty_rows = latest.damage.rows.len() as u32;
-    latest.timing.dirty_cells = latest.damage.cells;
-    Some(latest)
+        .saturating_mul(usize::from(snapshot.cols)) as u32;
+    snapshot.timing.dirty_rows = snapshot.damage.rows.len() as u32;
+    snapshot.timing.dirty_cells = snapshot.damage.cells;
 }
 
 pub(crate) fn terminal_snapshot_coalesce_interval(

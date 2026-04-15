@@ -634,6 +634,19 @@ fn terminal_snapshot_coalesce_forces_full_damage_on_resize() {
 }
 
 #[test]
+fn terminal_snapshot_full_damage_marks_every_row_dirty() {
+    let mut snapshot = test_terminal_snapshot("session", 4, 3, vec![1], false);
+
+    mark_terminal_snapshot_full_damage(&mut snapshot);
+
+    assert_eq!(snapshot.damage.rows, vec![0, 1, 2]);
+    assert!(snapshot.damage.full);
+    assert_eq!(snapshot.damage.cells, 12);
+    assert_eq!(snapshot.timing.dirty_rows, 3);
+    assert_eq!(snapshot.timing.dirty_cells, 12);
+}
+
+#[test]
 fn terminal_snapshot_presentation_keeps_focused_terminal_immediate() {
     let now = Instant::now();
 

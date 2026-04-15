@@ -180,7 +180,12 @@ impl OcttyApp {
             }
 
             let focused = focused_live_key.as_deref() == Some(key.as_str());
-            if let Some(snapshot) = take_presentable_terminal_snapshot(live, focused, now) {
+            if let Some(mut snapshot) = take_presentable_terminal_snapshot(live, focused, now) {
+                if split_live_terminal_key(key)
+                    .is_none_or(|(workspace_id, _)| workspace_id != active_workspace.id)
+                {
+                    mark_terminal_snapshot_full_damage(&mut snapshot);
+                }
                 live.latest = Some(snapshot.clone());
                 live.last_presented_snapshot_at = Some(now);
                 updates.push((key.clone(), snapshot));
@@ -218,6 +223,67 @@ impl OcttyApp {
             }
         }
         result
+    }
+
+    pub(crate) fn sync_active_workspace_terminal_snapshots(
+        &mut self,
+        now: Instant,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(active_workspace) = self.active_workspace().cloned() else {
+            return false;
+        };
+
+        let mut updates = Vec::new();
+        for (key, live) in &mut self.live_terminals {
+            let Some((workspace_id, _pane_id)) = split_live_terminal_key(key) else {
+                continue;
+            };
+            if workspace_id != active_workspace.id {
+                continue;
+            }
+
+            if let Some(mut snapshot) = coalesce_terminal_snapshots(live.handle.drain_snapshots()) {
+                mark_terminal_snapshot_full_damage(&mut snapshot);
+                live.pending_snapshot = Some(snapshot);
+            }
+
+            if let Some(mut snapshot) = live.pending_snapshot.take() {
+                mark_terminal_snapshot_full_damage(&mut snapshot);
+                live.latest = Some(snapshot.clone());
+                live.last_presented_snapshot_at = Some(now);
+                updates.push((key.clone(), snapshot));
+            } else if let Some(snapshot) = live.latest.as_mut() {
+                mark_terminal_snapshot_full_damage(snapshot);
+                updates.push((key.clone(), snapshot.clone()));
+            }
+        }
+
+        let mut changed = false;
+        for (key, snapshot) in updates {
+            let Some((workspace_id, pane_id)) = split_live_terminal_key(&key) else {
+                continue;
+            };
+            self.record_pane_activity(
+                workspace_id,
+                pane_id,
+                now_ms(),
+                None,
+                Some(&snapshot.plain_text),
+                cx,
+            );
+            if let Some(active_snapshot) = self.active_snapshot.as_mut()
+                && let Some(pane) = active_snapshot.panes.get_mut(pane_id)
+                && let PanePayload::Terminal(payload) = &mut pane.payload
+            {
+                payload.session_id = Some(snapshot.session_id.clone());
+                payload.session_state = SessionState::Live;
+                payload.restored_buffer = snapshot.plain_text.clone();
+                active_snapshot.updated_at = now_ms();
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub(crate) fn resize_live_terminal(

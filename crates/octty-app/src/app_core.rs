@@ -92,6 +92,7 @@ impl OcttyApp {
                     Ok(snapshot) => {
                         app.active_snapshot = Some(snapshot);
                         app.ensure_live_terminals_for_active_snapshot(cx);
+                        app.sync_active_workspace_terminal_snapshots(Instant::now(), cx);
                         app.schedule_terminal_snapshot_notifications(cx);
                         app.record_active_pane_seen(cx);
                         app.status = format!("Opened {workspace_display_name}.").into();
@@ -610,6 +611,7 @@ impl OcttyApp {
         self.active_snapshot = bootstrap.active_snapshot;
         self.pane_activity = pane_activity_map(bootstrap.pane_activity);
         self.ensure_live_terminals_for_active_snapshot(cx);
+        self.sync_active_workspace_terminal_snapshots(Instant::now(), cx);
         self.schedule_terminal_snapshot_notifications(cx);
         self.schedule_pane_activity_reconciliation(cx);
         self.record_active_pane_seen(cx);
