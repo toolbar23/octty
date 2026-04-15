@@ -555,15 +555,10 @@ pub(crate) fn render_workspace_activity_icon(activity_state: ActivityState) -> g
         .h(px(9.0))
         .rounded_full();
     match activity_state {
-        ActivityState::Active => base.border_2().border_color(rgb(0x5f7bff)).child(
-            div()
-                .absolute()
-                .top(-px(1.0))
-                .right(-px(1.0))
-                .w(px(3.0))
-                .h(px(3.0))
-                .rounded_full()
-                .bg(rgb(0x5f7bff)),
+        ActivityState::Active => base.flex().items_center().justify_center().child(
+            Spinner::new()
+                .with_size(px(9.0))
+                .color(rgb(0x5f7bff).into()),
         ),
         ActivityState::IdleUnseen => base.bg(rgb(0x4a7cff)),
         ActivityState::IdleSeen => base.bg(rgb(0x6b7280)),

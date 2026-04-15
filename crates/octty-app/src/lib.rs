@@ -25,6 +25,7 @@ use gpui_component::{
     Icon, IconName, Root, Sizable,
     input::{Input, InputState},
     scroll::ScrollableElement,
+    spinner::Spinner,
     tag::Tag,
 };
 use octty_core::{
