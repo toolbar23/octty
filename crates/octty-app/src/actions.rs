@@ -38,6 +38,12 @@ pub(crate) struct CutTerminalSelection;
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
+pub(crate) struct ForwardTerminalTab {
+    pub(crate) shift: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = octty, no_json)]
 pub(crate) struct NavigatePane {
     pub(crate) direction: PaneNavigationDirection,
 }

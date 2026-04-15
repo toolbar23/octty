@@ -63,6 +63,7 @@ impl Render for OcttyApp {
             .on_action(cx.listener(Self::paste_terminal_clipboard))
             .on_action(cx.listener(Self::copy_terminal_selection))
             .on_action(cx.listener(Self::cut_terminal_selection))
+            .on_action(cx.listener(Self::forward_terminal_tab))
             .on_action(cx.listener(Self::navigate_pane))
             .on_action(cx.listener(Self::close_active_pane))
             .on_action(cx.listener(Self::resize_focused_column))

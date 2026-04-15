@@ -468,6 +468,22 @@ impl OcttyApp {
         cx.stop_propagation();
     }
 
+    pub(crate) fn forward_terminal_tab(
+        &mut self,
+        action: &ForwardTerminalTab,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar_rename_dialog.is_some() {
+            return;
+        }
+
+        self.send_input_to_active_terminal(
+            TerminalInput::LiveKey(terminal_tab_input(action.shift)),
+            cx,
+        );
+    }
+
     pub(crate) fn send_input_to_active_terminal(
         &mut self,
         input: TerminalInput,

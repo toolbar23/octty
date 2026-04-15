@@ -86,6 +86,15 @@ pub(crate) fn live_terminal_input_from_key_parts(
     }
 
     let normalized_key = key.to_ascii_lowercase();
+    if shift
+        && !control
+        && !alt
+        && !platform
+        && matches!(normalized_key.as_str(), "enter" | "return")
+    {
+        return Some(terminal_control_j_input());
+    }
+
     if let Some(key_text) = terminal_printable_key_text(key_char, control, platform) {
         return Some(live_terminal_printable_input(
             key_text, control, alt, shift, platform,
@@ -100,7 +109,7 @@ pub(crate) fn live_terminal_input_from_key_parts(
     }
 
     let live_key = match normalized_key.as_str() {
-        "enter" => LiveTerminalKey::Enter,
+        "enter" | "return" => LiveTerminalKey::Enter,
         "backspace" => LiveTerminalKey::Backspace,
         "delete" => LiveTerminalKey::Delete,
         "tab" => LiveTerminalKey::Tab,
@@ -154,6 +163,34 @@ pub(crate) fn live_terminal_input_from_key_parts(
         },
         unshifted,
     })
+}
+
+pub(crate) fn terminal_control_j_input() -> LiveTerminalKeyInput {
+    LiveTerminalKeyInput {
+        key: LiveTerminalKey::Character('j'),
+        text: None,
+        modifiers: LiveTerminalModifiers {
+            shift: false,
+            alt: false,
+            control: true,
+            platform: false,
+        },
+        unshifted: 'j',
+    }
+}
+
+pub(crate) fn terminal_tab_input(shift: bool) -> LiveTerminalKeyInput {
+    LiveTerminalKeyInput {
+        key: LiveTerminalKey::Tab,
+        text: None,
+        modifiers: LiveTerminalModifiers {
+            shift,
+            alt: false,
+            control: false,
+            platform: false,
+        },
+        unshifted: '\0',
+    }
 }
 
 pub(crate) fn live_terminal_printable_input(

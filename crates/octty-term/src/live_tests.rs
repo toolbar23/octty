@@ -98,6 +98,59 @@ fn runtime_wake_drain_coalesces_wakeups() {
 }
 
 #[test]
+fn terminal_osc_parser_extracts_rxvt_notify_sequence() {
+    let mut parser = TerminalOscNotificationParser::default();
+
+    let notifications = parser.push(b"\x1b]777;notify;Codex;Work finished\x07");
+
+    assert_eq!(
+        notifications,
+        vec![TerminalNotification {
+            title: "Codex".to_owned(),
+            body: "Work finished".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn terminal_osc_parser_extracts_split_st_terminated_notify_sequence() {
+    let mut parser = TerminalOscNotificationParser::default();
+
+    assert!(parser.push(b"\x1b]777;notify;Cod").is_empty());
+    let notifications = parser.push(b"ex;Review ready\x1b\\");
+
+    assert_eq!(
+        notifications,
+        vec![TerminalNotification {
+            title: "Codex".to_owned(),
+            body: "Review ready".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn terminal_osc_parser_extracts_iterm_system_notification() {
+    let mut parser = TerminalOscNotificationParser::default();
+
+    let notifications = parser.push(b"\x1b]9;Work finished\x07");
+
+    assert_eq!(
+        notifications,
+        vec![TerminalNotification {
+            title: "Terminal".to_owned(),
+            body: "Work finished".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn terminal_osc_parser_ignores_conemu_progress_sequences() {
+    let mut parser = TerminalOscNotificationParser::default();
+
+    assert!(parser.push(b"\x1b]9;4;1;42\x1b\\").is_empty());
+}
+
+#[test]
 fn picker_preview_ansi_fixture_reaches_snapshot() {
     let mut terminal = Terminal::new(TerminalOptions {
         cols: 120,
@@ -196,6 +249,66 @@ fn key_encoder_emits_plain_space() {
         .expect("encoded space");
 
     assert_eq!(bytes, b" ");
+}
+
+#[test]
+fn key_encoder_emits_plain_tab() {
+    let mut terminal = Terminal::new(TerminalOptions {
+        cols: 80,
+        rows: 24,
+        max_scrollback: 100,
+    })
+    .expect("terminal");
+    let mut input = KeyInputEncoder::new().expect("key encoder");
+
+    let bytes = input
+        .encode(
+            &mut terminal,
+            LiveTerminalKeyInput {
+                key: LiveTerminalKey::Tab,
+                text: None,
+                unshifted: '\0',
+                modifiers: LiveTerminalModifiers {
+                    shift: false,
+                    alt: false,
+                    control: false,
+                    platform: false,
+                },
+            },
+        )
+        .expect("encoded tab");
+
+    assert_eq!(bytes, b"\t");
+}
+
+#[test]
+fn key_encoder_emits_control_j_as_line_feed() {
+    let mut terminal = Terminal::new(TerminalOptions {
+        cols: 80,
+        rows: 24,
+        max_scrollback: 100,
+    })
+    .expect("terminal");
+    let mut input = KeyInputEncoder::new().expect("key encoder");
+
+    let bytes = input
+        .encode(
+            &mut terminal,
+            LiveTerminalKeyInput {
+                key: LiveTerminalKey::Character('j'),
+                text: None,
+                unshifted: 'j',
+                modifiers: LiveTerminalModifiers {
+                    shift: false,
+                    alt: false,
+                    control: true,
+                    platform: false,
+                },
+            },
+        )
+        .expect("encoded control-j");
+
+    assert_eq!(bytes, b"\n");
 }
 
 #[test]

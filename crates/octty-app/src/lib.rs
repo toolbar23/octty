@@ -37,7 +37,8 @@ use octty_core::{
 };
 use octty_jj::{
     create_workspace as jj_create_workspace, discover_workspaces,
-    forget_workspace as jj_forget_workspace, read_workspace_status, resolve_repo_root,
+    forget_workspace as jj_forget_workspace, read_workspace_status,
+    rename_workspace as jj_rename_workspace, resolve_repo_root,
 };
 use octty_store::{TursoStore, default_store_path};
 use octty_term::{
@@ -45,9 +46,9 @@ use octty_term::{
     kill_tmux_session,
     live::{
         LiveTerminalHandle, LiveTerminalKey, LiveTerminalKeyInput, LiveTerminalModifiers,
-        LiveTerminalSnapshotNotifier, TerminalGridSnapshot, TerminalReplayStep, TerminalResize,
-        TerminalRgb, replay_terminal_bytes, replay_terminal_steps, spawn_live_terminal,
-        spawn_live_terminal_with_notifier,
+        LiveTerminalSnapshotNotifier, TerminalGridSnapshot, TerminalNotification,
+        TerminalReplayStep, TerminalResize, TerminalRgb, replay_terminal_bytes,
+        replay_terminal_steps, spawn_live_terminal, spawn_live_terminal_with_notifier,
     },
     resize_tmux_session, send_tmux_keys, send_tmux_keys_to_session, send_tmux_text,
     send_tmux_text_to_session, stable_tmux_session_name, tmux_session_activity,
@@ -61,6 +62,7 @@ mod app_panes;
 mod app_render;
 mod bootstrap;
 mod cli;
+mod desktop_notifications;
 mod gpui_tokio;
 mod input;
 mod menu;
@@ -80,6 +82,7 @@ pub use cli::run;
 
 pub(crate) use actions::*;
 pub(crate) use bootstrap::*;
+pub(crate) use desktop_notifications::*;
 pub(crate) use input::*;
 pub(crate) use menu::{set_workspace_menu, workspace_key_bindings};
 pub(crate) use metrics::*;

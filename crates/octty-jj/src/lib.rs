@@ -150,6 +150,15 @@ pub async fn create_workspace(
     Ok(())
 }
 
+pub async fn rename_workspace(
+    workspace_path: impl AsRef<Path>,
+    workspace_name: &str,
+) -> Result<(), JjError> {
+    let workspace_path = workspace_path.as_ref();
+    run_jj(workspace_path, &["workspace", "rename", workspace_name]).await?;
+    Ok(())
+}
+
 pub async fn forget_workspace(
     root_path: impl AsRef<Path>,
     workspace_name: &str,

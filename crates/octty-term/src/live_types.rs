@@ -119,6 +119,13 @@ pub struct LiveTerminalHandle {
     pub(crate) command_tx: mpsc::Sender<LiveTerminalCommand>,
     pub(crate) wake_tx: mpsc::Sender<LiveTerminalWake>,
     pub(crate) snapshot_rx: mpsc::Receiver<TerminalGridSnapshot>,
+    pub(crate) notification_rx: mpsc::Receiver<TerminalNotification>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalNotification {
+    pub title: String,
+    pub body: String,
 }
 
 #[derive(Clone)]
@@ -214,6 +221,14 @@ impl LiveTerminalHandle {
             latest = Some(snapshot);
         }
         latest
+    }
+
+    pub fn drain_notifications(&mut self) -> Vec<TerminalNotification> {
+        let mut notifications = Vec::new();
+        while let Ok(notification) = self.notification_rx.try_recv() {
+            notifications.push(notification);
+        }
+        notifications
     }
 }
 

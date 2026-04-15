@@ -261,6 +261,52 @@ describe("AppDatabase session state", () => {
     });
   });
 
+  test("renames workspace records and rekeys saved workspace state", () => {
+    const snapshot = addPane(
+      createDefaultSnapshot("workspace-1", "/tmp/repo"),
+      "shell",
+      "/tmp/repo",
+    );
+    db.saveSnapshot(snapshot);
+    db.upsertNoteState({
+      workspaceId: "workspace-1",
+      path: "notes/todo.md",
+      title: "Todo",
+      lastReadAt: 2,
+      lastKnownMtime: 3,
+    });
+    db.saveSessionState({
+      id: "session-1",
+      workspaceId: "workspace-1",
+      paneId: "pane-shell",
+      kind: "shell",
+      cwd: "/tmp/repo",
+      command: "/bin/bash",
+      buffer: "hello",
+      state: "live",
+      exitCode: null,
+      embeddedSession: null,
+      embeddedSessionCorrelationId: null,
+      agentAttentionState: null,
+    });
+
+    db.renameWorkspace("workspace-1", "workspace-2", "review", "review");
+
+    expect(db.listWorkspaces()).toHaveLength(1);
+    expect(db.listWorkspaces()[0]).toMatchObject({
+      id: "workspace-2",
+      workspaceName: "review",
+      displayName: "review",
+    });
+    expect(db.getSnapshot("workspace-1")).toBeNull();
+    expect(db.getSnapshot("workspace-2")?.workspaceId).toBe("workspace-2");
+    expect(db.listNoteState("workspace-1")).toEqual({});
+    expect(db.listNoteState("workspace-2")["notes/todo.md"]).toMatchObject({
+      title: "Todo",
+    });
+    expect(db.getSessionStateByPane("pane-shell")?.workspaceId).toBe("workspace-2");
+  });
+
   test("round-trips independent workspace status metrics", () => {
     db.updateWorkspaceStatus("workspace-1", {
       workspaceState: "draft",

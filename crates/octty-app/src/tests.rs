@@ -79,10 +79,68 @@ fn named_keys_become_terminal_keys() {
             .expect("enter input");
     assert_eq!(enter.key, LiveTerminalKey::Enter);
 
+    let return_key =
+        live_terminal_input_from_key_parts("return", None, false, false, false, false, false)
+            .expect("return input");
+    assert_eq!(return_key.key, LiveTerminalKey::Enter);
+
     let backspace =
         live_terminal_input_from_key_parts("backspace", None, false, false, false, false, false)
             .expect("backspace input");
     assert_eq!(backspace.key, LiveTerminalKey::Backspace);
+}
+
+#[test]
+fn shift_return_becomes_control_j_for_terminal() {
+    let input = live_terminal_input_from_key_parts("enter", None, false, false, true, false, false)
+        .expect("shift-enter input");
+
+    assert_eq!(input.key, LiveTerminalKey::Character('j'));
+    assert_eq!(input.text, None);
+    assert!(input.modifiers.control);
+    assert!(!input.modifiers.shift);
+    assert_eq!(input.unshifted, 'j');
+
+    let return_key =
+        live_terminal_input_from_key_parts("return", None, false, false, true, false, false)
+            .expect("shift-return input");
+    assert_eq!(return_key, input);
+
+    let modified =
+        live_terminal_input_from_key_parts("enter", None, true, false, true, false, false)
+            .expect("ctrl-shift-enter input");
+    assert_eq!(modified.key, LiveTerminalKey::Enter);
+    assert!(modified.modifiers.control);
+    assert!(modified.modifiers.shift);
+}
+
+#[test]
+fn tab_keys_become_terminal_tab_keys() {
+    let tab = live_terminal_input_from_key_parts("tab", None, false, false, false, false, false)
+        .expect("tab input");
+    assert_eq!(tab, terminal_tab_input(false));
+
+    let tab_with_key_char =
+        live_terminal_input_from_key_parts("tab", Some("\t"), false, false, false, false, false)
+            .expect("tab input with key char");
+    assert_eq!(tab_with_key_char, terminal_tab_input(false));
+
+    let shift_tab =
+        live_terminal_input_from_key_parts("tab", None, false, false, true, false, false)
+            .expect("shift-tab input");
+    assert_eq!(shift_tab, terminal_tab_input(true));
+}
+
+#[test]
+fn tmux_fallback_maps_tab_and_control_j() {
+    assert_eq!(
+        tmux_key_for_live_key(&terminal_tab_input(false)).as_deref(),
+        Some("Tab")
+    );
+    assert_eq!(
+        tmux_key_for_live_key(&terminal_control_j_input()).as_deref(),
+        Some("C-j")
+    );
 }
 
 #[test]

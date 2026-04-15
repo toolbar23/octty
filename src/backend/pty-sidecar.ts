@@ -324,6 +324,14 @@ export class PtySidecar {
     return this.sessions.get(sessionId);
   }
 
+  renameWorkspace(workspaceId: string, nextWorkspaceId: string): void {
+    for (const session of this.sessions.values()) {
+      if (session.workspaceId === workspaceId) {
+        session.workspaceId = nextWorkspaceId;
+      }
+    }
+  }
+
   captureScreen(sessionId: string): string {
     if (!sessionId) {
       return "";
