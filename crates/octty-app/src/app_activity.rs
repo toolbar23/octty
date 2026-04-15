@@ -6,27 +6,6 @@ impl OcttyApp {
             .and_then(|index| self.workspaces.get(index))
     }
 
-    pub(crate) fn record_pane_activity(
-        &mut self,
-        workspace_id: &str,
-        pane_id: &str,
-        at_ms: i64,
-        tmux_activity_at_s: Option<i64>,
-        screen_text: Option<&str>,
-        cx: &mut Context<Self>,
-    ) {
-        let key = (workspace_id.to_owned(), pane_id.to_owned());
-        let screen_fingerprint = screen_text.map(screen_fingerprint);
-        let activity = self
-            .pane_activity
-            .entry(key.clone())
-            .or_insert_with(|| PaneActivity::new(workspace_id, pane_id, at_ms));
-        activity.record_activity(at_ms, tmux_activity_at_s, screen_fingerprint);
-        self.pending_pane_activity_persistence
-            .insert(key, activity.clone());
-        self.schedule_pane_activity_persistence(cx);
-    }
-
     pub(crate) fn record_pane_seen(
         &mut self,
         workspace_id: &str,
@@ -158,11 +137,19 @@ impl OcttyApp {
         self.pane_activity_reconcile_active = true;
         cx.spawn(async move |this, cx| {
             loop {
-                let Some(store) = this.update(cx, |app, _cx| app.store.clone()).ok() else {
+                let Some((store, active_workspace_id)) = this
+                    .update(cx, |app, _cx| {
+                        (
+                            app.store.clone(),
+                            app.active_workspace().map(|workspace| workspace.id.clone()),
+                        )
+                    })
+                    .ok()
+                else {
                     break;
                 };
                 let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
-                    reconcile_pane_activity(store).await
+                    reconcile_pane_activity(store, active_workspace_id).await
                 }) {
                     Ok(task) => task.await,
                     Err(error) => Err(error),

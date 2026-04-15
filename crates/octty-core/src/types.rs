@@ -124,9 +124,7 @@ impl PaneActivity {
                 .is_none_or(|current| tmux_activity_at_s > current)
             {
                 self.last_tmux_activity_at_s = Some(tmux_activity_at_s);
-                self.last_activity_at_ms = self
-                    .last_activity_at_ms
-                    .max(tmux_activity_at_s.saturating_mul(1000));
+                self.last_activity_at_ms = self.last_activity_at_ms.max(observed_at_ms);
             }
         }
         if let Some(screen_fingerprint) = screen_fingerprint {
@@ -145,6 +143,7 @@ impl PaneActivity {
 
     pub fn state_at(&self, now_ms: i64, active_window_ms: i64) -> ActivityState {
         if self.last_activity_at_ms > 0
+            && self.last_activity_at_ms > self.last_seen_activity_at_ms
             && now_ms.saturating_sub(self.last_activity_at_ms) <= active_window_ms
         {
             ActivityState::Active
@@ -430,11 +429,15 @@ mod tests {
         activity.record_activity(2_000, None, Some(screen_fingerprint("hello")));
 
         assert_eq!(activity.state_at(2_500, 1_000), ActivityState::Active);
-        assert_eq!(activity.state_at(4_000, 1_000), ActivityState::IdleUnseen);
+        activity.record_seen(2_600);
+        assert_eq!(activity.state_at(2_700, 1_000), ActivityState::IdleSeen);
 
-        activity.record_seen(4_100);
+        activity.record_activity(3_000, None, Some(screen_fingerprint("hello again")));
+        assert_eq!(activity.state_at(4_100, 1_000), ActivityState::IdleUnseen);
 
-        assert_eq!(activity.state_at(4_200, 1_000), ActivityState::IdleSeen);
+        activity.record_seen(4_200);
+
+        assert_eq!(activity.state_at(4_300, 1_000), ActivityState::IdleSeen);
     }
 
     #[test]
@@ -449,7 +452,7 @@ mod tests {
             Some(screen_fingerprint("first screen")),
         );
 
-        assert_eq!(activity.state_at(30_000, 1_000), ActivityState::IdleUnseen);
+        assert_eq!(activity.state_at(30_000, 1_000), ActivityState::Active);
 
         activity.record_seen(30_100);
         activity.record_tmux_observation(
@@ -459,6 +462,30 @@ mod tests {
         );
 
         assert_eq!(activity.state_at(40_000, 1_000), ActivityState::IdleUnseen);
+    }
+
+    #[test]
+    fn pane_activity_uses_tmux_observation_time_for_active_window() {
+        let mut activity = PaneActivity::new("workspace-1", "pane-1", 1_000);
+
+        activity.record_tmux_observation(30_000, Some(11), None);
+
+        assert_eq!(activity.last_tmux_activity_at_s, Some(11));
+        assert_eq!(activity.last_activity_at_ms, 30_000);
+        assert_eq!(activity.state_at(32_900, 3_000), ActivityState::Active);
+        assert_eq!(activity.state_at(33_100, 3_000), ActivityState::IdleUnseen);
+    }
+
+    #[test]
+    fn stale_tmux_observation_does_not_fabricate_activity() {
+        let mut activity = PaneActivity::new("workspace-1", "pane-1", 1_000);
+
+        activity.record_tmux_observation(10_000, Some(10), None);
+        activity.record_seen(10_100);
+        activity.record_tmux_observation(20_000, Some(10), None);
+
+        assert_eq!(activity.last_activity_at_ms, 10_000);
+        assert_eq!(activity.state_at(20_000, 3_000), ActivityState::IdleSeen);
     }
 
     #[test]

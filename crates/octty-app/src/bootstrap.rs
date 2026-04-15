@@ -276,12 +276,16 @@ pub(crate) async fn load_workspace_snapshot(
 
 pub(crate) async fn reconcile_pane_activity(
     store: Arc<TursoStore>,
+    active_workspace_id: Option<String>,
 ) -> anyhow::Result<Vec<PaneActivity>> {
     let mut activity_by_pane = pane_activity_map(store.list_pane_activity().await?);
     let snapshots = store.list_snapshots().await?;
     let mut updated = Vec::new();
 
     for snapshot in snapshots {
+        if active_workspace_id.as_deref() == Some(snapshot.workspace_id.as_str()) {
+            continue;
+        }
         for (pane_id, pane) in snapshot.panes {
             let PanePayload::Terminal(payload) = pane.payload else {
                 continue;

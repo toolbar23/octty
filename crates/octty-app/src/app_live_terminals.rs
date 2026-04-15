@@ -155,6 +155,7 @@ impl OcttyApp {
             .map(|pane_id| live_terminal_key(&active_workspace.id, &pane_id));
         let mut updates = Vec::new();
         for (key, live) in &mut self.live_terminals {
+            let focused = focused_live_key.as_deref() == Some(key.as_str());
             if let Some(snapshot) = coalesce_terminal_snapshots(live.handle.drain_snapshots()) {
                 let input_at = live.last_input_at.take();
                 if terminal_performance_data_enabled() {
@@ -179,7 +180,6 @@ impl OcttyApp {
                 live.pending_snapshot = Some(snapshot);
             }
 
-            let focused = focused_live_key.as_deref() == Some(key.as_str());
             if let Some(snapshot) = take_presentable_terminal_snapshot(live, focused, now) {
                 live.latest = Some(snapshot.clone());
                 live.last_presented_snapshot_at = Some(now);
@@ -198,14 +198,7 @@ impl OcttyApp {
             if workspace_id != active_workspace.id {
                 continue;
             }
-            self.record_pane_activity(
-                workspace_id,
-                pane_id,
-                now_ms(),
-                None,
-                Some(&snapshot.plain_text),
-                cx,
-            );
+            self.record_pane_seen(workspace_id, pane_id, now_ms(), cx);
             if let Some(active_snapshot) = self.active_snapshot.as_mut()
                 && let Some(pane) = active_snapshot.panes.get_mut(pane_id)
                 && let PanePayload::Terminal(payload) = &mut pane.payload
