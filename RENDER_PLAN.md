@@ -141,7 +141,7 @@ Each render row should cache:
 - [x] Background runs.
 - [x] Foreground runs or glyph cells.
 - [x] Shaped glyph references.
-- [ ] A compact paint representation.
+- [x] A compact paint representation.
 
 If the row generation is unchanged, the renderer should reuse the row paint
 representation without rebuilding it.
@@ -175,7 +175,7 @@ surface primitive.
 
 Output of this step:
 
-- [ ] Paint cost scales with dirty rows.
+- [x] Paint cost scales with dirty rows.
 - [x] Holding a key in a shell repaints one row and cursor state, not the whole
    terminal.
 - [x] Dense unchanged previews do not keep submitting thousands of glyph sprites.
@@ -215,7 +215,7 @@ rows unless cell contents actually changed.
 Cursor and selection should be rendered as overlays:
 
 - [x] Cursor background/foreground override is a small overlay.
-- [ ] Selection rectangles are merged overlay runs.
+- [x] Selection rectangles are merged overlay runs.
 - [ ] Cursor blink invalidates only the cursor cell.
 - [x] Focus changes invalidate border and cursor style, not terminal contents.
 
@@ -223,7 +223,7 @@ Output of this step:
 
 - [x] Blinking cursor does not repaint the full grid.
 - [x] Focus changes do not rebuild terminal rows.
-- [ ] Selection rendering is independent from VT row cache.
+- [x] Selection rendering is independent from VT row cache.
 
 ## Step 7: Keep Scheduling Separate From Rendering
 
@@ -240,7 +240,7 @@ The app should:
 Output of this step:
 
 - [x] Key-to-PTY latency remains low.
-- [ ] UI paints at most once per frame.
+- [x] UI paints at most once per frame.
 - [x] Heavy output does not starve input.
 - [x] Background terminals remain rate-limited.
 
@@ -281,7 +281,7 @@ The profile should make regressions obvious before the app feels bad.
 - [x] Prototype GPUI row scene reuse.
 - [ ] Measure whether scene reuse is enough.
 - [ ] If not enough, build a dedicated batched terminal surface.
-- [ ] Move cursor and selection into overlays.
+- [x] Move cursor and selection into overlays.
 - [x] Keep focused input scheduling unthrottled while preserving frame
       coalescing.
 - [x] Use the picker-preview profile as the regression gate.

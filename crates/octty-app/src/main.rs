@@ -9,10 +9,11 @@ use std::{
 
 use futures::{StreamExt, channel::mpsc};
 use gpui::{
-    Action, AnyView, App, Application, Bounds, Context, Entity, FocusHandle, Font, FontFallbacks,
-    FontFeatures, Hsla, IntoElement, KeyBinding, KeyDownEvent, Menu, MenuItem, MouseButton, Render,
-    Rgba, ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString, TextRun, Window, WindowBounds,
-    WindowOptions, canvas, div, fill, font, point, prelude::*, px, rgb, size,
+    Action, AnyView, App, Application, Bounds, ClipboardItem, Context, Entity, FocusHandle, Font,
+    FontFallbacks, FontFeatures, Hsla, IntoElement, KeyBinding, KeyDownEvent, Menu, MenuItem,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba,
+    ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString, TextRun, Window, WindowBounds,
+    WindowOptions, canvas, div, fill, font, point, prelude::*, px, rgb, rgba, size,
 };
 use gpui_component::Root;
 use octty_core::{
@@ -151,6 +152,7 @@ struct OcttyApp {
     terminal_notifications_active: bool,
     terminal_deferred_snapshot_timer_active: bool,
     terminal_window_active: bool,
+    terminal_last_snapshot_notify_at: Option<Instant>,
     terminal_glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
     terminal_render_cache: Rc<RefCell<TerminalRenderCache>>,
 }
@@ -163,6 +165,32 @@ struct LiveTerminalPane {
     last_resize: Option<(u16, u16)>,
     last_input_at: Option<Instant>,
     latency: TerminalLatencyStats,
+    selection: Option<TerminalSelection>,
+    selection_drag: Option<TerminalSelectionDrag>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TerminalGridPoint {
+    row: u16,
+    col: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TerminalSelection {
+    anchor: TerminalGridPoint,
+    active: TerminalGridPoint,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TerminalSelectionDrag {
+    anchor: TerminalGridPoint,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TerminalSelectionRun {
+    row: u16,
+    start_col: u16,
+    end_col: u16,
 }
 
 #[derive(Default)]
@@ -197,6 +225,7 @@ impl OcttyApp {
             terminal_notifications_active: false,
             terminal_deferred_snapshot_timer_active: false,
             terminal_window_active: true,
+            terminal_last_snapshot_notify_at: None,
             terminal_glyph_cache: Rc::new(RefCell::new(TerminalGlyphLayoutCache::default())),
             terminal_render_cache: Rc::new(RefCell::new(TerminalRenderCache::default())),
         };
@@ -280,6 +309,70 @@ impl OcttyApp {
         {
             self.send_bytes_to_active_terminal(terminal_paste_bytes(&text), cx);
         }
+        cx.stop_propagation();
+    }
+
+    fn start_terminal_selection(
+        &mut self,
+        live_key: &str,
+        point: TerminalGridPoint,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(live) = self.live_terminals.get_mut(live_key) else {
+            return;
+        };
+        live.selection = None;
+        live.selection_drag = Some(TerminalSelectionDrag { anchor: point });
+        cx.notify();
+    }
+
+    fn update_terminal_selection(
+        &mut self,
+        live_key: &str,
+        point: TerminalGridPoint,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(live) = self.live_terminals.get_mut(live_key) else {
+            return;
+        };
+        let Some(drag) = live.selection_drag.clone() else {
+            return;
+        };
+        if drag.anchor == point {
+            live.selection = None;
+            cx.notify();
+            return;
+        }
+        let selection = TerminalSelection {
+            anchor: drag.anchor,
+            active: point,
+        };
+        let text = live
+            .latest
+            .as_ref()
+            .map(|snapshot| terminal_selection_text(snapshot, &selection))
+            .unwrap_or_default();
+        live.selection = Some(selection);
+        write_terminal_primary_text(text, cx);
+        cx.notify();
+    }
+
+    fn finish_terminal_selection(&mut self, live_key: &str, cx: &mut Context<Self>) {
+        let Some(live) = self.live_terminals.get_mut(live_key) else {
+            return;
+        };
+        live.selection_drag = None;
+        if let (Some(snapshot), Some(selection)) = (live.latest.as_ref(), live.selection.as_ref()) {
+            write_terminal_primary_text(terminal_selection_text(snapshot, selection), cx);
+        }
+        cx.notify();
+    }
+
+    fn paste_terminal_primary_selection(&mut self, live_key: &str, cx: &mut Context<Self>) {
+        let Some(text) = read_terminal_primary_text(cx) else {
+            return;
+        };
+        self.send_bytes_to_terminal_key(live_key, terminal_paste_bytes(&text), cx);
         cx.stop_propagation();
     }
 
@@ -575,7 +668,22 @@ impl OcttyApp {
         };
 
         let live_key = live_terminal_key(&workspace.id, &pane_id);
-        let Some(live) = self.live_terminals.get_mut(&live_key) else {
+        self.send_bytes_to_terminal_key(&live_key, bytes, cx);
+        if let Some(snapshot) = self.active_snapshot.as_mut() {
+            snapshot.active_pane_id = Some(pane_id);
+        }
+    }
+
+    fn send_bytes_to_terminal_key(
+        &mut self,
+        live_key: &str,
+        bytes: Vec<u8>,
+        cx: &mut Context<Self>,
+    ) {
+        if bytes.is_empty() {
+            return;
+        }
+        let Some(live) = self.live_terminals.get_mut(live_key) else {
             return;
         };
         if let Err(error) = live.handle.send_bytes(bytes) {
@@ -584,9 +692,6 @@ impl OcttyApp {
             return;
         }
         live.last_input_at = Some(Instant::now());
-        if let Some(snapshot) = self.active_snapshot.as_mut() {
-            snapshot.active_pane_id = Some(pane_id);
-        }
     }
 
     fn schedule_terminal_flush(&mut self, cx: &mut Context<Self>) {
@@ -734,6 +839,8 @@ impl OcttyApp {
                             last_resize: None,
                             last_input_at: None,
                             latency: TerminalLatencyStats::default(),
+                            selection: None,
+                            selection_drag: None,
                         },
                     );
                 }
@@ -757,17 +864,20 @@ impl OcttyApp {
         cx.spawn(async move |this, cx| {
             while notification_rx.next().await.is_some() {
                 drain_pending_terminal_notifications(&mut notification_rx);
+                let now = Instant::now();
                 let delay = this
-                    .update(cx, |app, _cx| app.terminal_snapshot_coalesce_interval())
+                    .update(cx, |app, _cx| app.terminal_snapshot_coalesce_interval(now))
                     .unwrap_or(TERMINAL_BACKGROUND_FRAME_INTERVAL);
                 cx.background_executor().timer(delay).await;
                 drain_pending_terminal_notifications(&mut notification_rx);
                 let _ = this.update(cx, |app, cx| {
-                    let result = app.drain_live_terminal_snapshots(Instant::now());
+                    let now = Instant::now();
+                    let result = app.drain_live_terminal_snapshots(now);
                     if let Some(delay) = result.deferred_delay {
                         app.schedule_deferred_terminal_snapshot(delay, cx);
                     }
                     if result.changed {
+                        app.terminal_last_snapshot_notify_at = Some(now);
                         cx.notify();
                     }
                 });
@@ -796,10 +906,12 @@ impl OcttyApp {
         .detach();
     }
 
-    fn terminal_snapshot_coalesce_interval(&self) -> Duration {
+    fn terminal_snapshot_coalesce_interval(&self, now: Instant) -> Duration {
         terminal_snapshot_coalesce_interval(
             self.terminal_window_active,
             self.has_recent_terminal_input(),
+            self.terminal_last_snapshot_notify_at,
+            now,
         )
     }
 
@@ -1108,14 +1220,30 @@ fn coalesce_terminal_snapshots(
     Some(latest)
 }
 
-fn terminal_snapshot_coalesce_interval(window_active: bool, has_recent_input: bool) -> Duration {
+fn terminal_snapshot_coalesce_interval(
+    window_active: bool,
+    has_recent_input: bool,
+    last_snapshot_notify_at: Option<Instant>,
+    now: Instant,
+) -> Duration {
     if window_active && has_recent_input {
-        Duration::ZERO
+        remaining_terminal_frame_delay(last_snapshot_notify_at, now)
     } else if window_active {
         TERMINAL_FOCUSED_FRAME_INTERVAL
     } else {
         TERMINAL_BACKGROUND_FRAME_INTERVAL
     }
+}
+
+fn remaining_terminal_frame_delay(
+    last_snapshot_notify_at: Option<Instant>,
+    now: Instant,
+) -> Duration {
+    let Some(last_snapshot_notify_at) = last_snapshot_notify_at else {
+        return Duration::ZERO;
+    };
+    let elapsed = now.saturating_duration_since(last_snapshot_notify_at);
+    TERMINAL_FOCUSED_FRAME_INTERVAL.saturating_sub(elapsed)
 }
 
 impl Render for OcttyApp {
@@ -2703,6 +2831,8 @@ fn render_pane(
     }
 
     pane_el.child(render_pane_body(
+        workspace_id,
+        &pane.id,
         pane,
         active,
         terminal_live,
@@ -2713,6 +2843,8 @@ fn render_pane(
 }
 
 fn render_pane_body(
+    workspace_id: &str,
+    pane_id: &str,
     pane: &PaneState,
     active: bool,
     terminal_live: Option<&LiveTerminalPane>,
@@ -2722,6 +2854,8 @@ fn render_pane_body(
 ) -> gpui::Div {
     match &pane.payload {
         PanePayload::Terminal(payload) => render_terminal_surface(
+            workspace_id,
+            pane_id,
             payload,
             active,
             terminal_live,
@@ -2740,6 +2874,8 @@ fn render_pane_body(
 }
 
 fn render_terminal_surface(
+    workspace_id: &str,
+    pane_id: &str,
     payload: &TerminalPanePayload,
     active: bool,
     terminal_live: Option<&LiveTerminalPane>,
@@ -2764,6 +2900,8 @@ fn render_terminal_surface(
     let default_fg = terminal_rgb_to_rgba(snapshot.default_fg);
     let default_bg = terminal_rgb_to_rgba(snapshot.default_bg);
     let debug_timer_label = terminal_live.and_then(|live| live.latency.summary_label());
+    let selection = terminal_live.and_then(|live| live.selection.as_ref());
+    let live_key = live_terminal_key(workspace_id, pane_id);
     let mut surface = div()
         .flex_1()
         .overflow_hidden()
@@ -2786,7 +2924,9 @@ fn render_terminal_surface(
     }
 
     surface.child(render_terminal_grid(
+        live_key,
         snapshot,
+        selection,
         default_fg,
         default_bg,
         terminal_glyph_cache,
@@ -2858,6 +2998,10 @@ struct TerminalCursorPaintSurface {
     shaped_glyph_cells: Vec<TerminalShapedGlyphCell>,
 }
 
+struct TerminalSelectionPaintSurface {
+    runs: Vec<TerminalSelectionRun>,
+}
+
 struct TerminalFullPaintSurface {
     input: TerminalGridPaintInput,
     shaped_glyph_cells: Vec<TerminalShapedGlyphCell>,
@@ -2896,6 +3040,12 @@ struct TerminalRenderGridCache {
     default_bg: Rgba,
     rows_data: Vec<Option<TerminalCachedPaintRow>>,
     row_views: Vec<Option<Entity<TerminalRowView>>>,
+    interaction: Rc<RefCell<TerminalGridInteractionState>>,
+}
+
+#[derive(Default)]
+struct TerminalGridInteractionState {
+    bounds: Option<Bounds<Pixels>>,
 }
 
 #[derive(Clone)]
@@ -2955,7 +3105,9 @@ struct TerminalRenderProfiler {
 }
 
 fn render_terminal_grid(
+    live_key: String,
     snapshot: &TerminalGridSnapshot,
+    selection: Option<&TerminalSelection>,
     default_fg: Rgba,
     default_bg: Rgba,
     terminal_glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
@@ -2972,6 +3124,8 @@ fn render_terminal_grid(
     let build_micros = duration_micros(build_started_at.elapsed());
     let width = TERMINAL_CELL_WIDTH * input.cols as f32;
     let height = TERMINAL_CELL_HEIGHT * input.rows as f32;
+    let interaction =
+        terminal_grid_interaction_state(&input.session_id, &mut terminal_render_cache.borrow_mut());
 
     if terminal_prefers_full_canvas(&input) {
         clear_terminal_row_views(&input.session_id, &mut terminal_render_cache.borrow_mut());
@@ -3002,6 +3156,14 @@ fn render_terminal_grid(
     if let Some(cursor) = cursor {
         grid = grid.child(render_terminal_cursor_overlay(cursor, terminal_glyph_cache));
     }
+    grid = grid.child(render_terminal_selection_layer(
+        live_key,
+        selection.cloned(),
+        input.cols,
+        input.rows,
+        interaction,
+        cx,
+    ));
     grid
 }
 
@@ -3023,6 +3185,7 @@ fn terminal_paint_input(
             default_bg,
             rows_data: Vec::new(),
             row_views: Vec::new(),
+            interaction: Rc::new(RefCell::new(TerminalGridInteractionState::default())),
         });
     let cache_invalid = cache.cols != snapshot.cols
         || cache.rows != snapshot.rows
@@ -3098,6 +3261,18 @@ fn terminal_prefers_full_canvas(input: &TerminalGridPaintInput) -> bool {
     // composited into unrelated rows.
     let _ = input;
     false
+}
+
+fn terminal_grid_interaction_state(
+    session_id: &str,
+    render_cache: &mut TerminalRenderCache,
+) -> Rc<RefCell<TerminalGridInteractionState>> {
+    render_cache
+        .sessions
+        .get(session_id)
+        .expect("terminal paint input initializes the session render cache")
+        .interaction
+        .clone()
 }
 
 fn clear_terminal_row_views(session_id: &str, render_cache: &mut TerminalRenderCache) {
@@ -3199,6 +3374,103 @@ fn render_terminal_cursor_overlay(
     .overflow_hidden()
 }
 
+fn render_terminal_selection_layer(
+    live_key: String,
+    selection: Option<TerminalSelection>,
+    cols: u16,
+    rows: u16,
+    interaction: Rc<RefCell<TerminalGridInteractionState>>,
+    cx: &mut Context<OcttyApp>,
+) -> impl IntoElement {
+    let width = TERMINAL_CELL_WIDTH * cols as f32;
+    let height = TERMINAL_CELL_HEIGHT * rows as f32;
+    let mouse_down_key = live_key.clone();
+    let mouse_move_key = live_key.clone();
+    let mouse_up_key = live_key.clone();
+    let middle_click_key = live_key;
+    let mouse_down_interaction = interaction.clone();
+    let mouse_move_interaction = interaction.clone();
+    let mouse_up_interaction = interaction.clone();
+
+    div()
+        .absolute()
+        .top(px(0.0))
+        .left(px(0.0))
+        .w(px(width))
+        .h(px(height))
+        .overflow_hidden()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                let Some(point) = terminal_grid_point_from_mouse_position(
+                    event.position,
+                    &mouse_down_interaction.borrow(),
+                    cols,
+                    rows,
+                ) else {
+                    return;
+                };
+                this.start_terminal_selection(&mouse_down_key, point, cx);
+            }),
+        )
+        .on_mouse_move(
+            cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                if !event.dragging() {
+                    return;
+                }
+                let Some(point) = terminal_grid_point_from_mouse_position(
+                    event.position,
+                    &mouse_move_interaction.borrow(),
+                    cols,
+                    rows,
+                ) else {
+                    return;
+                };
+                this.update_terminal_selection(&mouse_move_key, point, cx);
+            }),
+        )
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseUpEvent, _window, cx| {
+                let Some(point) = terminal_grid_point_from_mouse_position(
+                    event.position,
+                    &mouse_up_interaction.borrow(),
+                    cols,
+                    rows,
+                ) else {
+                    this.finish_terminal_selection(&mouse_up_key, cx);
+                    return;
+                };
+                this.update_terminal_selection(&mouse_up_key, point, cx);
+                this.finish_terminal_selection(&mouse_up_key, cx);
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Middle,
+            cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                this.paste_terminal_primary_selection(&middle_click_key, cx);
+            }),
+        )
+        .child(
+            canvas(
+                move |bounds, _window, _cx| {
+                    interaction.borrow_mut().bounds = Some(bounds);
+                    TerminalSelectionPaintSurface {
+                        runs: selection
+                            .as_ref()
+                            .map(|selection| terminal_selection_runs(selection, cols, rows))
+                            .unwrap_or_default(),
+                    }
+                },
+                move |bounds, surface, window, _cx| {
+                    paint_terminal_selection_surface(bounds, &surface, window);
+                },
+            )
+            .w(px(width))
+            .h(px(height)),
+        )
+}
+
 fn shape_terminal_glyph_cells(
     glyph_cells: &[TerminalPaintGlyphCell],
     glyph_cache: &mut TerminalGlyphLayoutCache,
@@ -3292,16 +3564,9 @@ fn terminal_row_views_for_input(
         cache.row_views = vec![None; input.rows_data.len()];
     }
 
-    let mut glyph_cells_by_row = vec![Vec::new(); input.rows_data.len()];
-    for cell in input.glyph_cells.iter().cloned() {
-        if let Some(row_cells) = glyph_cells_by_row.get_mut(cell.row_index) {
-            row_cells.push(cell);
-        }
-    }
-
     let mut views = Vec::with_capacity(input.rows_data.len());
-    for (row_index, row_input) in input.rows_data.iter().cloned().enumerate() {
-        let glyph_cells = glyph_cells_by_row[row_index].clone();
+    for row_index in 0..input.rows_data.len() {
+        let row = terminal_row_view_payload(input, cache, row_index);
         let view = if let Some(view) = cache.row_views[row_index].as_ref() {
             if input
                 .rebuilt_row_flags
@@ -3311,8 +3576,8 @@ fn terminal_row_views_for_input(
             {
                 let _ = view.update(cx, |view, cx| {
                     view.cols = input.cols;
-                    view.row_input = row_input;
-                    view.glyph_cells = glyph_cells;
+                    view.row_input = row.row_input;
+                    view.glyph_cells = row.glyph_cells;
                     view.glyph_cache = glyph_cache.clone();
                     cx.notify();
                 });
@@ -3321,8 +3586,8 @@ fn terminal_row_views_for_input(
         } else {
             let view = cx.new(|_| TerminalRowView {
                 cols: input.cols,
-                row_input,
-                glyph_cells,
+                row_input: row.row_input,
+                glyph_cells: row.glyph_cells,
                 glyph_cache: glyph_cache.clone(),
             });
             cache.row_views[row_index] = Some(view.clone());
@@ -3334,6 +3599,26 @@ fn terminal_row_views_for_input(
     }
 
     views
+}
+
+fn terminal_row_view_payload(
+    input: &TerminalGridPaintInput,
+    cache: &TerminalRenderGridCache,
+    row_index: usize,
+) -> TerminalCachedPaintRow {
+    if let Some(row) = cache.rows_data.get(row_index).and_then(Option::as_ref) {
+        return row.clone();
+    }
+
+    TerminalCachedPaintRow {
+        row_input: input.rows_data[row_index].clone(),
+        glyph_cells: input
+            .glyph_cells
+            .iter()
+            .filter(|cell| cell.row_index == row_index)
+            .cloned()
+            .collect(),
+    }
 }
 
 impl Render for TerminalRowView {
@@ -3446,6 +3731,28 @@ fn paint_terminal_cursor_surface(
         surface.shaped_glyph_cells.first(),
     ) {
         let _ = paint_terminal_glyph_cell(origin, cell, &shaped_cell.line, window, cx);
+    }
+}
+
+fn paint_terminal_selection_surface(
+    bounds: Bounds<gpui::Pixels>,
+    surface: &TerminalSelectionPaintSurface,
+    window: &mut Window,
+) {
+    let color = rgba(0x4f86f733);
+    for run in &surface.runs {
+        if run.end_col <= run.start_col {
+            continue;
+        }
+        let origin = point(
+            bounds.origin.x + px(f32::from(run.start_col) * TERMINAL_CELL_WIDTH),
+            bounds.origin.y + px(f32::from(run.row) * TERMINAL_CELL_HEIGHT),
+        );
+        let size = size(
+            px(f32::from(run.end_col - run.start_col) * TERMINAL_CELL_WIDTH),
+            px(TERMINAL_CELL_HEIGHT),
+        );
+        window.paint_quad(fill(Bounds { origin, size }, color));
     }
 }
 
@@ -3954,6 +4261,125 @@ fn terminal_paste_bytes(text: &str) -> Vec<u8> {
     text.replace("\r\n", "\n").replace('\n', "\r").into_bytes()
 }
 
+fn terminal_grid_point_from_mouse_position(
+    position: Point<Pixels>,
+    interaction: &TerminalGridInteractionState,
+    cols: u16,
+    rows: u16,
+) -> Option<TerminalGridPoint> {
+    let bounds = interaction.bounds?;
+    if cols == 0 || rows == 0 || !bounds.contains(&position) {
+        return None;
+    }
+    Some(terminal_grid_point_from_local_position(
+        position.relative_to(&bounds.origin),
+        cols,
+        rows,
+    ))
+}
+
+fn terminal_grid_point_from_local_position(
+    position: Point<Pixels>,
+    cols: u16,
+    rows: u16,
+) -> TerminalGridPoint {
+    let col = ((f32::from(position.x) / TERMINAL_CELL_WIDTH).floor() as i32)
+        .clamp(0, i32::from(cols.saturating_sub(1))) as u16;
+    let row = ((f32::from(position.y) / TERMINAL_CELL_HEIGHT).floor() as i32)
+        .clamp(0, i32::from(rows.saturating_sub(1))) as u16;
+    TerminalGridPoint { row, col }
+}
+
+fn terminal_selection_runs(
+    selection: &TerminalSelection,
+    cols: u16,
+    rows: u16,
+) -> Vec<TerminalSelectionRun> {
+    if cols == 0 || rows == 0 || selection.anchor == selection.active {
+        return Vec::new();
+    }
+    let (start, end) = terminal_selection_ordered_points(selection);
+    let start_row = start.row.min(rows.saturating_sub(1));
+    let end_row = end.row.min(rows.saturating_sub(1));
+    (start_row..=end_row)
+        .filter_map(|row| {
+            let start_col = if row == start_row { start.col } else { 0 }.min(cols);
+            let end_col = if row == end_row {
+                end.col.saturating_add(1)
+            } else {
+                cols
+            }
+            .min(cols);
+            (end_col > start_col).then_some(TerminalSelectionRun {
+                row,
+                start_col,
+                end_col,
+            })
+        })
+        .collect()
+}
+
+fn terminal_selection_ordered_points(
+    selection: &TerminalSelection,
+) -> (TerminalGridPoint, TerminalGridPoint) {
+    let a = selection.anchor;
+    let b = selection.active;
+    if (a.row, a.col) <= (b.row, b.col) {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+fn terminal_selection_text(
+    snapshot: &TerminalGridSnapshot,
+    selection: &TerminalSelection,
+) -> String {
+    let runs = terminal_selection_runs(selection, snapshot.cols, snapshot.rows);
+    let mut lines = Vec::with_capacity(runs.len());
+    for run in runs {
+        let Some(row) = snapshot.rows_data.get(run.row as usize) else {
+            continue;
+        };
+        let mut line = String::new();
+        for col in run.start_col..run.end_col {
+            let Some(cell) = row.cells.get(col as usize) else {
+                continue;
+            };
+            if cell.width == 0 || cell.invisible {
+                continue;
+            }
+            if cell.text.is_empty() {
+                line.push(' ');
+            } else {
+                line.push_str(&cell.text);
+            }
+        }
+        lines.push(line.trim_end().to_owned());
+    }
+    lines.join("\n")
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn write_terminal_primary_text(text: String, cx: &mut Context<OcttyApp>) {
+    if !text.is_empty() {
+        cx.write_to_primary(ClipboardItem::new_string(text));
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+fn write_terminal_primary_text(_text: String, _cx: &mut Context<OcttyApp>) {}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn read_terminal_primary_text(cx: &mut Context<OcttyApp>) -> Option<String> {
+    cx.read_from_primary()?.text()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+fn read_terminal_primary_text(_cx: &mut Context<OcttyApp>) -> Option<String> {
+    None
+}
+
 fn push_latency_sample(samples: &mut VecDeque<u64>, micros: u64) {
     if samples.len() == TERMINAL_LATENCY_SAMPLE_LIMIT {
         samples.pop_front();
@@ -4384,6 +4810,103 @@ mod tests {
     }
 
     #[test]
+    fn terminal_selection_runs_merge_rows() {
+        let selection = TerminalSelection {
+            anchor: TerminalGridPoint { row: 0, col: 2 },
+            active: TerminalGridPoint { row: 2, col: 1 },
+        };
+
+        assert_eq!(
+            terminal_selection_runs(&selection, 5, 3),
+            vec![
+                TerminalSelectionRun {
+                    row: 0,
+                    start_col: 2,
+                    end_col: 5,
+                },
+                TerminalSelectionRun {
+                    row: 1,
+                    start_col: 0,
+                    end_col: 5,
+                },
+                TerminalSelectionRun {
+                    row: 2,
+                    start_col: 0,
+                    end_col: 2,
+                },
+            ]
+        );
+
+        let reversed = TerminalSelection {
+            anchor: selection.active,
+            active: selection.anchor,
+        };
+        assert_eq!(
+            terminal_selection_runs(&reversed, 5, 3),
+            terminal_selection_runs(&selection, 5, 3)
+        );
+    }
+
+    #[test]
+    fn terminal_selection_text_trims_row_padding() {
+        let mut snapshot = test_terminal_snapshot("selection-text", 6, 2, vec![0, 1], true);
+        write_picker_text(
+            &mut snapshot.rows_data[0].cells,
+            0,
+            "abc   ",
+            None,
+            None,
+            false,
+            false,
+        );
+        write_picker_text(
+            &mut snapshot.rows_data[1].cells,
+            0,
+            "de f  ",
+            None,
+            None,
+            false,
+            false,
+        );
+        let selection = TerminalSelection {
+            anchor: TerminalGridPoint { row: 0, col: 1 },
+            active: TerminalGridPoint { row: 1, col: 3 },
+        };
+
+        assert_eq!(terminal_selection_text(&snapshot, &selection), "bc\nde f");
+    }
+
+    #[test]
+    fn terminal_grid_point_from_local_position_clamps_to_grid() {
+        assert_eq!(
+            terminal_grid_point_from_local_position(point(px(0.0), px(0.0)), 10, 4),
+            TerminalGridPoint { row: 0, col: 0 }
+        );
+        assert_eq!(
+            terminal_grid_point_from_local_position(
+                point(
+                    px(TERMINAL_CELL_WIDTH * 9.7),
+                    px(TERMINAL_CELL_HEIGHT * 3.9)
+                ),
+                10,
+                4
+            ),
+            TerminalGridPoint { row: 3, col: 9 }
+        );
+        assert_eq!(
+            terminal_grid_point_from_local_position(
+                point(
+                    px(TERMINAL_CELL_WIDTH * 99.0),
+                    px(TERMINAL_CELL_HEIGHT * 99.0)
+                ),
+                10,
+                4
+            ),
+            TerminalGridPoint { row: 3, col: 9 }
+        );
+    }
+
+    #[test]
     fn latency_summary_reports_millisecond_percentiles() {
         let samples = VecDeque::from([500, 1_500, 8_000]);
         let summary = latency_summary(&samples).expect("latency summary");
@@ -4444,18 +4967,42 @@ mod tests {
     }
 
     #[test]
-    fn terminal_snapshot_coalesce_skips_delay_for_recent_focused_input() {
+    fn terminal_snapshot_coalesce_keeps_first_recent_focused_input_immediate() {
+        let now = Instant::now();
         assert_eq!(
-            terminal_snapshot_coalesce_interval(true, true),
+            terminal_snapshot_coalesce_interval(true, true, None, now),
             Duration::ZERO
         );
         assert_eq!(
-            terminal_snapshot_coalesce_interval(true, false),
+            terminal_snapshot_coalesce_interval(true, false, None, now),
             TERMINAL_FOCUSED_FRAME_INTERVAL
         );
         assert_eq!(
-            terminal_snapshot_coalesce_interval(false, true),
+            terminal_snapshot_coalesce_interval(false, true, None, now),
             TERMINAL_BACKGROUND_FRAME_INTERVAL
+        );
+    }
+
+    #[test]
+    fn terminal_snapshot_coalesce_limits_recent_focused_input_to_frame_interval() {
+        let now = Instant::now();
+        assert_eq!(
+            terminal_snapshot_coalesce_interval(
+                true,
+                true,
+                Some(now - Duration::from_millis(3)),
+                now
+            ),
+            TERMINAL_FOCUSED_FRAME_INTERVAL - Duration::from_millis(3)
+        );
+        assert_eq!(
+            terminal_snapshot_coalesce_interval(
+                true,
+                true,
+                Some(now - TERMINAL_FOCUSED_FRAME_INTERVAL),
+                now
+            ),
+            Duration::ZERO
         );
     }
 
@@ -4823,6 +5370,14 @@ mod tests {
                 .iter()
                 .any(|cell| cell.row_index == 1 && cell.text.as_ref() == "b")
         );
+
+        let cache = render_cache
+            .sessions
+            .get(&snapshot.session_id)
+            .expect("session render cache");
+        let reused_row = terminal_row_view_payload(&second, cache, 0);
+        assert_eq!(reused_row.glyph_cells.len(), 1);
+        assert_eq!(reused_row.glyph_cells[0].text.as_ref(), "a");
     }
 
     #[test]
