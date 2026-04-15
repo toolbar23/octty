@@ -35,6 +35,8 @@ const LIVE_TERMINAL_INTERACTIVE_OUTPUT_WINDOW: Duration = Duration::from_millis(
 
 #[path = "live_input.rs"]
 mod input;
+#[path = "live_notifications.rs"]
+mod notifications;
 #[path = "live_runtime.rs"]
 mod runtime;
 #[path = "live_snapshot.rs"]
@@ -55,11 +57,12 @@ pub use spawn::{
 pub use types::{
     LiveTerminalHandle, LiveTerminalKey, LiveTerminalKeyInput, LiveTerminalModifiers,
     LiveTerminalSnapshotNotifier, TerminalCellSnapshot, TerminalCursorSnapshot,
-    TerminalDamageSnapshot, TerminalGridSnapshot, TerminalResize, TerminalRgb, TerminalRowSnapshot,
-    TerminalSnapshotTiming,
+    TerminalDamageSnapshot, TerminalGridSnapshot, TerminalNotification, TerminalResize,
+    TerminalRgb, TerminalRowSnapshot, TerminalSnapshotTiming,
 };
 
 pub(crate) use input::*;
+pub(crate) use notifications::*;
 pub(crate) use runtime::*;
 pub(crate) use snapshot::*;
 pub(crate) use trace::*;

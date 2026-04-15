@@ -10,6 +10,7 @@ pub(crate) struct LiveTerminalRuntime {
     pub(crate) pty_output_rx: mpsc::Receiver<Vec<u8>>,
     pub(crate) wake_rx: mpsc::Receiver<LiveTerminalWake>,
     pub(crate) snapshot_tx: mpsc::Sender<TerminalGridSnapshot>,
+    pub(crate) notification_tx: mpsc::Sender<TerminalNotification>,
     pub(crate) snapshot_notifier: LiveTerminalSnapshotNotifier,
 }
 
@@ -44,6 +45,7 @@ impl LiveTerminalRuntime {
         let mut interactive_output_until: Option<Instant> = None;
         let mut pending_vt_write_micros = 0u64;
         let mut pending_pty_output_bytes = 0u64;
+        let mut notification_parser = TerminalOscNotificationParser::default();
         let mut recorder =
             TerminalTraceRecorder::from_env(&self.session_id, self.spec.cols, self.spec.rows);
 
@@ -95,8 +97,12 @@ impl LiveTerminalRuntime {
 
             if let Some(pty_output) = drained_inputs.pty_output {
                 let output_received_at = Instant::now();
-                let effect =
-                    self.handle_pty_output(pty_output, &mut terminal, recorder.as_mut())?;
+                let effect = self.handle_pty_output(
+                    pty_output,
+                    &mut notification_parser,
+                    &mut terminal,
+                    recorder.as_mut(),
+                )?;
                 pending_vt_write_micros =
                     pending_vt_write_micros.saturating_add(effect.vt_write_micros);
                 pending_pty_output_bytes =
@@ -231,12 +237,16 @@ impl LiveTerminalRuntime {
     fn handle_pty_output<'a>(
         &mut self,
         bytes: Vec<u8>,
+        notification_parser: &mut TerminalOscNotificationParser,
         terminal: &mut Terminal<'a, 'a>,
         mut recorder: Option<&mut TerminalTraceRecorder>,
     ) -> Result<LiveTerminalCommandEffect, TerminalError> {
         let byte_count = bytes.len() as u64;
         if let Some(recorder) = recorder.as_mut() {
             recorder.record_output(&bytes);
+        }
+        for notification in notification_parser.push(&bytes) {
+            let _ = self.notification_tx.send(notification);
         }
         let vt_write_started_at = Instant::now();
         terminal.vt_write(&bytes);

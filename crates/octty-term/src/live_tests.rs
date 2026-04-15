@@ -98,6 +98,59 @@ fn runtime_wake_drain_coalesces_wakeups() {
 }
 
 #[test]
+fn terminal_osc_parser_extracts_rxvt_notify_sequence() {
+    let mut parser = TerminalOscNotificationParser::default();
+
+    let notifications = parser.push(b"\x1b]777;notify;Codex;Work finished\x07");
+
+    assert_eq!(
+        notifications,
+        vec![TerminalNotification {
+            title: "Codex".to_owned(),
+            body: "Work finished".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn terminal_osc_parser_extracts_split_st_terminated_notify_sequence() {
+    let mut parser = TerminalOscNotificationParser::default();
+
+    assert!(parser.push(b"\x1b]777;notify;Cod").is_empty());
+    let notifications = parser.push(b"ex;Review ready\x1b\\");
+
+    assert_eq!(
+        notifications,
+        vec![TerminalNotification {
+            title: "Codex".to_owned(),
+            body: "Review ready".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn terminal_osc_parser_extracts_iterm_system_notification() {
+    let mut parser = TerminalOscNotificationParser::default();
+
+    let notifications = parser.push(b"\x1b]9;Work finished\x07");
+
+    assert_eq!(
+        notifications,
+        vec![TerminalNotification {
+            title: "Terminal".to_owned(),
+            body: "Work finished".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn terminal_osc_parser_ignores_conemu_progress_sequences() {
+    let mut parser = TerminalOscNotificationParser::default();
+
+    assert!(parser.push(b"\x1b]9;4;1;42\x1b\\").is_empty());
+}
+
+#[test]
 fn picker_preview_ansi_fixture_reaches_snapshot() {
     let mut terminal = Terminal::new(TerminalOptions {
         cols: 120,

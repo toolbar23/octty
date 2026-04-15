@@ -154,7 +154,11 @@ impl OcttyApp {
             .and_then(active_terminal_pane_id)
             .map(|pane_id| live_terminal_key(&active_workspace.id, &pane_id));
         let mut updates = Vec::new();
+        let mut notifications = Vec::new();
         for (key, live) in &mut self.live_terminals {
+            for notification in live.handle.drain_notifications() {
+                notifications.push(notification);
+            }
             if let Some(snapshot) = coalesce_terminal_snapshots(live.handle.drain_snapshots()) {
                 let input_at = live.last_input_at.take();
                 if terminal_performance_data_enabled() {
@@ -189,6 +193,10 @@ impl OcttyApp {
             {
                 result.defer_for(delay);
             }
+        }
+
+        for notification in notifications {
+            show_desktop_notification(&notification);
         }
 
         for (key, snapshot) in updates {
