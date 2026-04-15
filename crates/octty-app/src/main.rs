@@ -15,7 +15,7 @@ use gpui::{
     Rgba, ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString, TextRun, Window, WindowBounds,
     WindowOptions, canvas, div, fill, font, point, prelude::*, px, rgb, rgba, size,
 };
-use gpui_component::Root;
+use gpui_component::{Root, Sizable, tag::Tag};
 use octty_core::{
     PanePayload, PaneState, PaneType, ProjectRootRecord, SessionSnapshot, SessionState,
     TerminalPanePayload, WorkspaceBookmarkRelation, WorkspaceSnapshot, WorkspaceState,
@@ -1541,13 +1541,18 @@ fn render_sidebar_workspace_row(
     shortcut_label: Option<&str>,
     cx: &mut Context<OcttyApp>,
 ) -> gpui::Div {
+    let bookmark_label = workspace_bookmark_label(workspace);
+    let has_meta_row = bookmark_label.is_some() || shortcut_label.is_some();
+    let missing_path = !has_recorded_workspace_path(&workspace.workspace_path);
+    let has_unread_notes = workspace.status.unread_notes > 0;
+
     let mut meta_row = div()
         .mt_1()
         .flex()
         .gap_2()
         .text_xs()
         .text_color(rgb(0x98a1ad));
-    if let Some(bookmark_label) = workspace_bookmark_label(workspace) {
+    if let Some(bookmark_label) = bookmark_label {
         meta_row = meta_row.child(div().truncate().child(bookmark_label));
     }
     if let Some(shortcut_label) = shortcut_label {
@@ -1555,91 +1560,81 @@ fn render_sidebar_workspace_row(
     }
 
     let mut badge_row = div().mt_1().flex().gap_1();
-    if !has_recorded_workspace_path(&workspace.workspace_path) {
-        badge_row = badge_row.child(
-            div()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .border_1()
-                .border_color(rgb(0x9a7354))
-                .text_xs()
-                .text_color(rgb(0xe5b083))
-                .child("missing path"),
-        );
+    if missing_path {
+        badge_row = badge_row.child(Tag::warning().outline().xsmall().child("missing path"));
     }
-    if workspace.status.unread_notes > 0 {
+    if has_unread_notes {
         badge_row = badge_row.child(
-            div()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .border_1()
-                .border_color(rgb(0x4d545f))
-                .text_xs()
-                .text_color(rgb(0xd7dce4))
+            Tag::secondary()
+                .outline()
+                .xsmall()
                 .child(format!("{} note", workspace.status.unread_notes)),
         );
     }
 
-    div()
-        .px_2()
-        .py_2()
-        .border_1()
-        .border_color(if active { rgb(0x4d545f) } else { rgb(0x323640) })
-        .rounded_md()
-        .bg(if active { rgb(0x3c424d) } else { rgb(0x323640) })
-        .on_mouse_up(
-            MouseButton::Left,
-            cx.listener(move |this, _, window, cx| {
-                this.open_workspace(&OpenWorkspaceShortcut { index }, window, cx);
-            }),
-        )
-        .child(
+    let mut row = div().relative().py_2().on_mouse_up(
+        MouseButton::Left,
+        cx.listener(move |this, _, window, cx| {
+            this.open_workspace(&OpenWorkspaceShortcut { index }, window, cx);
+        }),
+    );
+    if active {
+        row = row.child(
             div()
-                .flex()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_1()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(if active { rgb(0x4e86d8) } else { rgb(0xd7dce4) })
-                        .truncate()
-                        .child(workspace.display_name_or_workspace_name().to_owned()),
-                )
-                .child(render_workspace_status_pill(
-                    &workspace.status.workspace_state,
-                    workspace.status.has_working_copy_changes,
-                )),
-        )
-        .child(meta_row)
-        .child(badge_row)
+                .absolute()
+                .top(px(0.0))
+                .bottom(px(0.0))
+                .left(-px(10.0))
+                .right(-px(10.0))
+                .border_1()
+                .border_color(rgb(0x4d545f))
+                .rounded_md()
+                .bg(rgb(0x3c424d)),
+        );
+    }
+    row = row.child(
+        div()
+            .relative()
+            .flex()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(if active { rgb(0x4e86d8) } else { rgb(0xd7dce4) })
+                    .truncate()
+                    .child(workspace.display_name_or_workspace_name().to_owned()),
+            )
+            .child(render_workspace_status_tag(
+                &workspace.status.workspace_state,
+                workspace.status.has_working_copy_changes,
+            )),
+    );
+    if has_meta_row {
+        row = row.child(meta_row.relative());
+    }
+    if missing_path || has_unread_notes {
+        row = row.child(badge_row.relative());
+    }
+    row
 }
 
-fn render_workspace_status_pill(state: &WorkspaceState, changed: bool) -> gpui::Div {
-    let (border, text) = match state {
-        WorkspaceState::Published => (0x4c6a55, 0xa8d7b2),
-        WorkspaceState::MergedLocal => (0x5b6070, 0xb9bfcc),
-        WorkspaceState::Draft => (0x5c6f95, 0xb9cdf2),
-        WorkspaceState::Conflicted => (0x8b5151, 0xf0a7a7),
-        WorkspaceState::Unknown => (0x4d545f, 0x98a1ad),
+fn render_workspace_status_tag(state: &WorkspaceState, changed: bool) -> Tag {
+    let tag = match state {
+        WorkspaceState::Published => Tag::success(),
+        WorkspaceState::MergedLocal => Tag::warning(),
+        WorkspaceState::Draft => Tag::info(),
+        WorkspaceState::Conflicted => Tag::danger(),
+        WorkspaceState::Unknown => Tag::secondary(),
     };
     let label = if changed {
-        format!("{} *", workspace_status_label(state))
+        format!("{}*", workspace_status_label(state))
     } else {
         workspace_status_label(state).to_owned()
     };
 
-    div()
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(border))
-        .text_xs()
-        .text_color(rgb(text))
-        .child(label)
+    tag.outline().xsmall().child(label)
 }
 
 fn workspace_bookmark_label(workspace: &WorkspaceSummary) -> Option<String> {
