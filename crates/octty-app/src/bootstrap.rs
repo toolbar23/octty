@@ -11,14 +11,15 @@ pub(crate) struct BootstrapState {
 }
 
 pub(crate) async fn load_bootstrap(auto_seed_current_repo: bool) -> anyhow::Result<BootstrapState> {
-    load_bootstrap_with_active(auto_seed_current_repo, None).await
+    let store = TursoStore::open(default_store_path()).await?;
+    load_bootstrap_from_store(&store, auto_seed_current_repo, None).await
 }
 
-pub(crate) async fn load_bootstrap_with_active(
+pub(crate) async fn load_bootstrap_from_store(
+    store: &TursoStore,
     auto_seed_current_repo: bool,
     active_workspace_id: Option<String>,
 ) -> anyhow::Result<BootstrapState> {
-    let store = TursoStore::open(default_store_path()).await?;
     let mut roots = store.list_project_roots().await?;
     if roots.is_empty() && auto_seed_current_repo {
         if let Ok(root_path) = resolve_repo_root(std::env::current_dir()?).await {
@@ -114,26 +115,24 @@ pub(crate) async fn load_bootstrap_with_active(
 }
 
 pub(crate) async fn create_workspace_for_root_and_reload(
-    store_path: PathBuf,
+    store: Arc<TursoStore>,
     root: ProjectRootRecord,
 ) -> anyhow::Result<BootstrapState> {
-    let store = TursoStore::open(store_path).await?;
     let (workspace_name, destination_path) = next_workspace_defaults(&store, &root).await?;
     jj_create_workspace(&root.root_path, &destination_path, &workspace_name).await?;
     let root_path = tokio::fs::canonicalize(&root.root_path).await?;
     let workspace_id =
         octty_jj::workspace_id_for(&root_path.to_string_lossy(), workspace_name.as_str());
-    load_bootstrap_with_active(true, Some(workspace_id)).await
+    load_bootstrap_from_store(&store, true, Some(workspace_id)).await
 }
 
 pub(crate) async fn add_project_root_and_reload(
-    store_path: PathBuf,
+    store: Arc<TursoStore>,
     selected_path: PathBuf,
     active_workspace_id: Option<String>,
 ) -> anyhow::Result<BootstrapState> {
     let root_path = resolve_repo_root(selected_path).await?;
     let root = project_root_from_path(&root_path);
-    let store = TursoStore::open(store_path).await?;
     store.upsert_project_root(&root).await?;
 
     let workspace_id = discover_workspaces(&root)
@@ -141,50 +140,47 @@ pub(crate) async fn add_project_root_and_reload(
         .ok()
         .and_then(|workspaces| workspaces.first().map(|workspace| workspace.id.clone()))
         .or(active_workspace_id);
-    load_bootstrap_with_active(true, workspace_id).await
+    load_bootstrap_from_store(&store, true, workspace_id).await
 }
 
 pub(crate) async fn rename_project_root_and_reload(
-    store_path: PathBuf,
+    store: Arc<TursoStore>,
     root_id: String,
     display_name: String,
     active_workspace_id: Option<String>,
 ) -> anyhow::Result<BootstrapState> {
-    let store = TursoStore::open(store_path).await?;
     store
         .update_project_root_display_name(&root_id, &display_name)
         .await?;
     store
         .update_workspace_project_display_name(&root_id, &display_name)
         .await?;
-    load_bootstrap_with_active(true, active_workspace_id).await
+    load_bootstrap_from_store(&store, true, active_workspace_id).await
 }
 
 pub(crate) async fn rename_workspace_and_reload(
-    store_path: PathBuf,
+    store: Arc<TursoStore>,
     workspace_id: String,
     display_name: String,
     active_workspace_id: Option<String>,
 ) -> anyhow::Result<BootstrapState> {
-    let store = TursoStore::open(store_path).await?;
     store
         .update_workspace_display_name(&workspace_id, &display_name)
         .await?;
-    load_bootstrap_with_active(true, active_workspace_id).await
+    load_bootstrap_from_store(&store, true, active_workspace_id).await
 }
 
 pub(crate) async fn remove_project_root_and_reload(
-    store_path: PathBuf,
+    store: Arc<TursoStore>,
     root_id: String,
     active_workspace_id: Option<String>,
 ) -> anyhow::Result<BootstrapState> {
-    let store = TursoStore::open(store_path).await?;
     store.delete_project_root(&root_id).await?;
-    load_bootstrap_with_active(true, active_workspace_id).await
+    load_bootstrap_from_store(&store, true, active_workspace_id).await
 }
 
 pub(crate) async fn forget_workspace_and_reload(
-    store_path: PathBuf,
+    store: Arc<TursoStore>,
     workspace: WorkspaceSummary,
     active_workspace_id: Option<String>,
     delete_directory: bool,
@@ -193,9 +189,8 @@ pub(crate) async fn forget_workspace_and_reload(
     if delete_directory {
         delete_workspace_directory(&workspace).await?;
     }
-    let store = TursoStore::open(store_path).await?;
     store.delete_workspace(&workspace.id).await?;
-    load_bootstrap_with_active(true, active_workspace_id).await
+    load_bootstrap_from_store(&store, true, active_workspace_id).await
 }
 
 pub(crate) async fn next_workspace_defaults(
@@ -280,9 +275,8 @@ pub(crate) async fn load_workspace_snapshot(
 }
 
 pub(crate) async fn reconcile_pane_activity(
-    store_path: PathBuf,
+    store: Arc<TursoStore>,
 ) -> anyhow::Result<Vec<PaneActivity>> {
-    let store = TursoStore::open(store_path).await?;
     let mut activity_by_pane = pane_activity_map(store.list_pane_activity().await?);
     let snapshots = store.list_snapshots().await?;
     let mut updated = Vec::new();

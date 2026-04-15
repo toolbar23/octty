@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use turso::{Builder, Connection};
 
@@ -12,19 +12,23 @@ impl TursoStore {
         let db = Builder::new_local(path.as_ref().to_string_lossy().as_ref())
             .build()
             .await?;
-        let store = Self { db };
+        let conn = db.connect()?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        let store = Self { conn };
         store.migrate().await?;
         Ok(store)
     }
 
     pub async fn open_memory() -> Result<Self, StoreError> {
         let db = Builder::new_local(":memory:").build().await?;
-        let store = Self { db };
+        let conn = db.connect()?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        let store = Self { conn };
         store.migrate().await?;
         Ok(store)
     }
 
     pub async fn connection(&self) -> Result<Connection, StoreError> {
-        Ok(self.db.connect()?)
+        Ok(self.conn.clone())
     }
 }

@@ -3,6 +3,7 @@ use super::*;
 impl OcttyApp {
     pub(crate) fn new(
         bootstrap: BootstrapState,
+        store: Arc<TursoStore>,
         focus_handle: FocusHandle,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -14,7 +15,7 @@ impl OcttyApp {
             workspaces: bootstrap.workspaces,
             active_workspace_index: bootstrap.active_workspace_index,
             active_snapshot: bootstrap.active_snapshot,
-            store_path: default_store_path(),
+            store,
             focus_handle,
             pending_terminal_inputs: Vec::new(),
             terminal_flush_active: false,
@@ -71,10 +72,9 @@ impl OcttyApp {
         self.status = format!("Opening {workspace_display_name}...").into();
         cx.notify();
 
-        let store_path = self.store_path.clone();
+        let store = self.store.clone();
         cx.spawn(async move |this, cx| {
             let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
-                let store = TursoStore::open(store_path).await?;
                 load_workspace_snapshot(&store, &workspace).await
             }) {
                 Ok(task) => task.await,
@@ -148,7 +148,7 @@ impl OcttyApp {
             multiple: false,
             prompt: Some("Add repository".into()),
         });
-        let store_path = self.store_path.clone();
+        let store = self.store.clone();
         let active_workspace_id = self
             .active_workspace()
             .map(|workspace| workspace.id.clone());
@@ -167,8 +167,7 @@ impl OcttyApp {
             };
             let result = match selected_path {
                 Ok(selected_path) => match gpui_tokio::Tokio::spawn_result(cx, async move {
-                    add_project_root_and_reload(store_path, selected_path, active_workspace_id)
-                        .await
+                    add_project_root_and_reload(store, selected_path, active_workspace_id).await
                 }) {
                     Ok(task) => task.await,
                     Err(error) => Err(error),
@@ -203,10 +202,10 @@ impl OcttyApp {
         else {
             return;
         };
-        let store_path = self.store_path.clone();
+        let store = self.store.clone();
         self.run_navigation_operation(
             format!("Creating workspace in {}...", root.display_name),
-            async move { create_workspace_for_root_and_reload(store_path, root).await },
+            async move { create_workspace_for_root_and_reload(store, root).await },
             cx,
         );
     }
@@ -251,7 +250,7 @@ impl OcttyApp {
             .active_workspace()
             .filter(|workspace| workspace.root_id != root.id)
             .map(|workspace| workspace.id.clone());
-        let store_path = self.store_path.clone();
+        let store = self.store.clone();
         let answer = window.prompt(
             PromptLevel::Warning,
             "Forget this project root from Octty?",
@@ -264,7 +263,7 @@ impl OcttyApp {
                 return;
             }
             let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
-                remove_project_root_and_reload(store_path, root.id, active_workspace_id).await
+                remove_project_root_and_reload(store, root.id, active_workspace_id).await
             }) {
                 Ok(task) => task.await,
                 Err(error) => Err(error),
@@ -480,7 +479,7 @@ impl OcttyApp {
             .active_workspace()
             .filter(|active| active.id != workspace.id)
             .map(|active| active.id.clone());
-        let store_path = self.store_path.clone();
+        let store = self.store.clone();
         let message = if delete_directory {
             format!(
                 "Delete the workspace directory and forget {}?",
@@ -506,13 +505,8 @@ impl OcttyApp {
                 return;
             }
             let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
-                forget_workspace_and_reload(
-                    store_path,
-                    workspace,
-                    active_workspace_id,
-                    delete_directory,
-                )
-                .await
+                forget_workspace_and_reload(store, workspace, active_workspace_id, delete_directory)
+                    .await
             }) {
                 Ok(task) => task.await,
                 Err(error) => Err(error),
@@ -536,17 +530,18 @@ impl OcttyApp {
         display_name: String,
         cx: &mut Context<Self>,
     ) {
-        let store_path = self.store_path.clone();
+        let store = self.store.clone();
         let active_workspace_id = self
             .active_workspace()
             .map(|workspace| workspace.id.clone());
         match target {
             SidebarRenameTarget::ProjectRoot(root_id) => {
+                let store = store.clone();
                 self.run_navigation_operation(
                     format!("Renaming repo to {display_name}..."),
                     async move {
                         rename_project_root_and_reload(
-                            store_path,
+                            store,
                             root_id,
                             display_name,
                             active_workspace_id,
@@ -561,7 +556,7 @@ impl OcttyApp {
                     format!("Renaming workspace to {display_name}..."),
                     async move {
                         rename_workspace_and_reload(
-                            store_path,
+                            store,
                             workspace_id,
                             display_name,
                             active_workspace_id,
