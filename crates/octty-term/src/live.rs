@@ -25,7 +25,9 @@ use crate::{TerminalError, TerminalSessionSpec, build_tmux_pty_launch, ensure_tm
 
 const DEFAULT_CELL_WIDTH: u16 = 8;
 const DEFAULT_CELL_HEIGHT: u16 = 18;
-const MAX_COMMANDS_PER_TICK: usize = 512;
+const MAX_CONTROL_COMMANDS_PER_TICK: usize = 128;
+const MAX_PTY_OUTPUT_CHUNKS_PER_TICK: usize = 256;
+const MAX_PTY_OUTPUT_BYTES_PER_TICK: usize = 256 * 1024;
 const MAX_INITIAL_SNAPSHOTS: usize = 2;
 const LIVE_TERMINAL_IDLE_TIMEOUT: Duration = Duration::from_millis(100);
 const LIVE_TERMINAL_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(33);
@@ -150,6 +152,7 @@ pub struct TerminalResize {
 pub struct LiveTerminalHandle {
     session_id: String,
     command_tx: mpsc::Sender<LiveTerminalCommand>,
+    wake_tx: mpsc::Sender<LiveTerminalWake>,
     snapshot_rx: mpsc::Receiver<TerminalGridSnapshot>,
 }
 
@@ -180,10 +183,15 @@ impl Default for LiveTerminalSnapshotNotifier {
 enum LiveTerminalCommand {
     Key(LiveTerminalKeyInput),
     Bytes(Vec<u8>),
-    Output(Vec<u8>),
     Resize(TerminalResize),
     Scroll(isize),
     Shutdown,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LiveTerminalWake {
+    Control,
+    PtyOutput,
 }
 
 impl LiveTerminalHandle {
@@ -194,24 +202,36 @@ impl LiveTerminalHandle {
     pub fn send_key(&self, input: LiveTerminalKeyInput) -> Result<(), TerminalError> {
         self.command_tx
             .send(LiveTerminalCommand::Key(input))
+            .map_err(|error| TerminalError::Pty(error.to_string()))?;
+        self.wake_tx
+            .send(LiveTerminalWake::Control)
             .map_err(|error| TerminalError::Pty(error.to_string()))
     }
 
     pub fn send_bytes(&self, bytes: impl Into<Vec<u8>>) -> Result<(), TerminalError> {
         self.command_tx
             .send(LiveTerminalCommand::Bytes(bytes.into()))
+            .map_err(|error| TerminalError::Pty(error.to_string()))?;
+        self.wake_tx
+            .send(LiveTerminalWake::Control)
             .map_err(|error| TerminalError::Pty(error.to_string()))
     }
 
     pub fn resize(&self, resize: TerminalResize) -> Result<(), TerminalError> {
         self.command_tx
             .send(LiveTerminalCommand::Resize(resize))
+            .map_err(|error| TerminalError::Pty(error.to_string()))?;
+        self.wake_tx
+            .send(LiveTerminalWake::Control)
             .map_err(|error| TerminalError::Pty(error.to_string()))
     }
 
     pub fn scroll(&self, lines: isize) -> Result<(), TerminalError> {
         self.command_tx
             .send(LiveTerminalCommand::Scroll(lines))
+            .map_err(|error| TerminalError::Pty(error.to_string()))?;
+        self.wake_tx
+            .send(LiveTerminalWake::Control)
             .map_err(|error| TerminalError::Pty(error.to_string()))
     }
 
@@ -235,6 +255,7 @@ impl LiveTerminalHandle {
 impl Drop for LiveTerminalHandle {
     fn drop(&mut self) {
         let _ = self.command_tx.send(LiveTerminalCommand::Shutdown);
+        let _ = self.wake_tx.send(LiveTerminalWake::Control);
     }
 }
 
@@ -282,13 +303,15 @@ pub fn spawn_live_terminal_with_notifier(
         .map_err(|error| TerminalError::Pty(error.to_string()))?;
 
     let (command_tx, command_rx) = mpsc::channel();
+    let (pty_output_tx, pty_output_rx) = mpsc::channel();
+    let (wake_tx, wake_rx) = mpsc::channel();
     let (snapshot_tx, snapshot_rx) = mpsc::channel();
 
     thread::Builder::new()
         .name(format!("octty-pty-read-{session_id}"))
         .spawn({
-            let command_tx = command_tx.clone();
-            move || read_pty_loop(reader, command_tx)
+            let wake_tx = wake_tx.clone();
+            move || read_pty_loop(reader, pty_output_tx, wake_tx)
         })
         .map_err(|error| TerminalError::Pty(error.to_string()))?;
 
@@ -304,6 +327,8 @@ pub fn spawn_live_terminal_with_notifier(
                     writer,
                     child,
                     command_rx,
+                    pty_output_rx,
+                    wake_rx,
                     snapshot_tx,
                     snapshot_notifier,
                 };
@@ -317,6 +342,7 @@ pub fn spawn_live_terminal_with_notifier(
     Ok(LiveTerminalHandle {
         session_id,
         command_tx,
+        wake_tx,
         snapshot_rx,
     })
 }
@@ -374,15 +400,18 @@ pub fn replay_terminal_steps<'a>(
     renderer.snapshot(session_id, &terminal)
 }
 
-fn read_pty_loop(mut reader: Box<dyn Read + Send>, command_tx: mpsc::Sender<LiveTerminalCommand>) {
+fn read_pty_loop(
+    mut reader: Box<dyn Read + Send>,
+    pty_output_tx: mpsc::Sender<Vec<u8>>,
+    wake_tx: mpsc::Sender<LiveTerminalWake>,
+) {
     let mut buffer = vec![0; 8192];
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(size) => {
-                if command_tx
-                    .send(LiveTerminalCommand::Output(buffer[..size].to_vec()))
-                    .is_err()
+                if pty_output_tx.send(buffer[..size].to_vec()).is_err()
+                    || wake_tx.send(LiveTerminalWake::PtyOutput).is_err()
                 {
                     break;
                 }
@@ -400,6 +429,8 @@ struct LiveTerminalRuntime {
     writer: Box<dyn Write + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     command_rx: mpsc::Receiver<LiveTerminalCommand>,
+    pty_output_rx: mpsc::Receiver<Vec<u8>>,
+    wake_rx: mpsc::Receiver<LiveTerminalWake>,
     snapshot_tx: mpsc::Sender<TerminalGridSnapshot>,
     snapshot_notifier: LiveTerminalSnapshotNotifier,
 }
@@ -439,35 +470,28 @@ impl LiveTerminalRuntime {
             TerminalTraceRecorder::from_env(&self.session_id, self.spec.cols, self.spec.rows);
 
         loop {
-            let mut processed_commands = 0usize;
-            while processed_commands < MAX_COMMANDS_PER_TICK {
-                let command = if processed_commands == 0 {
-                    let timeout = terminal_command_wait_timeout(
-                        terminal_changed,
-                        force_snapshot,
-                        emitted_snapshots,
-                        last_snapshot_at,
-                        Instant::now(),
-                    );
-                    match self.command_rx.recv_timeout(timeout) {
-                        Ok(command) => command,
-                        Err(mpsc::RecvTimeoutError::Timeout) => break,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
-                    }
-                } else {
-                    match self.command_rx.try_recv() {
-                        Ok(command) => command,
-                        Err(mpsc::TryRecvError::Empty) => break,
-                        Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
-                    }
-                };
-                let is_pty_output = matches!(&command, LiveTerminalCommand::Output(_));
+            let timeout = terminal_command_wait_timeout(
+                terminal_changed,
+                force_snapshot,
+                emitted_snapshots,
+                last_snapshot_at,
+                Instant::now(),
+            );
+            match self.wake_rx.recv_timeout(timeout) {
+                Ok(_) => drain_terminal_wakes(&self.wake_rx),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+            }
+
+            let drained_inputs =
+                drain_terminal_runtime_inputs(&self.command_rx, &self.pty_output_rx);
+
+            for command in drained_inputs.commands {
                 let is_interactive_input = matches!(
                     &command,
                     LiveTerminalCommand::Key(_) | LiveTerminalCommand::Bytes(_)
                 );
                 let command_received_at = Instant::now();
-                processed_commands += 1;
                 let effect = self.handle_command(
                     command,
                     &mut terminal,
@@ -487,13 +511,22 @@ impl LiveTerminalRuntime {
                     interactive_output_until =
                         Some(command_received_at + LIVE_TERMINAL_INTERACTIVE_OUTPUT_WINDOW);
                 }
-                if is_pty_output {
-                    last_pty_output_at.get_or_insert(command_received_at);
-                    if interactive_output_until
-                        .is_some_and(|deadline| command_received_at <= deadline)
-                    {
-                        force_snapshot = true;
-                    }
+                terminal_changed |= effect.terminal_changed;
+                force_snapshot |= effect.force_snapshot;
+            }
+
+            if let Some(pty_output) = drained_inputs.pty_output {
+                let output_received_at = Instant::now();
+                let effect =
+                    self.handle_pty_output(pty_output, &mut terminal, recorder.as_mut())?;
+                pending_vt_write_micros =
+                    pending_vt_write_micros.saturating_add(effect.vt_write_micros);
+                pending_pty_output_bytes =
+                    pending_pty_output_bytes.saturating_add(effect.pty_output_bytes);
+                drain_pty_responses(&mut self.writer, &pty_responses, recorder.as_mut())?;
+                last_pty_output_at.get_or_insert(output_received_at);
+                if interactive_output_until.is_some_and(|deadline| output_received_at <= deadline) {
+                    force_snapshot = true;
                 }
                 terminal_changed |= effect.terminal_changed;
                 force_snapshot |= effect.force_snapshot;
@@ -575,18 +608,6 @@ impl LiveTerminalRuntime {
                 self.writer.flush()?;
                 Ok(LiveTerminalCommandEffect::unchanged())
             }
-            LiveTerminalCommand::Output(bytes) => {
-                let byte_count = bytes.len() as u64;
-                if let Some(recorder) = recorder.as_mut() {
-                    recorder.record_output(&bytes);
-                }
-                let vt_write_started_at = Instant::now();
-                terminal.vt_write(&bytes);
-                Ok(LiveTerminalCommandEffect::changed_with_vt_write(
-                    micros_since(vt_write_started_at, Instant::now()),
-                    byte_count,
-                ))
-            }
             LiveTerminalCommand::Resize(resize) => {
                 let cols = resize.cols.max(1);
                 let rows = resize.rows.max(1);
@@ -628,6 +649,66 @@ impl LiveTerminalRuntime {
             }),
         }
     }
+
+    fn handle_pty_output<'a>(
+        &mut self,
+        bytes: Vec<u8>,
+        terminal: &mut Terminal<'a, 'a>,
+        mut recorder: Option<&mut TerminalTraceRecorder>,
+    ) -> Result<LiveTerminalCommandEffect, TerminalError> {
+        let byte_count = bytes.len() as u64;
+        if let Some(recorder) = recorder.as_mut() {
+            recorder.record_output(&bytes);
+        }
+        let vt_write_started_at = Instant::now();
+        terminal.vt_write(&bytes);
+        Ok(LiveTerminalCommandEffect::changed_with_vt_write(
+            micros_since(vt_write_started_at, Instant::now()),
+            byte_count,
+        ))
+    }
+}
+
+struct TerminalRuntimeDrainedInputs {
+    commands: Vec<LiveTerminalCommand>,
+    pty_output: Option<Vec<u8>>,
+}
+
+fn drain_terminal_runtime_inputs(
+    command_rx: &mpsc::Receiver<LiveTerminalCommand>,
+    pty_output_rx: &mpsc::Receiver<Vec<u8>>,
+) -> TerminalRuntimeDrainedInputs {
+    let mut commands = Vec::new();
+    while commands.len() < MAX_CONTROL_COMMANDS_PER_TICK {
+        match command_rx.try_recv() {
+            Ok(command) => commands.push(command),
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+
+    let mut pty_output = Vec::new();
+    let mut output_chunks = 0usize;
+    while output_chunks < MAX_PTY_OUTPUT_CHUNKS_PER_TICK {
+        match pty_output_rx.try_recv() {
+            Ok(bytes) => {
+                output_chunks += 1;
+                pty_output.extend_from_slice(&bytes);
+                if pty_output.len() >= MAX_PTY_OUTPUT_BYTES_PER_TICK {
+                    break;
+                }
+            }
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+
+    TerminalRuntimeDrainedInputs {
+        commands,
+        pty_output: (!pty_output.is_empty()).then_some(pty_output),
+    }
+}
+
+fn drain_terminal_wakes(wake_rx: &mpsc::Receiver<LiveTerminalWake>) {
+    while wake_rx.try_recv().is_ok() {}
 }
 
 struct LiveTerminalCommandEffect {
@@ -958,7 +1039,6 @@ struct SnapshotExtractor<'alloc> {
     row_iter: RowIterator<'alloc>,
     cell_iter: CellIterator<'alloc>,
     previous_row_hashes: Vec<u64>,
-    previous_cursor_row: Option<u16>,
     previous_size: Option<(u16, u16)>,
 }
 
@@ -969,7 +1049,6 @@ impl<'alloc> SnapshotExtractor<'alloc> {
             row_iter: RowIterator::new().map_err(renderer_error)?,
             cell_iter: CellIterator::new().map_err(renderer_error)?,
             previous_row_hashes: Vec::new(),
-            previous_cursor_row: None,
             previous_size: None,
         })
     }
@@ -1093,15 +1172,6 @@ impl<'alloc> SnapshotExtractor<'alloc> {
                 .map_err(renderer_context("clear row dirty state"))?;
             row_index = row_index.saturating_add(1);
         }
-        let cursor_row = cursor.as_ref().and_then(|cursor| {
-            if cursor.visible && cursor.row < rows {
-                Some(cursor.row)
-            } else {
-                None
-            }
-        });
-        push_damage_row(&mut dirty_rows, self.previous_cursor_row, rows);
-        push_damage_row(&mut dirty_rows, cursor_row, rows);
         dirty_rows.sort_unstable();
         dirty_rows.dedup();
         snapshot
@@ -1112,7 +1182,6 @@ impl<'alloc> SnapshotExtractor<'alloc> {
         let dirty_cells = dirty_row_count.saturating_mul(u32::from(cols));
         let full_damage = dirty_row_count == u32::from(rows);
         self.previous_row_hashes = row_hashes;
-        self.previous_cursor_row = cursor_row;
         self.previous_size = Some((cols, rows));
 
         Ok(TerminalGridSnapshot {
@@ -1151,14 +1220,6 @@ fn terminal_row_hash(cells: &[TerminalCellSnapshot]) -> u64 {
     let mut hasher = DefaultHasher::new();
     cells.hash(&mut hasher);
     hasher.finish()
-}
-
-fn push_damage_row(rows: &mut Vec<u16>, row: Option<u16>, max_rows: u16) {
-    if let Some(row) = row
-        && row < max_rows
-    {
-        rows.push(row);
-    }
 }
 
 struct KeyInputEncoder<'alloc> {
@@ -1367,6 +1428,64 @@ mod tests {
     }
 
     #[test]
+    fn runtime_input_drain_prioritizes_control_and_batches_pty_output() {
+        let (command_tx, command_rx) = mpsc::channel();
+        let (pty_output_tx, pty_output_rx) = mpsc::channel();
+
+        pty_output_tx.send(b"abc".to_vec()).expect("first output");
+        pty_output_tx.send(b"def".to_vec()).expect("second output");
+        command_tx
+            .send(LiveTerminalCommand::Scroll(1))
+            .expect("control command");
+
+        let drained = drain_terminal_runtime_inputs(&command_rx, &pty_output_rx);
+
+        assert_eq!(drained.commands.len(), 1);
+        assert!(matches!(
+            drained.commands[0],
+            LiveTerminalCommand::Scroll(1)
+        ));
+        assert_eq!(drained.pty_output.as_deref(), Some(&b"abcdef"[..]));
+    }
+
+    #[test]
+    fn runtime_input_drain_caps_pty_output_work_per_tick() {
+        let (_command_tx, command_rx) = mpsc::channel();
+        let (pty_output_tx, pty_output_rx) = mpsc::channel();
+
+        for _ in 0..=MAX_PTY_OUTPUT_CHUNKS_PER_TICK {
+            pty_output_tx.send(vec![b'x']).expect("output chunk");
+        }
+
+        let drained = drain_terminal_runtime_inputs(&command_rx, &pty_output_rx);
+
+        assert!(drained.commands.is_empty());
+        assert_eq!(
+            drained.pty_output.as_ref().map(Vec::len),
+            Some(MAX_PTY_OUTPUT_CHUNKS_PER_TICK)
+        );
+        assert_eq!(
+            pty_output_rx.try_recv().expect("deferred chunk"),
+            vec![b'x']
+        );
+    }
+
+    #[test]
+    fn runtime_wake_drain_coalesces_wakeups() {
+        let (wake_tx, wake_rx) = mpsc::channel();
+        wake_tx
+            .send(LiveTerminalWake::PtyOutput)
+            .expect("output wake");
+        wake_tx
+            .send(LiveTerminalWake::Control)
+            .expect("control wake");
+
+        drain_terminal_wakes(&wake_rx);
+
+        assert!(wake_rx.try_recv().is_err());
+    }
+
+    #[test]
     fn picker_preview_ansi_fixture_reaches_snapshot() {
         let mut terminal = Terminal::new(TerminalOptions {
             cols: 120,
@@ -1439,6 +1558,36 @@ mod tests {
     }
 
     #[test]
+    fn key_encoder_emits_plain_space() {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 80,
+            rows: 24,
+            max_scrollback: 100,
+        })
+        .expect("terminal");
+        let mut input = KeyInputEncoder::new().expect("key encoder");
+
+        let bytes = input
+            .encode(
+                &mut terminal,
+                LiveTerminalKeyInput {
+                    key: LiveTerminalKey::Character(' '),
+                    text: Some(" ".to_owned()),
+                    unshifted: ' ',
+                    modifiers: LiveTerminalModifiers {
+                        shift: false,
+                        alt: false,
+                        control: false,
+                        platform: false,
+                    },
+                },
+            )
+            .expect("encoded space");
+
+        assert_eq!(bytes, b" ");
+    }
+
+    #[test]
     fn snapshot_reports_incremental_dirty_rows_after_clean_extract() {
         let mut terminal = Terminal::new(TerminalOptions {
             cols: 20,
@@ -1478,6 +1627,47 @@ mod tests {
             snapshot.timing.dirty_cells,
             snapshot.timing.dirty_rows * u32::from(snapshot.cols)
         );
+    }
+
+    #[test]
+    fn snapshot_does_not_dirty_rows_for_cursor_only_movement() {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 20,
+            rows: 4,
+            max_scrollback: 100,
+        })
+        .expect("terminal");
+        terminal
+            .resize(
+                20,
+                4,
+                u32::from(DEFAULT_CELL_WIDTH),
+                u32::from(DEFAULT_CELL_HEIGHT),
+            )
+            .expect("resize");
+        let mut renderer = SnapshotExtractor::new().expect("snapshot extractor");
+
+        terminal.vt_write(b"ab");
+        let _ = renderer
+            .snapshot("cursor-damage-test", &terminal)
+            .expect("initial snapshot");
+        renderer.mark_clean(&terminal).expect("mark clean");
+
+        terminal.vt_write(b"\x1b[1;1H");
+        let snapshot = renderer
+            .snapshot("cursor-damage-test", &terminal)
+            .expect("cursor-only snapshot");
+
+        assert_eq!(
+            snapshot
+                .cursor
+                .as_ref()
+                .map(|cursor| (cursor.col, cursor.row)),
+            Some((0, 0))
+        );
+        assert!(!snapshot.damage.full);
+        assert!(snapshot.damage.rows.is_empty());
+        assert_eq!(snapshot.damage.cells, 0);
     }
 
     #[test]

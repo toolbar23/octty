@@ -178,7 +178,7 @@ Output of this step:
 - [ ] Paint cost scales with dirty rows.
 - [ ] Holding a key in a shell repaints one row and cursor state, not the whole
    terminal.
-- [ ] Dense unchanged previews do not keep submitting thousands of glyph sprites.
+- [x] Dense unchanged previews do not keep submitting thousands of glyph sprites.
 
 This is the largest architectural gap between the current app and Ghostty.
 
@@ -214,15 +214,15 @@ rows unless cell contents actually changed.
 
 Cursor and selection should be rendered as overlays:
 
-- [ ] Cursor background/foreground override is a small overlay.
+- [x] Cursor background/foreground override is a small overlay.
 - [ ] Selection rectangles are merged overlay runs.
 - [ ] Cursor blink invalidates only the cursor cell.
-- [ ] Focus changes invalidate border and cursor style, not terminal contents.
+- [x] Focus changes invalidate border and cursor style, not terminal contents.
 
 Output of this step:
 
-- [ ] Blinking cursor does not repaint the full grid.
-- [ ] Focus changes do not rebuild terminal rows.
+- [x] Blinking cursor does not repaint the full grid.
+- [x] Focus changes do not rebuild terminal rows.
 - [ ] Selection rendering is independent from VT row cache.
 
 ## Step 7: Keep Scheduling Separate From Rendering
@@ -231,18 +231,18 @@ Terminal IO and UI rendering should have separate clocks.
 
 The app should:
 
-- [ ] Drain PTY output aggressively.
-- [ ] Update VT state immediately.
-- [ ] Coalesce UI wakeups to the display cadence.
-- [ ] Bypass coalescing for focused input when it affects latency.
-- [ ] Avoid creating runtimes or blocking handles in hot paths.
+- [x] Drain PTY output aggressively.
+- [x] Update VT state immediately.
+- [x] Coalesce UI wakeups to the display cadence.
+- [x] Bypass coalescing for focused input when it affects latency.
+- [x] Avoid creating runtimes or blocking handles in hot paths.
 
 Output of this step:
 
-- [ ] Key-to-PTY latency remains low.
+- [x] Key-to-PTY latency remains low.
 - [ ] UI paints at most once per frame.
-- [ ] Heavy output does not starve input.
-- [ ] Background terminals remain rate-limited.
+- [x] Heavy output does not starve input.
+- [x] Background terminals remain rate-limited.
 
 This scheduling layer matters, but it cannot compensate for a paint path that
 submits too many primitives.
@@ -261,14 +261,14 @@ Add these counters:
 - [x] Submitted glyph primitives.
 - [x] Submitted background primitives.
 - [x] Replayed row scenes or updated surface rows.
-- [ ] Paint submission time.
+- [x] Paint submission time.
 
 The nvim picker-preview testcase should fail or warn when:
 
 - [x] A one-row input update rebuilds most rows.
-- [ ] An unchanged dense preview submits all glyphs again.
+- [x] An unchanged dense preview submits all glyphs again.
 - [ ] Paint p95 exceeds the target budget.
-- [ ] Background primitive count grows with foreground syntax runs.
+- [x] Background primitive count grows with foreground syntax runs.
 
 The profile should make regressions obvious before the app feels bad.
 
@@ -282,9 +282,9 @@ The profile should make regressions obvious before the app feels bad.
 - [ ] Measure whether scene reuse is enough.
 - [ ] If not enough, build a dedicated batched terminal surface.
 - [ ] Move cursor and selection into overlays.
-- [ ] Keep focused input scheduling unthrottled while preserving frame
+- [x] Keep focused input scheduling unthrottled while preserving frame
       coalescing.
-- [ ] Use the picker-preview profile as the regression gate.
+- [x] Use the picker-preview profile as the regression gate.
 
 The important decision point is step 6. If GPUI can cheaply replay unchanged row
 scenes, Octty can stay mostly inside GPUI. If it cannot, the terminal needs a
