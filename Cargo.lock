@@ -4404,6 +4404,8 @@ dependencies = [
  "octty-jj",
  "octty-store",
  "octty-term",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

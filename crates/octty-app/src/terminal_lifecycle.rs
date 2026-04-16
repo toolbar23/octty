@@ -129,14 +129,7 @@ pub(crate) fn prepare_live_terminal_snapshot(
         anyhow::bail!("pane `{pane_id}` is not a terminal");
     };
     let (cols, rows) = default_terminal_grid_for_pane();
-    let spec = TerminalSessionSpec {
-        workspace_id: workspace.id.clone(),
-        pane_id: pane_id.to_owned(),
-        kind: payload.kind.clone(),
-        cwd: payload.cwd.clone(),
-        cols,
-        rows,
-    };
+    let spec = terminal_spec_for_payload(workspace, pane_id, payload, cols, rows);
     payload.session_id = Some(stable_tmux_session_name(&spec));
     payload.session_state = SessionState::Live;
     snapshot.updated_at = now_ms();
@@ -225,6 +218,9 @@ pub(crate) fn terminal_spec_for_payload(
         pane_id: pane_id.to_owned(),
         kind: payload.kind.clone(),
         cwd: payload.cwd.clone(),
+        command: payload.command.clone(),
+        command_parameters: payload.command_parameters.clone(),
+        on_exit: payload.on_exit,
         cols,
         rows,
     }

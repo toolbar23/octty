@@ -3,6 +3,7 @@ use super::*;
 impl OcttyApp {
     pub(crate) fn new(
         bootstrap: BootstrapState,
+        shell_types: Vec<ShellTypeConfig>,
         store: Arc<TursoStore>,
         focus_handle: FocusHandle,
         cx: &mut Context<Self>,
@@ -16,6 +17,7 @@ impl OcttyApp {
             workspaces: bootstrap.workspaces,
             active_workspace_index: bootstrap.active_workspace_index,
             active_snapshot: bootstrap.active_snapshot,
+            shell_types,
             store,
             focus_handle,
             pending_terminal_inputs: Vec::new(),

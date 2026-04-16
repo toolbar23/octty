@@ -20,6 +20,7 @@ pub(crate) struct OcttyApp {
     pub(crate) workspaces: Vec<WorkspaceSummary>,
     pub(crate) active_workspace_index: Option<usize>,
     pub(crate) active_snapshot: Option<WorkspaceSnapshot>,
+    pub(crate) shell_types: Vec<ShellTypeConfig>,
     pub(crate) store: Arc<TursoStore>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) pending_terminal_inputs: Vec<PendingTerminalInput>,

@@ -93,7 +93,7 @@ impl Render for OcttyApp {
                     .flex()
                     .flex_col()
                     .child(div().flex_1().overflow_y_scrollbar().child(workspace_list))
-                    .child(render_sidebar_footer(cx)),
+                    .child(render_sidebar_footer(&self.shell_types, cx)),
             )
             .child(
                 div()

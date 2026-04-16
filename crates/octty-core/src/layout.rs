@@ -5,11 +5,14 @@ use thiserror::Error;
 
 use crate::types::{
     BrowserPanePayload, DiffPanePayload, NotePanePayload, PanePayload, PaneState, PaneType,
-    SessionState, TerminalKind, TerminalPanePayload, WorkspaceColumn, WorkspaceSnapshot,
+    SessionState, TerminalExitBehavior, TerminalKind, TerminalPanePayload, WorkspaceColumn,
+    WorkspaceSnapshot,
 };
 
 const TERMINAL_COLUMN_WIDTH_PX: f64 = 720.0;
 const AGENT_TERMINAL_COLUMN_WIDTH_PX: f64 = 840.0;
+const TERMINAL_COLUMN_CHAR_WIDTH_PX: f64 = 8.0;
+const TERMINAL_COLUMN_CHROME_WIDTH_PX: f64 = 24.0;
 const NOTE_COLUMN_WIDTH_PX: f64 = 420.0;
 const BROWSER_COLUMN_WIDTH_PX: f64 = 960.0;
 const DIFF_COLUMN_WIDTH_PX: f64 = 900.0;
@@ -153,6 +156,13 @@ pub fn remove_pane(
 }
 
 fn default_column_width_px(pane: &PaneState) -> f64 {
+    if let PanePayload::Terminal(payload) = &pane.payload
+        && payload.default_width_chars > 0
+    {
+        return f64::from(payload.default_width_chars) * TERMINAL_COLUMN_CHAR_WIDTH_PX
+            + TERMINAL_COLUMN_CHROME_WIDTH_PX;
+    }
+
     match pane.pane_type {
         PaneType::Shell => TERMINAL_COLUMN_WIDTH_PX,
         PaneType::AgentShell => AGENT_TERMINAL_COLUMN_WIDTH_PX,
@@ -165,7 +175,11 @@ fn default_column_width_px(pane: &PaneState) -> f64 {
 fn terminal_payload(kind: TerminalKind, cwd: String) -> PanePayload {
     PanePayload::Terminal(TerminalPanePayload {
         command: terminal_command(&kind).to_owned(),
+        command_parameters: Vec::new(),
+        on_exit: TerminalExitBehavior::Close,
+        default_width_chars: crate::types::DEFAULT_TERMINAL_WIDTH_CHARS,
         kind,
+        shell_type: crate::types::default_shell_type_name(),
         session_id: None,
         session_state: SessionState::Stopped,
         cwd,
@@ -251,7 +265,7 @@ mod tests {
             .columns
             .get(&snapshot.center_column_ids[0])
             .expect("created column");
-        assert_eq!(column.width_px, TERMINAL_COLUMN_WIDTH_PX);
+        assert_eq!(column.width_px, 744.0);
     }
 
     #[test]

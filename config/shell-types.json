@@ -1,0 +1,31 @@
+{
+  "shell_types": [
+    {
+      "name": "plain",
+      "shortcut": "ctrl-shift-s",
+      "directory": "workspace",
+      "command": "",
+      "command_parameters": [],
+      "on_exit": "close",
+      "default_width_chars": 90
+    },
+    {
+      "name": "codex",
+      "shortcut": "ctrl-shift-a",
+      "directory": "workspace",
+      "command": "codex",
+      "command_parameters": ["--dangerously-bypass-approvals-and-sandbox"],
+      "on_exit": "restart-manually",
+      "default_width_chars": 120
+    },
+    {
+      "name": "jjui",
+      "shortcut": "ctrl-shift-j",
+      "directory": "workspace",
+      "command": "jjui",
+      "command_parameters": [],
+      "on_exit": "restart-manually",
+      "default_width_chars": 120
+    }
+  ]
+}

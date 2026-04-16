@@ -342,14 +342,61 @@ fn rename_dialog_only_intercepts_commit_keys() {
 }
 
 #[test]
-fn workspace_key_bindings_include_new_shell_shortcut() {
-    let key = gpui::Keystroke::parse("ctrl-s").expect("parse ctrl-s");
-    let binding = workspace_key_bindings()
-        .into_iter()
-        .find(|binding| binding.match_keystrokes(&[key.clone()]) == Some(false))
-        .expect("ctrl-s binding");
+fn default_shell_type_config_defines_initial_types() {
+    let config = default_shell_type_config().expect("default shell config");
+    let names = config
+        .shell_types
+        .iter()
+        .map(|shell_type| shell_type.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["plain", "codex", "jjui"]);
+    assert_eq!(config.shell_types[0].shortcut, "ctrl-shift-s");
+    assert_eq!(config.shell_types[1].shortcut, "ctrl-shift-a");
+    assert_eq!(config.shell_types[1].command, "codex");
+    assert_eq!(
+        config.shell_types[1].command_parameters,
+        vec!["--dangerously-bypass-approvals-and-sandbox".to_owned()]
+    );
+    assert_eq!(config.shell_types[2].shortcut, "ctrl-shift-j");
+}
 
-    assert_eq!(binding.action().name(), AddShellPane::name_for_type());
+#[test]
+fn shell_pane_state_copies_configured_metadata() {
+    let config = default_shell_type_config().expect("default shell config");
+    let codex = config
+        .shell_types
+        .iter()
+        .find(|shell_type| shell_type.name == "codex")
+        .expect("codex shell type");
+    let pane = shell_pane_state_for_config(codex, "/tmp/workspace");
+    let PanePayload::Terminal(payload) = pane.payload else {
+        panic!("expected terminal payload");
+    };
+
+    assert_eq!(pane.title, "codex");
+    assert_eq!(payload.kind, TerminalKind::Codex);
+    assert_eq!(payload.shell_type, "codex");
+    assert_eq!(payload.cwd, "/tmp/workspace");
+    assert_eq!(payload.command, "codex");
+    assert_eq!(payload.on_exit, TerminalExitBehavior::RestartManually);
+    assert_eq!(payload.default_width_chars, 120);
+}
+
+#[test]
+fn workspace_key_bindings_include_configured_shell_shortcuts() {
+    let config = default_shell_type_config().expect("default shell config");
+    let bindings = workspace_key_bindings(&config.shell_types);
+    let codex_key = gpui::Keystroke::parse("ctrl-shift-a").expect("parse ctrl-shift-a");
+    let codex_action = AddShellPane {
+        shell_type: "codex".to_owned(),
+    };
+
+    let binding = bindings
+        .into_iter()
+        .find(|binding| binding.match_keystrokes(&[codex_key.clone()]) == Some(false))
+        .expect("ctrl-shift-a binding");
+
+    assert!(binding.action().partial_eq(&codex_action));
 }
 
 #[test]
@@ -1677,7 +1724,7 @@ fn terminal_resize_rows_subtracts_visible_chrome_without_perf_overlay() {
     let requests = terminal_resize_requests(Some(&snapshot), 1_000.0);
 
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].2, 87);
+    assert_eq!(requests[0].2, 90);
     assert_eq!(requests[0].3, 54);
 }
 

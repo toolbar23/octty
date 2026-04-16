@@ -4,7 +4,7 @@ use std::{
     sync::OnceLock,
 };
 
-use octty_core::TerminalKind;
+use octty_core::TerminalExitBehavior;
 use tokio::process::Command;
 
 use crate::{TerminalError, TerminalSessionSpec, TmuxLaunch, TmuxSessionActivity};
@@ -24,7 +24,7 @@ static TMUX_CONFIG_SOURCED: OnceLock<()> = OnceLock::new();
 pub fn build_tmux_launch(spec: &TerminalSessionSpec) -> TmuxLaunch {
     let socket_name = tmux_socket_name();
     let session_name = stable_tmux_session_name(spec);
-    let command = terminal_command(&spec.kind);
+    let command = terminal_command(spec);
     let mut args = tmux_command_prefix_for_socket(&socket_name);
     args.extend([
         "new-session".to_owned(),
@@ -38,9 +38,10 @@ pub fn build_tmux_launch(spec: &TerminalSessionSpec) -> TmuxLaunch {
         "-c".to_owned(),
         spec.cwd.clone(),
     ]);
-    if !command.is_empty() {
-        args.push(command.to_owned());
+    if let Some(command) = command {
+        args.push(command);
     }
+    append_tmux_exit_behavior(&mut args, spec, &session_name);
 
     let mut clean_env = BTreeMap::new();
     clean_env.insert("TMUX".to_owned(), String::new());
@@ -57,7 +58,7 @@ pub fn build_tmux_launch(spec: &TerminalSessionSpec) -> TmuxLaunch {
 pub fn build_tmux_pty_launch(spec: &TerminalSessionSpec) -> TmuxLaunch {
     let socket_name = tmux_socket_name();
     let session_name = stable_tmux_session_name(spec);
-    let command = terminal_command(&spec.kind);
+    let command = terminal_command(spec);
     let mut args = tmux_command_prefix_for_socket(&socket_name);
     args.extend([
         "new-session".to_owned(),
@@ -67,9 +68,10 @@ pub fn build_tmux_pty_launch(spec: &TerminalSessionSpec) -> TmuxLaunch {
         "-c".to_owned(),
         spec.cwd.clone(),
     ]);
-    if !command.is_empty() {
-        args.push(command.to_owned());
+    if let Some(command) = command {
+        args.push(command);
     }
+    append_tmux_exit_behavior(&mut args, spec, &session_name);
 
     let mut clean_env = BTreeMap::new();
     clean_env.insert("TMUX".to_owned(), String::new());
@@ -296,14 +298,61 @@ fn parse_tmux_bool(value: &str) -> bool {
     value.trim() == "1"
 }
 
-pub fn terminal_command(kind: &TerminalKind) -> &'static str {
-    match kind {
-        TerminalKind::Shell => "",
-        TerminalKind::Codex => "codex",
-        TerminalKind::Pi => "pi",
-        TerminalKind::Nvim => "nvim",
-        TerminalKind::Jjui => "jjui",
+pub fn terminal_command(spec: &TerminalSessionSpec) -> Option<String> {
+    let command = spec.command.trim();
+    if command.is_empty() {
+        return None;
     }
+
+    let line = shell_command_line(command, &spec.command_parameters);
+    Some(match spec.on_exit {
+        TerminalExitBehavior::RestartAuto => restart_auto_shell_command(&line),
+        TerminalExitBehavior::RestartManually | TerminalExitBehavior::Close => line,
+    })
+}
+
+fn append_tmux_exit_behavior(
+    args: &mut Vec<String>,
+    spec: &TerminalSessionSpec,
+    session_name: &str,
+) {
+    if spec.command.trim().is_empty() || spec.on_exit != TerminalExitBehavior::RestartManually {
+        return;
+    }
+    args.extend([
+        ";".to_owned(),
+        "set-option".to_owned(),
+        "-t".to_owned(),
+        session_name.to_owned(),
+        "remain-on-exit".to_owned(),
+        "on".to_owned(),
+    ]);
+}
+
+fn shell_command_line(command: &str, args: &[String]) -> String {
+    std::iter::once(shell_quote(command))
+        .chain(args.iter().map(|arg| shell_quote(arg)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn restart_auto_shell_command(command_line: &str) -> String {
+    format!(
+        "while true; do {command_line}; status=$?; printf '\n[octty] exited with status %s; restarting in 1s...\n' \"$status\"; sleep 1; done"
+    )
+}
+
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_owned();
+    }
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '='))
+    {
+        return value.to_owned();
+    }
+    format!("'{}'", value.replace("'", "'\\''"))
 }
 
 pub fn tmux_socket_name() -> String {
@@ -399,6 +448,8 @@ pub fn stable_tmux_session_name(spec: &TerminalSessionSpec) -> String {
 
 #[cfg(test)]
 mod tests {
+    use octty_core::TerminalKind;
+
     use super::*;
 
     #[test]
@@ -408,6 +459,9 @@ mod tests {
             pane_id: "pane-1".to_owned(),
             kind: TerminalKind::Codex,
             cwd: "/tmp/repo".to_owned(),
+            command: "codex".to_owned(),
+            command_parameters: Vec::new(),
+            on_exit: TerminalExitBehavior::Close,
             cols: 120,
             rows: 40,
         };
@@ -436,6 +490,9 @@ mod tests {
             pane_id: "pane-1".to_owned(),
             kind: TerminalKind::Shell,
             cwd: "/tmp/repo".to_owned(),
+            command: "codex".to_owned(),
+            command_parameters: Vec::new(),
+            on_exit: TerminalExitBehavior::Close,
             cols: 80,
             rows: 24,
         };
@@ -453,12 +510,46 @@ mod tests {
     }
 
     #[test]
+    fn tmux_launch_uses_configured_command_parameters_and_exit_behavior() {
+        let spec = TerminalSessionSpec {
+            workspace_id: "workspace-1".to_owned(),
+            pane_id: "pane-1".to_owned(),
+            kind: TerminalKind::Codex,
+            cwd: "/tmp/repo".to_owned(),
+            command: "codex".to_owned(),
+            command_parameters: vec!["--dangerously-bypass-approvals-and-sandbox".to_owned()],
+            on_exit: TerminalExitBehavior::RestartManually,
+            cols: 120,
+            rows: 40,
+        };
+
+        let launch = build_tmux_launch(&spec);
+
+        assert!(
+            launch
+                .args
+                .contains(&"codex --dangerously-bypass-approvals-and-sandbox".to_owned())
+        );
+        assert!(launch.args.windows(6).any(|window| {
+            window[0] == ";"
+                && window[1] == "set-option"
+                && window[2] == "-t"
+                && window[3] == launch.session_name.as_str()
+                && window[4] == "remain-on-exit"
+                && window[5] == "on"
+        }));
+    }
+
+    #[test]
     fn tmux_session_names_are_stable_and_target_safe() {
         let spec = TerminalSessionSpec {
             workspace_id: "workspace:1".to_owned(),
             pane_id: "pane:1".to_owned(),
             kind: TerminalKind::Shell,
             cwd: "/tmp/repo".to_owned(),
+            command: "codex".to_owned(),
+            command_parameters: Vec::new(),
+            on_exit: TerminalExitBehavior::Close,
             cols: 80,
             rows: 24,
         };

@@ -14,7 +14,9 @@ pub(crate) struct NavigateWorkspace {
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]
-pub(crate) struct AddShellPane;
+pub(crate) struct AddShellPane {
+    pub(crate) shell_type: String,
+}
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = octty, no_json)]

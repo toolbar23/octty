@@ -260,7 +260,36 @@ pub(crate) fn render_workspace_sidebar(
     list
 }
 
-pub(crate) fn render_sidebar_footer(cx: &mut Context<OcttyApp>) -> gpui::Div {
+pub(crate) fn render_sidebar_footer(
+    shell_types: &[ShellTypeConfig],
+    cx: &mut Context<OcttyApp>,
+) -> gpui::Div {
+    let mut pane_buttons = div().grid().grid_cols(3).gap_2();
+    for shell_type in shell_types {
+        let shell_type_name = shell_type.name.clone();
+        pane_buttons = pane_buttons.child(
+            sidebar_pane_button(IconName::SquareTerminal, shell_type.name.clone()).on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.add_shell_type_pane(&shell_type_name, cx);
+                }),
+            ),
+        );
+    }
+    pane_buttons = pane_buttons
+        .child(sidebar_pane_button(IconName::Replace, "Diff").on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                this.add_pane(PaneType::Diff, cx);
+            }),
+        ))
+        .child(sidebar_pane_button(IconName::File, "Note").on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                this.add_pane(PaneType::Note, cx);
+            }),
+        ));
+
     div()
         .border_t_1()
         .border_color(rgb(0x4d545f))
@@ -274,32 +303,7 @@ pub(crate) fn render_sidebar_footer(cx: &mut Context<OcttyApp>) -> gpui::Div {
                 this.add_project_root(&AddProjectRoot, window, cx);
             }),
         ))
-        .child(
-            div()
-                .grid()
-                .grid_cols(3)
-                .gap_2()
-                .child(
-                    sidebar_pane_button(IconName::SquareTerminal, "Shell").on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.add_pane(PaneType::Shell, cx);
-                        }),
-                    ),
-                )
-                .child(sidebar_pane_button(IconName::Replace, "Diff").on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        this.add_pane(PaneType::Diff, cx);
-                    }),
-                ))
-                .child(sidebar_pane_button(IconName::File, "Note").on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        this.add_pane(PaneType::Note, cx);
-                    }),
-                )),
-        )
+        .child(pane_buttons)
 }
 
 pub(crate) fn sidebar_add_repository_button() -> gpui::Div {
@@ -316,7 +320,8 @@ pub(crate) fn sidebar_add_repository_button() -> gpui::Div {
         )
 }
 
-pub(crate) fn sidebar_pane_button(icon: IconName, label: &'static str) -> gpui::Div {
+pub(crate) fn sidebar_pane_button(icon: IconName, label: impl Into<SharedString>) -> gpui::Div {
+    let label = label.into();
     sidebar_control_button()
         .justify_center()
         .gap_1()

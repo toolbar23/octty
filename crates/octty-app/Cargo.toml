@@ -19,4 +19,6 @@ octty-core.workspace = true
 octty-jj.workspace = true
 octty-store.workspace = true
 octty-term = { workspace = true, features = ["ghostty-vt"] }
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true

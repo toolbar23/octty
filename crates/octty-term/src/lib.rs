@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use octty_core::TerminalKind;
+use octty_core::{TerminalExitBehavior, TerminalKind};
 use thiserror::Error;
 
 #[cfg(feature = "ghostty-vt")]
@@ -18,6 +18,9 @@ pub struct TerminalSessionSpec {
     pub pane_id: String,
     pub kind: TerminalKind,
     pub cwd: String,
+    pub command: String,
+    pub command_parameters: Vec<String>,
+    pub on_exit: TerminalExitBehavior,
     pub cols: u16,
     pub rows: u16,
 }

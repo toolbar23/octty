@@ -333,6 +333,9 @@ pub(crate) async fn reconcile_pane_activity(
                 pane_id: pane_id.clone(),
                 kind: payload.kind,
                 cwd: payload.cwd,
+                command: payload.command,
+                command_parameters: payload.command_parameters,
+                on_exit: payload.on_exit,
                 cols: 120,
                 rows: 40,
             };

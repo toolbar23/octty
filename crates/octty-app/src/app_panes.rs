@@ -3,11 +3,11 @@ use super::*;
 impl OcttyApp {
     pub(crate) fn add_shell_pane(
         &mut self,
-        _: &AddShellPane,
+        action: &AddShellPane,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.add_pane(PaneType::Shell, cx);
+        self.add_shell_type_pane(&action.shell_type, cx);
     }
 
     pub(crate) fn add_diff_pane(
@@ -316,6 +316,19 @@ impl OcttyApp {
         cx.notify();
     }
 
+    pub(crate) fn add_shell_type_pane(&mut self, shell_type_name: &str, cx: &mut Context<Self>) {
+        let Some(shell_type) = self
+            .shell_types
+            .iter()
+            .find(|candidate| candidate.name == shell_type_name)
+            .cloned()
+        else {
+            self.show_error(format!("Unknown shell type {shell_type_name}."), cx);
+            return;
+        };
+        self.add_terminal_pane(shell_pane_state_for_config, shell_type, cx);
+    }
+
     pub(crate) fn add_pane(&mut self, pane_type: PaneType, cx: &mut Context<Self>) {
         let Some(workspace) = self.active_workspace().cloned() else {
             self.show_error("No active workspace.", cx);
@@ -327,6 +340,34 @@ impl OcttyApp {
             .take()
             .unwrap_or_else(|| create_default_snapshot(workspace.id.clone()));
         let pane = create_pane_state(pane_type, workspace.workspace_path.clone(), None);
+        self.add_pane_state(workspace, snapshot, pane, cx);
+    }
+
+    fn add_terminal_pane(
+        &mut self,
+        create_pane: impl FnOnce(&ShellTypeConfig, &str) -> PaneState,
+        shell_type: ShellTypeConfig,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.active_workspace().cloned() else {
+            self.show_error("No active workspace.", cx);
+            return;
+        };
+        let snapshot = self
+            .active_snapshot
+            .take()
+            .unwrap_or_else(|| create_default_snapshot(workspace.id.clone()));
+        let pane = create_pane(&shell_type, &workspace.workspace_path);
+        self.add_pane_state(workspace, snapshot, pane, cx);
+    }
+
+    fn add_pane_state(
+        &mut self,
+        workspace: WorkspaceSummary,
+        snapshot: WorkspaceSnapshot,
+        pane: PaneState,
+        cx: &mut Context<Self>,
+    ) {
         let pane_id = pane.id.clone();
         let snapshot = add_pane(snapshot, pane);
         let is_terminal = matches!(

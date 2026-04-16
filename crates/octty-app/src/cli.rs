@@ -77,11 +77,16 @@ pub fn run() {
         )
     });
 
+    let shell_types = load_or_create_shell_type_config()
+        .or_else(|_| default_shell_type_config())
+        .map(|config| config.shell_types)
+        .expect("load default shell type config");
+
     Application::new().run(move |cx: &mut App| {
         gpui_component::init(cx);
         gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
         gpui_tokio::init_from_runtime(cx, runtime.clone());
-        cx.bind_keys(workspace_key_bindings());
+        cx.bind_keys(workspace_key_bindings(&shell_types));
         set_workspace_menu(cx, &bootstrap.workspaces);
         let store = store.clone();
 
@@ -98,7 +103,9 @@ pub fn run() {
             |window, cx| {
                 let focus_handle = cx.focus_handle();
                 focus_handle.focus(window);
-                let view = cx.new(|cx| OcttyApp::new(bootstrap, store, focus_handle, cx));
+                let shell_types = shell_types.clone();
+                let view =
+                    cx.new(|cx| OcttyApp::new(bootstrap, shell_types, store, focus_handle, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             },
         )
@@ -196,6 +203,9 @@ pub(crate) async fn live_terminal_check() -> anyhow::Result<String> {
         pane_id,
         kind: octty_core::TerminalKind::Shell,
         cwd: std::env::current_dir()?.to_string_lossy().to_string(),
+        command: String::new(),
+        command_parameters: Vec::new(),
+        on_exit: TerminalExitBehavior::Close,
         cols: 80,
         rows: 24,
     };

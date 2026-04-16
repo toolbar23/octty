@@ -22,6 +22,30 @@ pub enum TerminalKind {
     Jjui,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TerminalExitBehavior {
+    RestartAuto,
+    RestartManually,
+    Close,
+}
+
+impl Default for TerminalExitBehavior {
+    fn default() -> Self {
+        Self::Close
+    }
+}
+
+pub const DEFAULT_TERMINAL_WIDTH_CHARS: u16 = 90;
+
+pub fn default_shell_type_name() -> String {
+    "plain".to_owned()
+}
+
+pub fn default_terminal_width_chars() -> u16 {
+    DEFAULT_TERMINAL_WIDTH_CHARS
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PanePlacement {
@@ -306,10 +330,18 @@ pub struct NoteRecord {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalPanePayload {
     pub kind: TerminalKind,
+    #[serde(default = "default_shell_type_name")]
+    pub shell_type: String,
     pub session_id: Option<String>,
     pub session_state: SessionState,
     pub cwd: String,
     pub command: String,
+    #[serde(default)]
+    pub command_parameters: Vec<String>,
+    #[serde(default)]
+    pub on_exit: TerminalExitBehavior,
+    #[serde(default = "default_terminal_width_chars")]
+    pub default_width_chars: u16,
     pub exit_code: Option<i64>,
     pub auto_start: bool,
     pub restored_buffer: String,

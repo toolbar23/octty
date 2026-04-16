@@ -23,8 +23,8 @@ pub(crate) fn workspace_menu_items(workspaces: &[WorkspaceSummary]) -> Vec<MenuI
         .collect()
 }
 
-pub(crate) fn workspace_key_bindings() -> Vec<KeyBinding> {
-    vec![
+pub(crate) fn workspace_key_bindings(shell_types: &[ShellTypeConfig]) -> Vec<KeyBinding> {
+    let mut bindings = vec![
         KeyBinding::new("ctrl-shift-1", OpenWorkspaceShortcut { index: 0 }, None),
         KeyBinding::new("ctrl-shift-2", OpenWorkspaceShortcut { index: 1 }, None),
         KeyBinding::new("ctrl-shift-3", OpenWorkspaceShortcut { index: 2 }, None),
@@ -41,7 +41,6 @@ pub(crate) fn workspace_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("super-c", CopyTerminalSelection, None),
         KeyBinding::new("super-x", CutTerminalSelection, None),
         KeyBinding::new("cmd-v", PasteTerminalClipboard, None),
-        KeyBinding::new("ctrl-s", AddShellPane, None),
         KeyBinding::new("tab", ForwardTerminalTab { shift: false }, Some("OcttyApp")),
         KeyBinding::new(
             "shift-tab",
@@ -95,5 +94,19 @@ pub(crate) fn workspace_key_bindings() -> Vec<KeyBinding> {
             },
             None,
         ),
-    ]
+    ];
+
+    bindings.extend(shell_types.iter().filter_map(|shell_type| {
+        let shortcut = shell_type.shortcut.trim();
+        (!shortcut.is_empty()).then(|| {
+            KeyBinding::new(
+                shortcut,
+                AddShellPane {
+                    shell_type: shell_type.name.clone(),
+                },
+                None,
+            )
+        })
+    }));
+    bindings
 }

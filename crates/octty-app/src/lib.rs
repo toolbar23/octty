@@ -29,10 +29,10 @@ use gpui_component::{
 };
 use octty_core::{
     ActivityState, PaneActivity, PanePayload, PaneState, PaneType, ProjectRootRecord,
-    SessionSnapshot, SessionState, TerminalPanePayload, WorkspaceBookmarkRelation,
-    WorkspaceSnapshot, WorkspaceState, WorkspaceStatus, WorkspaceSummary, add_pane,
-    create_default_snapshot, create_pane_state, derive_workspace_activity,
-    has_recorded_workspace_path,
+    SessionSnapshot, SessionState, TerminalExitBehavior, TerminalKind, TerminalPanePayload,
+    WorkspaceBookmarkRelation, WorkspaceSnapshot, WorkspaceState, WorkspaceStatus,
+    WorkspaceSummary, add_pane, create_default_snapshot, create_pane_state,
+    derive_workspace_activity, has_recorded_workspace_path,
     layout::{LAYOUT_VERSION, now_ms},
     remove_pane, screen_fingerprint, workspace_shortcut_targets,
 };
@@ -69,6 +69,7 @@ mod gpui_tokio;
 mod input;
 mod menu;
 mod metrics;
+mod shell_config;
 mod sidebar;
 mod taskspace;
 mod terminal_lifecycle;
@@ -90,6 +91,7 @@ pub(crate) use desktop_notifications::*;
 pub(crate) use input::*;
 pub(crate) use menu::{set_workspace_menu, workspace_key_bindings};
 pub(crate) use metrics::*;
+pub(crate) use shell_config::*;
 pub(crate) use sidebar::*;
 pub(crate) use taskspace::*;
 pub(crate) use terminal_lifecycle::*;
