@@ -51,7 +51,12 @@ pub(crate) async fn load_bootstrap_from_store(
                     }
                     workspace.updated_at = now;
                     if has_recorded_workspace_path(&workspace.workspace_path) {
-                        match read_workspace_status(&workspace.workspace_path).await {
+                        match read_workspace_status(
+                            &workspace.workspace_path,
+                            &workspace.workspace_name,
+                        )
+                        .await
+                        {
                             Ok(status) => {
                                 workspace.status =
                                     merge_jj_workspace_status(&workspace.status, status);

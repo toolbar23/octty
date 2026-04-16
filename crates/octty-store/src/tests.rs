@@ -1,7 +1,7 @@
 use octty_core::{
-    PaneActivity, PaneType, ProjectRootRecord, SessionSnapshot, SessionState, TerminalKind,
-    WorkspaceBookmarkRelation, WorkspaceState, WorkspaceStatus, WorkspaceSummary, add_pane,
-    create_default_snapshot, create_pane_state,
+    BaselineRelation, BaselineRelationTarget, PaneActivity, PaneType, ProjectRootRecord,
+    SessionSnapshot, SessionState, TerminalKind, WorkspaceBookmarkRelation, WorkspaceState,
+    WorkspaceStatus, WorkspaceSummary, add_pane, create_default_snapshot, create_pane_state,
 };
 
 use crate::{StoreError, TursoStore};
@@ -60,16 +60,20 @@ async fn round_trips_workspace_summaries() {
         status: WorkspaceStatus {
             workspace_state: WorkspaceState::Draft,
             has_working_copy_changes: true,
-            effective_added_lines: 7,
-            effective_removed_lines: 2,
             has_conflicts: true,
-            unpublished_change_count: 3,
-            unpublished_added_lines: 11,
-            unpublished_removed_lines: 4,
-            not_in_default_available: true,
-            not_in_default_change_count: 2,
-            not_in_default_added_lines: 9,
-            not_in_default_removed_lines: 1,
+            local_relation: Some(BaselineRelation {
+                target_name: "Default".to_owned(),
+                detail_name: Some("default@".to_owned()),
+                ahead_count: 2,
+                behind_count: 1,
+            }),
+            remote_relation: Some(BaselineRelation {
+                target_name: "Remote".to_owned(),
+                detail_name: Some("main@origin".to_owned()),
+                ahead_count: 3,
+                behind_count: 0,
+            }),
+            primary_relation: BaselineRelationTarget::Local,
             bookmarks: vec!["main".to_owned()],
             bookmark_relation: WorkspaceBookmarkRelation::Exact,
             ..WorkspaceStatus::default()

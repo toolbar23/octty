@@ -457,7 +457,8 @@ pub(crate) fn render_sidebar_workspace_row(
     cx: &mut Context<OcttyApp>,
 ) -> impl IntoElement {
     let bookmark_label = workspace_bookmark_label(workspace);
-    let has_meta_row = bookmark_label.is_some() || shortcut_label.is_some();
+    let has_conflicts = workspace.status.has_conflicts;
+    let has_meta_row = bookmark_label.is_some() || shortcut_label.is_some() || has_conflicts;
     let missing_path = !has_recorded_workspace_path(&workspace.workspace_path);
     let has_unread_notes = workspace.status.unread_notes > 0;
 
@@ -472,6 +473,14 @@ pub(crate) fn render_sidebar_workspace_row(
     }
     if let Some(shortcut_label) = shortcut_label {
         meta_row = meta_row.child(format!("<{shortcut_label}>"));
+    }
+    if has_conflicts {
+        meta_row = meta_row.child(workspace_status_tag(
+            Tag::danger(),
+            "Conflict",
+            false,
+            Some("This workspace has unresolved jj conflicts."),
+        ));
     }
 
     let mut badge_row = div().mt_1().flex().gap_1();
@@ -635,65 +644,150 @@ fn workspace_activity_spinner_canvas(phase: f32, color: Hsla) -> impl IntoElemen
     .size_full()
 }
 
-pub(crate) fn render_workspace_status_tags(status: &WorkspaceStatus) -> Vec<Tag> {
+pub(crate) fn render_workspace_status_tags(status: &WorkspaceStatus) -> Vec<AnyElement> {
     if status.workspace_state == WorkspaceState::Unknown {
         return vec![workspace_status_tag(
             Tag::secondary(),
             "Unknown",
             status.has_working_copy_changes,
+            Some("Workspace status is unavailable."),
         )];
     }
 
     let mut tags = Vec::new();
-    if status.has_conflicts {
+    let dirty_on_relation = status.has_working_copy_changes && tags.is_empty();
+    match status.primary_relation {
+        BaselineRelationTarget::Local => {
+            if let Some(relation) = &status.local_relation {
+                tags.push(relation_status_tag(relation, dirty_on_relation));
+            }
+        }
+        BaselineRelationTarget::Remote => {
+            if let Some(relation) = &status.remote_relation {
+                tags.push(relation_status_tag(relation, dirty_on_relation));
+            }
+        }
+        BaselineRelationTarget::None => {}
+    };
+
+    if status.primary_relation != BaselineRelationTarget::Local
+        && let Some(relation) = &status.local_relation
+        && relation_has_changes(relation)
+    {
+        tags.push(relation_status_tag(relation, false));
+    }
+    if status.primary_relation != BaselineRelationTarget::Remote
+        && let Some(relation) = &status.remote_relation
+        && relation_has_changes(relation)
+    {
+        tags.push(relation_status_tag(relation, false));
+    }
+
+    if tags.is_empty() {
         tags.push(workspace_status_tag(
-            Tag::danger(),
-            "Conflict",
+            Tag::secondary(),
+            "Unknown",
             status.has_working_copy_changes,
-        ));
-    }
-
-    if status.unpublished_change_count == 0 {
-        tags.push(workspace_status_tag(
-            Tag::success(),
-            "Published",
-            status.has_working_copy_changes && tags.is_empty(),
-        ));
-    } else {
-        tags.push(workspace_status_tag(
-            Tag::info(),
-            format_diff_stat(
-                status.unpublished_added_lines,
-                status.unpublished_removed_lines,
-            ),
-            status.has_working_copy_changes && tags.is_empty(),
-        ));
-    }
-
-    if status.not_in_default_available && status.not_in_default_change_count > 0 {
-        tags.push(workspace_status_tag(
-            Tag::warning(),
-            format_diff_stat(
-                status.not_in_default_added_lines,
-                status.not_in_default_removed_lines,
-            ),
-            false,
+            Some("Workspace status is unavailable."),
         ));
     }
 
     tags
 }
 
-fn workspace_status_tag(tag: Tag, label: impl Into<String>, changed: bool) -> Tag {
+fn relation_status_tag(relation: &BaselineRelation, changed: bool) -> AnyElement {
+    let tag = match relation.state() {
+        BaselineRelationState::Same => Tag::success(),
+        BaselineRelationState::Ahead => Tag::info(),
+        BaselineRelationState::Behind => Tag::warning(),
+        BaselineRelationState::Diverged => Tag::warning(),
+    };
+    workspace_status_tag(
+        tag,
+        format_relation(relation),
+        changed,
+        Some(format_relation_tooltip(relation)),
+    )
+}
+
+fn relation_has_changes(relation: &BaselineRelation) -> bool {
+    relation.ahead_count > 0 || relation.behind_count > 0
+}
+
+fn workspace_status_tag(
+    tag: Tag,
+    label: impl Into<String>,
+    changed: bool,
+    tooltip: Option<impl Into<String>>,
+) -> AnyElement {
     let mut label = label.into();
     if changed {
         label.push('*');
     }
-    tag.outline().xsmall().child(label)
+    let element_id_label = label.clone();
+    let tag = tag
+        .xsmall()
+        .px_1()
+        .py_0()
+        .text_size(px(10.))
+        .text_color(rgb(0xffffff))
+        .child(label);
+
+    if let Some(tooltip) = tooltip {
+        let tooltip = tooltip.into();
+        div()
+            .id(SharedString::from(element_id_label))
+            .child(tag)
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .into_any_element()
+    } else {
+        tag.into_any_element()
+    }
 }
 
-fn format_diff_stat(added_lines: i64, removed_lines: i64) -> String {
-    format!("+{added_lines}/-{removed_lines}")
+fn format_relation(relation: &BaselineRelation) -> String {
+    let target = relation.target_name.as_str();
+    match (relation.ahead_count, relation.behind_count) {
+        (0, 0) => format!("{target} 0"),
+        (ahead, 0) => format!("{target} +{ahead}"),
+        (0, behind) => format!("{target} -{behind}"),
+        (ahead, behind) => format!("{target} +{ahead}/-{behind}"),
+    }
+}
+
+fn format_relation_tooltip(relation: &BaselineRelation) -> String {
+    let target = relation
+        .detail_name
+        .as_deref()
+        .unwrap_or(relation.target_name.as_str());
+    let ahead = relation.ahead_count;
+    let behind = relation.behind_count;
+    match (ahead, behind) {
+        (0, 0) => {
+            format!("No non-empty commit difference between this workspace and {target}.")
+        }
+        (ahead, 0) => format!(
+            "+{ahead}: {} in this workspace and not in {target}.",
+            commit_word(ahead)
+        ),
+        (0, behind) => format!(
+            "-{behind}: {} in {target} and not in this workspace.",
+            commit_word(behind)
+        ),
+        (ahead, behind) => format!(
+            "+{ahead}: {} in this workspace and not in {target}. -{behind}: {} in {target} and not in this workspace.",
+            commit_word(ahead),
+            commit_word(behind),
+        ),
+    }
+}
+
+fn commit_word(count: i64) -> &'static str {
+    if count == 1 {
+        "commit is"
+    } else {
+        "commits are"
+    }
 }
 
 pub(crate) fn workspace_bookmark_label(workspace: &WorkspaceSummary) -> Option<String> {

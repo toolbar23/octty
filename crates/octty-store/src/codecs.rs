@@ -1,5 +1,6 @@
 use octty_core::{
-    AgentAttentionState, SessionState, TerminalKind, WorkspaceBookmarkRelation, WorkspaceState,
+    AgentAttentionState, BaselineRelationTarget, SessionState, TerminalKind,
+    WorkspaceBookmarkRelation, WorkspaceState,
 };
 use turso::Value;
 
@@ -88,6 +89,22 @@ pub(crate) fn parse_bookmark_relation(value: &str) -> WorkspaceBookmarkRelation 
         "exact" => WorkspaceBookmarkRelation::Exact,
         "above" => WorkspaceBookmarkRelation::Above,
         _ => WorkspaceBookmarkRelation::None,
+    }
+}
+
+pub(crate) fn primary_relation_to_str(value: &BaselineRelationTarget) -> &'static str {
+    match value {
+        BaselineRelationTarget::Local => "local",
+        BaselineRelationTarget::Remote => "remote",
+        BaselineRelationTarget::None => "none",
+    }
+}
+
+pub(crate) fn parse_primary_relation(value: &str) -> BaselineRelationTarget {
+    match value {
+        "local" => BaselineRelationTarget::Local,
+        "remote" => BaselineRelationTarget::Remote,
+        _ => BaselineRelationTarget::None,
     }
 }
 
