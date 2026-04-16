@@ -1,7 +1,9 @@
 use std::{collections::BTreeMap, path::PathBuf, process::Stdio, time::Duration};
 
 use bincode::Options;
-use octty_core::{TerminalExitBehavior, TerminalKind};
+use octty_core::{
+    InnerSessionHandler, TerminalExitBehavior, TerminalKind, codex_inner_session_prompt,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -323,6 +325,10 @@ pub fn terminal_command_args(spec: &TerminalSessionSpec) -> Vec<String> {
         return Vec::new();
     }
 
+    if spec.inner_session_handler == InnerSessionHandler::Codex {
+        return codex_terminal_command_args(command, spec);
+    }
+
     let line = shell_command_line(command, &spec.command_parameters);
     match spec.on_exit {
         TerminalExitBehavior::RestartAuto => shell_argv(restart_auto_shell_command(&line)),
@@ -331,6 +337,23 @@ pub fn terminal_command_args(spec: &TerminalSessionSpec) -> Vec<String> {
             .chain(spec.command_parameters.iter().cloned())
             .collect(),
     }
+}
+
+fn codex_terminal_command_args(command: &str, spec: &TerminalSessionSpec) -> Vec<String> {
+    let mut args = std::iter::once(command.to_owned())
+        .chain(spec.command_parameters.iter().cloned())
+        .collect::<Vec<_>>();
+    if let Some(inner_session_id) = spec
+        .inner_session_id
+        .as_deref()
+        .filter(|inner_session_id| !inner_session_id.trim().is_empty())
+    {
+        args.push("resume".to_owned());
+        args.push(inner_session_id.to_owned());
+    } else {
+        args.push(codex_inner_session_prompt(&spec.pane_id));
+    }
+    args
 }
 
 pub fn retach_startup_command(spec: &TerminalSessionSpec) -> Option<Vec<u8>> {
@@ -764,6 +787,8 @@ mod tests {
             cwd: "/tmp/repo".to_owned(),
             command: "codex".to_owned(),
             command_parameters: Vec::new(),
+            inner_session_handler: InnerSessionHandler::Codex,
+            inner_session_id: None,
             on_exit: TerminalExitBehavior::Close,
             cols: 120,
             rows: 40,
@@ -786,6 +811,7 @@ mod tests {
                 "/tmp/repo".to_owned(),
                 "--".to_owned(),
                 "codex".to_owned(),
+                codex_inner_session_prompt("pane-1"),
             ]
         );
         assert!(!launch.session_name.contains(':'));
@@ -800,6 +826,8 @@ mod tests {
             cwd: "/tmp/repo".to_owned(),
             command: String::new(),
             command_parameters: Vec::new(),
+            inner_session_handler: InnerSessionHandler::None,
+            inner_session_id: None,
             on_exit: TerminalExitBehavior::Close,
             cols: 80,
             rows: 24,
@@ -829,6 +857,8 @@ mod tests {
             cwd: "/tmp/repo with ' quote".to_owned(),
             command: String::new(),
             command_parameters: Vec::new(),
+            inner_session_handler: InnerSessionHandler::None,
+            inner_session_id: None,
             on_exit: TerminalExitBehavior::Close,
             cols: 80,
             rows: 24,
@@ -847,6 +877,8 @@ mod tests {
             cwd: "/tmp/repo".to_owned(),
             command: "codex".to_owned(),
             command_parameters: vec!["resume".to_owned(), "two words".to_owned()],
+            inner_session_handler: InnerSessionHandler::None,
+            inner_session_id: None,
             on_exit: TerminalExitBehavior::Close,
             cols: 80,
             rows: 24,
@@ -863,6 +895,33 @@ mod tests {
     }
 
     #[test]
+    fn codex_inner_session_handler_resumes_known_session() {
+        let spec = TerminalSessionSpec {
+            workspace_id: "workspace-1".to_owned(),
+            pane_id: "pane-1".to_owned(),
+            kind: TerminalKind::Codex,
+            cwd: "/tmp/repo".to_owned(),
+            command: "codex".to_owned(),
+            command_parameters: vec!["--dangerously-bypass-approvals-and-sandbox".to_owned()],
+            inner_session_handler: InnerSessionHandler::Codex,
+            inner_session_id: Some("019d96c4-8591-7353-9119-26e630293b23".to_owned()),
+            on_exit: TerminalExitBehavior::Close,
+            cols: 80,
+            rows: 24,
+        };
+
+        assert_eq!(
+            terminal_command_args(&spec),
+            vec![
+                "codex".to_owned(),
+                "--dangerously-bypass-approvals-and-sandbox".to_owned(),
+                "resume".to_owned(),
+                "019d96c4-8591-7353-9119-26e630293b23".to_owned()
+            ]
+        );
+    }
+
+    #[test]
     fn restart_manually_wraps_command_in_shell() {
         let spec = TerminalSessionSpec {
             workspace_id: "workspace-1".to_owned(),
@@ -874,6 +933,8 @@ mod tests {
                 "--dangerously-bypass-approvals-and-sandbox".to_owned(),
                 "two words".to_owned(),
             ],
+            inner_session_handler: InnerSessionHandler::None,
+            inner_session_id: None,
             on_exit: TerminalExitBehavior::RestartManually,
             cols: 80,
             rows: 24,

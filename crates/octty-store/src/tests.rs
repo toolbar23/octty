@@ -120,6 +120,7 @@ async fn renames_workspace_records_and_rekeys_saved_state() {
     store
         .upsert_session_state(&SessionSnapshot {
             id: "tmux-session-1".to_owned(),
+            inner_session_id: Some("codex-session-1".to_owned()),
             workspace_id: "workspace-1".to_owned(),
             pane_id: "pane-1".to_owned(),
             kind: TerminalKind::Shell,
@@ -180,6 +181,7 @@ async fn round_trips_session_state() {
     let store = TursoStore::open_memory().await.unwrap();
     let session = SessionSnapshot {
         id: "tmux-session-1".to_owned(),
+        inner_session_id: Some("codex-session-1".to_owned()),
         workspace_id: "workspace-1".to_owned(),
         pane_id: "pane-1".to_owned(),
         kind: TerminalKind::Shell,

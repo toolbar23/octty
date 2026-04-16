@@ -16,6 +16,8 @@ pub(crate) struct ShellTypeConfig {
     pub(crate) command: String,
     #[serde(default, alias = "commandParameters", alias = "command-parameters")]
     pub(crate) command_parameters: Vec<String>,
+    #[serde(default, alias = "sessionHandler", alias = "session-handler")]
+    pub(crate) session_handler: InnerSessionHandler,
     #[serde(rename = "on_exit", alias = "on-exit", alias = "on exit")]
     pub(crate) on_exit: TerminalExitBehavior,
     #[serde(alias = "defaultWidthChars", alias = "default-width-chars")]
@@ -82,6 +84,10 @@ pub(crate) fn normalize_custom_shell_exit_behavior(config: &mut ShellTypeConfigF
     changed
 }
 
+pub(crate) fn shell_type_session_handler(shell_type: &ShellTypeConfig) -> InnerSessionHandler {
+    shell_type.session_handler
+}
+
 pub(crate) fn default_shell_type_config_path() -> PathBuf {
     env_path("OCTTY_RS_SHELL_TYPES_PATH")
         .or_else(|| env_path("OCTTY_SHELL_TYPES_PATH"))
@@ -134,6 +140,7 @@ pub(crate) fn shell_pane_state_for_config(
         payload.shell_type = shell_type.name.clone();
         payload.command = shell_type.command.clone();
         payload.command_parameters = shell_type.command_parameters.clone();
+        payload.inner_session_handler = shell_type_session_handler(shell_type);
         payload.on_exit = shell_type.on_exit;
         payload.default_width_chars = shell_type.default_width_chars;
     }

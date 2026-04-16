@@ -78,6 +78,15 @@ pub(crate) struct SidebarRenameDialog {
 }
 
 #[derive(Clone)]
+pub(crate) struct InnerSessionResumeDialog {
+    pub(crate) shell_type: ShellTypeConfig,
+    pub(crate) loading: bool,
+    pub(crate) sessions: Vec<CodexSessionInfo>,
+    pub(crate) selected_index: Option<usize>,
+    pub(crate) error: Option<SharedString>,
+}
+
+#[derive(Clone)]
 pub(crate) struct AppToast {
     pub(crate) id: u64,
     pub(crate) message: SharedString,
@@ -267,14 +276,39 @@ pub(crate) fn render_sidebar_footer(
     let mut pane_buttons = div().grid().grid_cols(3).gap_2();
     for shell_type in shell_types {
         let shell_type_name = shell_type.name.clone();
-        pane_buttons = pane_buttons.child(
-            sidebar_pane_button(IconName::SquareTerminal, shell_type.name.clone()).on_mouse_up(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    this.add_shell_type_pane(&shell_type_name, cx);
-                }),
-            ),
-        );
+        if shell_type.session_handler == InnerSessionHandler::None {
+            pane_buttons = pane_buttons.child(
+                sidebar_pane_button(IconName::SquareTerminal, shell_type.name.clone()).on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        this.add_shell_type_pane(&shell_type_name, cx);
+                    }),
+                ),
+            );
+        } else {
+            let resume_shell_type_name = shell_type.name.clone();
+            pane_buttons = pane_buttons.child(
+                sidebar_split_pane_button(IconName::SquareTerminal, shell_type.name.clone())
+                    .child(
+                        sidebar_split_pane_button_main(
+                            IconName::SquareTerminal,
+                            shell_type.name.clone(),
+                        )
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.add_shell_type_pane(&shell_type_name, cx);
+                            }),
+                        ),
+                    )
+                    .child(sidebar_split_pane_button_more().on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.open_inner_session_resume_dialog(&resume_shell_type_name, cx);
+                        }),
+                    )),
+            );
+        }
     }
     pane_buttons = pane_buttons
         .child(sidebar_pane_button(IconName::Replace, "Diff").on_mouse_up(
@@ -320,6 +354,133 @@ pub(crate) fn sidebar_add_repository_button() -> gpui::Div {
         )
 }
 
+pub(crate) fn render_inner_session_resume_dialog(
+    dialog: InnerSessionResumeDialog,
+    cx: &mut Context<OcttyApp>,
+) -> gpui::Div {
+    let title = format!("Resume {}", dialog.shell_type.name);
+    let mut list = div()
+        .mt_3()
+        .h(px(320.0))
+        .overflow_y_scrollbar()
+        .flex()
+        .flex_col()
+        .gap_1();
+    if dialog.loading {
+        list = list.child(
+            div()
+                .py_3()
+                .text_sm()
+                .text_color(rgb(0x98a1ad))
+                .child("Loading Codex sessions..."),
+        );
+    } else if let Some(error) = dialog.error.clone() {
+        list = list.child(
+            div()
+                .py_3()
+                .text_sm()
+                .text_color(rgb(0xf7d4d7))
+                .child(error),
+        );
+    } else if dialog.sessions.is_empty() {
+        list = list.child(
+            div()
+                .py_3()
+                .text_sm()
+                .text_color(rgb(0x98a1ad))
+                .child("No Codex sessions found."),
+        );
+    } else {
+        for (index, session) in dialog.sessions.iter().enumerate() {
+            list = list.child(render_inner_session_resume_row(
+                index,
+                session,
+                dialog.selected_index == Some(index),
+                cx,
+            ));
+        }
+    }
+
+    div()
+        .w(px(520.0))
+        .p_3()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(0x4d545f))
+        .bg(rgb(0x23272f))
+        .shadow_lg()
+        .text_color(rgb(0xd7dce4))
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::BOLD)
+                .child(title),
+        )
+        .child(
+            div()
+                .mt_1()
+                .text_xs()
+                .text_color(rgb(0x98a1ad))
+                .child("Choose a Codex session to resume in a new pane."),
+        )
+        .child(list)
+        .child(div().mt_3().flex().justify_end().gap_2().child(
+            rename_dialog_button("Cancel").on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    this.dismiss_inner_session_resume_dialog(cx);
+                }),
+            ),
+        ))
+}
+
+fn render_inner_session_resume_row(
+    index: usize,
+    session: &CodexSessionInfo,
+    selected: bool,
+    cx: &mut Context<OcttyApp>,
+) -> gpui::Div {
+    let mut row = div()
+        .px_2()
+        .py_2()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(0x3c434d))
+        .cursor_pointer()
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::BOLD)
+                .truncate()
+                .child(session.description.clone()),
+        )
+        .child(
+            div()
+                .mt_1()
+                .text_xs()
+                .text_color(rgb(0x98a1ad))
+                .truncate()
+                .child(format!(
+                    "{}  {}",
+                    session.timestamp, session.inner_session_id
+                )),
+        )
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(move |this, _, _, cx| {
+                this.resume_inner_session(index, cx);
+            }),
+        );
+    if selected {
+        row = row.bg(rgb(0x384150)).border_color(rgb(0x8793a4));
+    } else {
+        row = row.bg(rgb(0x282c34));
+    }
+    row
+}
+
 pub(crate) fn sidebar_pane_button(icon: IconName, label: impl Into<SharedString>) -> gpui::Div {
     let label = label.into();
     sidebar_control_button()
@@ -327,6 +488,32 @@ pub(crate) fn sidebar_pane_button(icon: IconName, label: impl Into<SharedString>
         .gap_1()
         .child(Icon::new(icon).size(px(13.0)))
         .child(div().text_xs().child(label))
+}
+
+pub(crate) fn sidebar_split_pane_button(
+    _icon: IconName,
+    _label: impl Into<SharedString>,
+) -> gpui::Div {
+    div().h(px(28.0)).flex().items_center().gap_1()
+}
+
+pub(crate) fn sidebar_split_pane_button_main(
+    icon: IconName,
+    label: impl Into<SharedString>,
+) -> gpui::Div {
+    sidebar_control_button()
+        .flex_1()
+        .justify_center()
+        .gap_1()
+        .child(Icon::new(icon).size(px(13.0)))
+        .child(div().text_xs().child(label.into()))
+}
+
+pub(crate) fn sidebar_split_pane_button_more() -> gpui::Div {
+    sidebar_control_button()
+        .w(px(28.0))
+        .justify_center()
+        .child(div().text_xs().child("..."))
 }
 
 pub(crate) fn sidebar_control_button() -> gpui::Div {

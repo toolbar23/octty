@@ -6,6 +6,7 @@
       "directory": "workspace",
       "command": "",
       "command_parameters": [],
+      "session_handler": "none",
       "on_exit": "close",
       "default_width_chars": 90
     },
@@ -15,6 +16,7 @@
       "directory": "workspace",
       "command": "codex",
       "command_parameters": ["--dangerously-bypass-approvals-and-sandbox"],
+      "session_handler": "codex",
       "on_exit": "close",
       "default_width_chars": 120
     },
@@ -24,6 +26,7 @@
       "directory": "workspace",
       "command": "jjui",
       "command_parameters": [],
+      "session_handler": "none",
       "on_exit": "close",
       "default_width_chars": 120
     }

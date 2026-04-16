@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 futures.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
@@ -21,4 +22,5 @@ octty-store.workspace = true
 octty-term = { workspace = true, features = ["ghostty-vt"] }
 serde.workspace = true
 serde_json.workspace = true
+rusqlite.workspace = true
 tokio.workspace = true

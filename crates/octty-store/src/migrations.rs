@@ -71,6 +71,7 @@ impl TursoStore {
               pane_id text primary key,
               workspace_id text not null,
               session_id text,
+              inner_session_id text,
               kind text not null,
               cwd text not null,
               command text not null,
@@ -103,9 +104,31 @@ impl TursoStore {
         )
         .await?;
         ensure_workspace_status_columns(&conn).await?;
+        ensure_session_state_columns(&conn).await?;
         ensure_pane_activity_columns(&conn).await?;
         Ok(())
     }
+}
+
+async fn ensure_session_state_columns(conn: &turso::Connection) -> Result<(), StoreError> {
+    let mut rows = conn.query("pragma table_info(session_state)", ()).await?;
+    let mut columns = HashSet::new();
+    while let Some(row) = rows.next().await? {
+        if let turso::Value::Text(name) = row.get_value(1)? {
+            columns.insert(name);
+        }
+    }
+    drop(rows);
+
+    if !columns.contains("inner_session_id") {
+        conn.execute(
+            "alter table session_state add column inner_session_id text",
+            (),
+        )
+        .await?;
+    }
+
+    Ok(())
 }
 
 async fn ensure_workspace_status_columns(conn: &turso::Connection) -> Result<(), StoreError> {

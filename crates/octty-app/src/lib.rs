@@ -29,12 +29,12 @@ use gpui_component::{
     tooltip::Tooltip,
 };
 use octty_core::{
-    ActivityState, BaselineRelation, BaselineRelationState, BaselineRelationTarget, PaneActivity,
-    PanePayload, PaneState, PaneType, ProjectRootRecord, SessionSnapshot, SessionState,
-    TerminalExitBehavior, TerminalKind, TerminalPanePayload, WorkspaceBookmarkRelation,
-    WorkspaceSnapshot, WorkspaceState, WorkspaceStatus, WorkspaceSummary, add_pane,
-    create_default_snapshot, create_pane_state, derive_workspace_activity,
-    has_recorded_workspace_path,
+    ActivityState, BaselineRelation, BaselineRelationState, BaselineRelationTarget,
+    InnerSessionHandler, PaneActivity, PanePayload, PaneState, PaneType, ProjectRootRecord,
+    SessionSnapshot, SessionState, TerminalExitBehavior, TerminalKind, TerminalPanePayload,
+    WorkspaceBookmarkRelation, WorkspaceSnapshot, WorkspaceState, WorkspaceStatus,
+    WorkspaceSummary, add_pane, codex_inner_session_prompt, create_default_snapshot,
+    create_pane_state, derive_workspace_activity, has_recorded_workspace_path,
     layout::{LAYOUT_VERSION, now_ms},
     remove_pane, workspace_shortcut_targets,
 };
@@ -66,6 +66,7 @@ mod app_render;
 mod app_workspace_status;
 mod bootstrap;
 mod cli;
+mod codex_sessions;
 mod desktop_notifications;
 mod gpui_tokio;
 mod input;
@@ -89,6 +90,7 @@ pub use cli::run;
 pub(crate) use actions::*;
 pub(crate) use app_workspace_status::*;
 pub(crate) use bootstrap::*;
+pub(crate) use codex_sessions::*;
 pub(crate) use desktop_notifications::*;
 pub(crate) use input::*;
 pub(crate) use menu::{set_workspace_menu, workspace_key_bindings};
@@ -133,6 +135,8 @@ const PANE_ACTIVITY_ACTIVE_WINDOW_MS: i64 = 3_000;
 const PANE_ATTENTION_CLEAR_GRACE_MS: i64 = 4_000;
 const PANE_ACTIVITY_PERSIST_DELAY: Duration = Duration::from_millis(500);
 const PANE_ACTIVITY_RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
+const CODEX_INNER_SESSION_SCAN_INTERVAL: Duration = Duration::from_millis(1_500);
+const CODEX_INNER_SESSION_SCAN_MAX_ATTEMPTS: u8 = 20;
 
 #[cfg(test)]
 mod tests;

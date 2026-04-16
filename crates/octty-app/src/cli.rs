@@ -206,6 +206,8 @@ pub(crate) async fn live_terminal_check() -> anyhow::Result<String> {
         cwd: std::env::current_dir()?.to_string_lossy().to_string(),
         command: String::new(),
         command_parameters: Vec::new(),
+        inner_session_handler: InnerSessionHandler::None,
+        inner_session_id: None,
         on_exit: TerminalExitBehavior::Close,
         cols: 80,
         rows: 24,

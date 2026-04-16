@@ -318,6 +318,15 @@ impl OcttyApp {
     }
 
     pub(crate) fn add_shell_type_pane(&mut self, shell_type_name: &str, cx: &mut Context<Self>) {
+        self.add_shell_type_pane_with_inner_session(shell_type_name, None, cx);
+    }
+
+    pub(crate) fn add_shell_type_pane_with_inner_session(
+        &mut self,
+        shell_type_name: &str,
+        inner_session_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(shell_type) = self
             .shell_types
             .iter()
@@ -327,7 +336,7 @@ impl OcttyApp {
             self.show_error(format!("Unknown shell type {shell_type_name}."), cx);
             return;
         };
-        self.add_terminal_pane(shell_pane_state_for_config, shell_type, cx);
+        self.add_terminal_pane(shell_type, inner_session_id, cx);
     }
 
     pub(crate) fn add_pane(&mut self, pane_type: PaneType, cx: &mut Context<Self>) {
@@ -344,10 +353,192 @@ impl OcttyApp {
         self.add_pane_state(workspace, snapshot, pane, cx);
     }
 
+    pub(crate) fn open_inner_session_resume_dialog(
+        &mut self,
+        shell_type_name: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(shell_type) = self
+            .shell_types
+            .iter()
+            .find(|candidate| candidate.name == shell_type_name)
+            .cloned()
+        else {
+            self.show_error(format!("Unknown shell type {shell_type_name}."), cx);
+            return;
+        };
+        if shell_type.session_handler == InnerSessionHandler::None {
+            self.add_shell_type_pane(&shell_type.name, cx);
+            return;
+        }
+
+        let dialog_shell_type_name = shell_type.name.clone();
+        eprintln!(
+            "[octty-app] opening inner session resume dialog for shell type {dialog_shell_type_name}"
+        );
+        let Some(workspace) = self.active_workspace().cloned() else {
+            self.show_error("No active workspace.", cx);
+            return;
+        };
+        let workspace_path = PathBuf::from(workspace.workspace_path.clone());
+        let mut connected_inner_session_ids =
+            connected_codex_inner_session_ids(self.active_snapshot.as_ref());
+        let active_connected_count = connected_inner_session_ids.len();
+        let store = self.store.clone();
+        self.inner_session_resume_dialog = Some(InnerSessionResumeDialog {
+            shell_type,
+            loading: true,
+            sessions: Vec::new(),
+            selected_index: None,
+            error: None,
+        });
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            eprintln!(
+                "[octty-app] starting resumable codex session retrieval for shell type {dialog_shell_type_name}"
+            );
+            let retrieval_shell_type_name = dialog_shell_type_name.clone();
+            let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
+                let started_at = Instant::now();
+                eprintln!(
+                    "[octty-app] resumable codex session retrieval collecting existing workspace snapshots; active snapshot has {active_connected_count} connected inner session(s)"
+                );
+                let snapshot_started_at = Instant::now();
+                let snapshots = store.list_snapshots().await?;
+                eprintln!(
+                    "[octty-app] resumable codex session retrieval loaded {} stored workspace snapshot(s) in {:?}",
+                    snapshots.len(),
+                    snapshot_started_at.elapsed()
+                );
+                connected_inner_session_ids.extend(connected_codex_inner_session_ids(
+                    snapshots.iter(),
+                ));
+                eprintln!(
+                    "[octty-app] resumable codex session retrieval found {} connected inner session(s) across snapshots",
+                    connected_inner_session_ids.len()
+                );
+                let result = list_resumable_codex_sessions_for_workspace(
+                    workspace_path,
+                    connected_inner_session_ids,
+                )
+                .await;
+                match &result {
+                    Ok(sessions) => eprintln!(
+                        "[octty-app] resumable codex session retrieval succeeded for {retrieval_shell_type_name}: {} session(s) in {:?}",
+                        sessions.len(),
+                        started_at.elapsed()
+                    ),
+                    Err(error) => eprintln!(
+                        "[octty-app] resumable codex session retrieval failed for {retrieval_shell_type_name} after {:?}: {error:#}",
+                        started_at.elapsed()
+                    ),
+                }
+                result
+            }) {
+                    Ok(task) => task.await,
+                    Err(error) => Err(error),
+                };
+            let _ = this.update(cx, |app, cx| {
+                let Some(dialog) = app.inner_session_resume_dialog.as_mut() else {
+                    eprintln!(
+                        "[octty-app] resumable codex session retrieval finished after dialog closed"
+                    );
+                    return;
+                };
+                if dialog.shell_type.name != dialog_shell_type_name {
+                    eprintln!(
+                        "[octty-app] resumable codex session retrieval ignored because dialog switched from {dialog_shell_type_name} to {}",
+                        dialog.shell_type.name
+                    );
+                    return;
+                }
+                dialog.loading = false;
+                match result {
+                    Ok(sessions) => {
+                        eprintln!(
+                            "[octty-app] displaying {} resumable codex session(s) for {dialog_shell_type_name}",
+                            sessions.len()
+                        );
+                        dialog.selected_index = (!sessions.is_empty()).then_some(0);
+                        dialog.sessions = sessions;
+                        dialog.error = None;
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "[octty-app] displaying resumable codex session retrieval error for {dialog_shell_type_name}: {error:#}"
+                        );
+                        dialog.sessions.clear();
+                        dialog.selected_index = None;
+                        dialog.error =
+                            Some(format!("Failed to load Codex sessions: {error:#}").into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn dismiss_inner_session_resume_dialog(&mut self, cx: &mut Context<Self>) {
+        self.inner_session_resume_dialog = None;
+        cx.notify();
+    }
+
+    pub(crate) fn select_previous_inner_session(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.inner_session_resume_dialog.as_mut() else {
+            return;
+        };
+        if dialog.sessions.is_empty() {
+            return;
+        }
+        let current = dialog.selected_index.unwrap_or(0);
+        dialog.selected_index = Some(current.checked_sub(1).unwrap_or(dialog.sessions.len() - 1));
+        cx.notify();
+    }
+
+    pub(crate) fn select_next_inner_session(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.inner_session_resume_dialog.as_mut() else {
+            return;
+        };
+        if dialog.sessions.is_empty() {
+            return;
+        }
+        let current = dialog.selected_index.unwrap_or(0);
+        dialog.selected_index = Some((current + 1) % dialog.sessions.len());
+        cx.notify();
+    }
+
+    pub(crate) fn resume_inner_session(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(dialog) = self.inner_session_resume_dialog.clone() else {
+            return;
+        };
+        let Some(session) = dialog.sessions.get(index) else {
+            return;
+        };
+        self.inner_session_resume_dialog = None;
+        self.add_shell_type_pane_with_inner_session(
+            &dialog.shell_type.name,
+            Some(session.inner_session_id.clone()),
+            cx,
+        );
+    }
+
+    pub(crate) fn resume_selected_inner_session(&mut self, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .inner_session_resume_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.selected_index)
+        else {
+            return;
+        };
+        self.resume_inner_session(index, cx);
+    }
+
     fn add_terminal_pane(
         &mut self,
-        create_pane: impl FnOnce(&ShellTypeConfig, &str) -> PaneState,
         shell_type: ShellTypeConfig,
+        inner_session_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let Some(workspace) = self.active_workspace().cloned() else {
@@ -358,7 +549,12 @@ impl OcttyApp {
             .active_snapshot
             .take()
             .unwrap_or_else(|| create_default_snapshot(workspace.id.clone()));
-        let pane = create_pane(&shell_type, &workspace.workspace_path);
+        let mut pane = shell_pane_state_for_config(&shell_type, &workspace.workspace_path);
+        if let Some(inner_session_id) = inner_session_id
+            && let PanePayload::Terminal(payload) = &mut pane.payload
+        {
+            payload.inner_session_id = Some(inner_session_id);
+        }
         self.add_pane_state(workspace, snapshot, pane, cx);
     }
 
@@ -486,6 +682,29 @@ impl OcttyApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.inner_session_resume_dialog.is_some() {
+            match inner_session_resume_dialog_key_action(&event.keystroke.key) {
+                Some(InnerSessionResumeDialogKeyAction::SelectPrevious) => {
+                    self.select_previous_inner_session(cx);
+                    cx.stop_propagation();
+                }
+                Some(InnerSessionResumeDialogKeyAction::SelectNext) => {
+                    self.select_next_inner_session(cx);
+                    cx.stop_propagation();
+                }
+                Some(InnerSessionResumeDialogKeyAction::Confirm) => {
+                    self.resume_selected_inner_session(cx);
+                    cx.stop_propagation();
+                }
+                Some(InnerSessionResumeDialogKeyAction::Cancel) => {
+                    self.dismiss_inner_session_resume_dialog(cx);
+                    cx.stop_propagation();
+                }
+                None => {}
+            }
+            return;
+        }
+
         if self.sidebar_rename_dialog.is_some() {
             match sidebar_rename_dialog_key_action(&event.keystroke.key) {
                 Some(SidebarRenameDialogKeyAction::Confirm) => {
@@ -737,6 +956,7 @@ impl OcttyApp {
                     continue;
                 };
                 current_payload.session_id = updated_payload.session_id;
+                current_payload.inner_session_id = updated_payload.inner_session_id;
                 current_payload.session_state = updated_payload.session_state;
                 current_payload.exit_code = updated_payload.exit_code;
                 current_payload.restored_buffer = updated_payload.restored_buffer;
@@ -752,10 +972,30 @@ pub(crate) enum SidebarRenameDialogKeyAction {
     Cancel,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InnerSessionResumeDialogKeyAction {
+    SelectPrevious,
+    SelectNext,
+    Confirm,
+    Cancel,
+}
+
 pub(crate) fn sidebar_rename_dialog_key_action(key: &str) -> Option<SidebarRenameDialogKeyAction> {
     match key.to_ascii_lowercase().as_str() {
         "enter" | "return" => Some(SidebarRenameDialogKeyAction::Confirm),
         "escape" => Some(SidebarRenameDialogKeyAction::Cancel),
+        _ => None,
+    }
+}
+
+pub(crate) fn inner_session_resume_dialog_key_action(
+    key: &str,
+) -> Option<InnerSessionResumeDialogKeyAction> {
+    match key.to_ascii_lowercase().as_str() {
+        "up" | "arrowup" => Some(InnerSessionResumeDialogKeyAction::SelectPrevious),
+        "down" | "arrowdown" => Some(InnerSessionResumeDialogKeyAction::SelectNext),
+        "enter" | "return" => Some(InnerSessionResumeDialogKeyAction::Confirm),
+        "escape" => Some(InnerSessionResumeDialogKeyAction::Cancel),
         _ => None,
     }
 }

@@ -7,6 +7,157 @@ impl LiveTerminalPane {
 }
 
 impl OcttyApp {
+    pub(crate) fn schedule_codex_inner_session_discovery(&mut self, cx: &mut Context<Self>) {
+        if self.codex_inner_session_scan_active {
+            return;
+        }
+        let pending_panes = codex_inner_session_pending_panes(self.active_snapshot.as_ref());
+        if pending_panes.is_empty() {
+            self.codex_inner_session_scan_attempts.clear();
+            return;
+        }
+
+        self.codex_inner_session_scan_attempts
+            .retain(|pane_id, _| pending_panes.contains(pane_id));
+        let mut pending = Vec::new();
+        for pane_id in pending_panes {
+            let attempts = self
+                .codex_inner_session_scan_attempts
+                .get(&pane_id)
+                .copied()
+                .unwrap_or(0);
+            if attempts == CODEX_INNER_SESSION_SCAN_MAX_ATTEMPTS {
+                eprintln!(
+                    "[octty-app] codex inner session discovery giving up for pane {pane_id} after {attempts} attempts"
+                );
+                self.codex_inner_session_scan_attempts
+                    .insert(pane_id, attempts.saturating_add(1));
+                continue;
+            }
+            if attempts > CODEX_INNER_SESSION_SCAN_MAX_ATTEMPTS {
+                continue;
+            }
+            let next_attempt = attempts.saturating_add(1);
+            self.codex_inner_session_scan_attempts
+                .insert(pane_id.clone(), next_attempt);
+            pending.push((pane_id, next_attempt));
+        }
+        if pending.is_empty() {
+            return;
+        }
+
+        eprintln!(
+            "[octty-app] scheduling codex inner session discovery for {} pane(s): {}",
+            pending.len(),
+            pending
+                .iter()
+                .map(|(pane_id, attempt)| format!("{pane_id}#{attempt}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        self.codex_inner_session_scan_active = true;
+        let timer = cx
+            .background_executor()
+            .timer(CODEX_INNER_SESSION_SCAN_INTERVAL);
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
+                let mut discovered = Vec::new();
+                for (pane_id, attempt) in pending {
+                    eprintln!(
+                        "[octty-app] scanning codex history for pane {pane_id}, attempt {attempt}"
+                    );
+                    match find_codex_inner_session_id_for_pane(&pane_id)? {
+                        Some(inner_session_id) => {
+                            eprintln!(
+                                "[octty-app] found codex inner session {inner_session_id} for pane {pane_id}"
+                            );
+                            discovered.push((pane_id, inner_session_id));
+                        }
+                        None => {
+                            eprintln!(
+                                "[octty-app] no codex inner session found for pane {pane_id}, attempt {attempt}"
+                            );
+                        }
+                    }
+                }
+                Ok::<_, anyhow::Error>(discovered)
+            }) {
+                Ok(task) => task.await,
+                Err(error) => Err(error),
+            };
+
+            let _ = this.update(cx, |app, cx| {
+                app.codex_inner_session_scan_active = false;
+                match result {
+                    Ok(discovered) => {
+                        if discovered.is_empty() {
+                            eprintln!(
+                                "[octty-app] codex inner session discovery completed without matches"
+                            );
+                        }
+                        if let Some(snapshot) =
+                            app.apply_codex_inner_session_discoveries(discovered)
+                        {
+                            app.save_workspace_snapshot(
+                                snapshot,
+                                "Found Codex session, but failed to save taskspace",
+                                cx,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("[octty-app] codex inner session discovery failed: {error:#}");
+                        app.show_error(format!("Codex session discovery failed: {error:#}"), cx);
+                    }
+                }
+                if !codex_inner_session_pending_panes(app.active_snapshot.as_ref()).is_empty() {
+                    app.schedule_codex_inner_session_discovery(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn apply_codex_inner_session_discoveries(
+        &mut self,
+        discovered: Vec<(String, String)>,
+    ) -> Option<WorkspaceSnapshot> {
+        if discovered.is_empty() {
+            return None;
+        }
+        let discovered = discovered.into_iter().collect::<HashMap<_, _>>();
+        let snapshot = self.active_snapshot.as_mut()?;
+        let mut changed = false;
+        for (pane_id, inner_session_id) in discovered {
+            let Some(pane) = snapshot.panes.get_mut(&pane_id) else {
+                continue;
+            };
+            let PanePayload::Terminal(payload) = &mut pane.payload else {
+                continue;
+            };
+            if payload.inner_session_handler != InnerSessionHandler::Codex
+                || payload.inner_session_id.is_some()
+            {
+                continue;
+            }
+            eprintln!(
+                "[octty-app] linking codex inner session {inner_session_id} to pane {pane_id}"
+            );
+            payload.inner_session_id = Some(inner_session_id);
+            self.codex_inner_session_scan_attempts.remove(&pane_id);
+            changed = true;
+        }
+        if changed {
+            snapshot.updated_at = now_ms();
+            eprintln!("[octty-app] codex inner session discovery succeeded");
+            Some(snapshot.clone())
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn ensure_live_terminals_for_active_snapshot(&mut self, cx: &mut Context<Self>) {
         let Some(workspace) = self.active_workspace().cloned() else {
             return;
@@ -475,6 +626,23 @@ impl OcttyApp {
         live.scroll_viewport(lines);
         cx.stop_propagation();
     }
+}
+
+pub(crate) fn codex_inner_session_pending_panes(
+    snapshot: Option<&WorkspaceSnapshot>,
+) -> Vec<String> {
+    snapshot
+        .into_iter()
+        .flat_map(|snapshot| snapshot.panes.iter())
+        .filter_map(|(pane_id, pane)| {
+            let PanePayload::Terminal(payload) = &pane.payload else {
+                return None;
+            };
+            (payload.inner_session_handler == InnerSessionHandler::Codex
+                && payload.inner_session_id.is_none())
+            .then(|| pane_id.clone())
+        })
+        .collect()
 }
 
 pub(crate) fn terminal_exit_status_label(exit_code: Option<i64>) -> String {

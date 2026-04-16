@@ -180,6 +180,8 @@ fn terminal_payload(kind: TerminalKind, cwd: String) -> PanePayload {
         default_width_chars: crate::types::DEFAULT_TERMINAL_WIDTH_CHARS,
         kind,
         shell_type: crate::types::default_shell_type_name(),
+        inner_session_handler: crate::types::InnerSessionHandler::None,
+        inner_session_id: None,
         session_id: None,
         session_state: SessionState::Stopped,
         cwd,

@@ -173,6 +173,7 @@ pub(crate) async fn persist_terminal_screen(
     store
         .upsert_session_state(&SessionSnapshot {
             id: session_id,
+            inner_session_id: payload.inner_session_id.clone(),
             workspace_id: workspace.id.clone(),
             pane_id: pane_id.to_owned(),
             kind: payload.kind.clone(),
@@ -220,6 +221,8 @@ pub(crate) fn terminal_spec_for_payload(
         cwd: payload.cwd.clone(),
         command: payload.command.clone(),
         command_parameters: payload.command_parameters.clone(),
+        inner_session_handler: payload.inner_session_handler,
+        inner_session_id: payload.inner_session_id.clone(),
         on_exit: payload.on_exit,
         cols,
         rows,

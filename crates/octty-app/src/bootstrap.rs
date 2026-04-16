@@ -340,6 +340,8 @@ pub(crate) async fn reconcile_pane_activity(
                 cwd: payload.cwd,
                 command: payload.command,
                 command_parameters: payload.command_parameters,
+                inner_session_handler: payload.inner_session_handler,
+                inner_session_id: payload.inner_session_id,
                 on_exit: payload.on_exit,
                 cols: 120,
                 rows: 40,

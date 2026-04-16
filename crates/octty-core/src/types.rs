@@ -36,6 +36,14 @@ impl Default for TerminalExitBehavior {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InnerSessionHandler {
+    #[default]
+    None,
+    Codex,
+}
+
 pub const DEFAULT_TERMINAL_WIDTH_CHARS: u16 = 90;
 
 pub fn default_shell_type_name() -> String {
@@ -44,6 +52,10 @@ pub fn default_shell_type_name() -> String {
 
 pub fn default_terminal_width_chars() -> u16 {
     DEFAULT_TERMINAL_WIDTH_CHARS
+}
+
+pub fn codex_inner_session_prompt(pane_id: &str) -> String {
+    format!("FYI: You are running inside Octty pane \"{pane_id}\". Reply \"ok\"")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -383,6 +395,10 @@ pub struct TerminalPanePayload {
     pub kind: TerminalKind,
     #[serde(default = "default_shell_type_name")]
     pub shell_type: String,
+    #[serde(default)]
+    pub inner_session_handler: InnerSessionHandler,
+    #[serde(default)]
+    pub inner_session_id: Option<String>,
     pub session_id: Option<String>,
     pub session_state: SessionState,
     pub cwd: String,
@@ -468,6 +484,7 @@ pub struct WorkspaceDetail {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSnapshot {
     pub id: String,
+    pub inner_session_id: Option<String>,
     pub workspace_id: String,
     pub pane_id: String,
     pub kind: TerminalKind,

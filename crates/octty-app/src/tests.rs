@@ -1,6 +1,9 @@
 use super::*;
 use crate::app_live_terminals::{terminal_exit_status_label, terminal_page_scroll_direction};
-use crate::app_panes::{SidebarRenameDialogKeyAction, sidebar_rename_dialog_key_action};
+use crate::app_panes::{
+    InnerSessionResumeDialogKeyAction, SidebarRenameDialogKeyAction,
+    inner_session_resume_dialog_key_action, sidebar_rename_dialog_key_action,
+};
 use crate::cli::{TerminalReplayEventsStep, parse_terminal_replay_events};
 
 fn test_project_root(id: &str, display_name: &str) -> ProjectRootRecord {
@@ -692,6 +695,27 @@ fn rename_dialog_only_intercepts_commit_keys() {
 }
 
 #[test]
+fn inner_session_resume_dialog_key_action_maps_selection() {
+    assert_eq!(
+        inner_session_resume_dialog_key_action("up"),
+        Some(InnerSessionResumeDialogKeyAction::SelectPrevious)
+    );
+    assert_eq!(
+        inner_session_resume_dialog_key_action("down"),
+        Some(InnerSessionResumeDialogKeyAction::SelectNext)
+    );
+    assert_eq!(
+        inner_session_resume_dialog_key_action("enter"),
+        Some(InnerSessionResumeDialogKeyAction::Confirm)
+    );
+    assert_eq!(
+        inner_session_resume_dialog_key_action("escape"),
+        Some(InnerSessionResumeDialogKeyAction::Cancel)
+    );
+    assert_eq!(inner_session_resume_dialog_key_action("space"), None);
+}
+
+#[test]
 fn default_shell_type_config_defines_initial_types() {
     let config = default_shell_type_config().expect("default shell config");
     let names = config
@@ -707,9 +731,42 @@ fn default_shell_type_config_defines_initial_types() {
         config.shell_types[1].command_parameters,
         vec!["--dangerously-bypass-approvals-and-sandbox".to_owned()]
     );
+    assert_eq!(
+        config.shell_types[1].session_handler,
+        InnerSessionHandler::Codex
+    );
     assert_eq!(config.shell_types[1].on_exit, TerminalExitBehavior::Close);
     assert_eq!(config.shell_types[2].shortcut, "ctrl-shift-j");
+    assert_eq!(
+        config.shell_types[2].session_handler,
+        InnerSessionHandler::None
+    );
     assert_eq!(config.shell_types[2].on_exit, TerminalExitBehavior::Close);
+}
+
+#[test]
+fn missing_shell_session_handler_defaults_to_none() {
+    let config = parse_shell_type_config(
+        r#"{
+          "shell_types": [
+            {
+              "name": "codex",
+              "shortcut": "ctrl-shift-a",
+              "directory": "workspace",
+              "command": "codex",
+              "command_parameters": [],
+              "on_exit": "close",
+              "default_width_chars": 120
+            }
+          ]
+        }"#,
+    )
+    .expect("parse shell config");
+
+    assert_eq!(
+        config.shell_types[0].session_handler,
+        InnerSessionHandler::None
+    );
 }
 
 #[test]
@@ -730,6 +787,8 @@ fn shell_pane_state_copies_configured_metadata() {
     assert_eq!(payload.shell_type, "codex");
     assert_eq!(payload.cwd, "/tmp/workspace");
     assert_eq!(payload.command, "codex");
+    assert_eq!(payload.inner_session_handler, InnerSessionHandler::Codex);
+    assert_eq!(payload.inner_session_id, None);
     assert_eq!(payload.on_exit, TerminalExitBehavior::Close);
     assert_eq!(payload.default_width_chars, 120);
 }
@@ -744,6 +803,7 @@ fn custom_shell_exit_behavior_is_normalized_to_close() {
                 directory: "workspace".to_owned(),
                 command: "codex".to_owned(),
                 command_parameters: Vec::new(),
+                session_handler: InnerSessionHandler::Codex,
                 on_exit: TerminalExitBehavior::RestartManually,
                 default_width_chars: 120,
             },
@@ -753,6 +813,7 @@ fn custom_shell_exit_behavior_is_normalized_to_close() {
                 directory: "workspace".to_owned(),
                 command: "jjui".to_owned(),
                 command_parameters: Vec::new(),
+                session_handler: InnerSessionHandler::None,
                 on_exit: TerminalExitBehavior::RestartAuto,
                 default_width_chars: 120,
             },

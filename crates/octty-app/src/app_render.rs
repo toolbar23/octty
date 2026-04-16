@@ -10,6 +10,7 @@ impl Render for OcttyApp {
             self.record_active_pane_seen(cx);
         }
         self.schedule_terminal_snapshot_notifications(cx);
+        self.schedule_codex_inner_session_discovery(cx);
         self.schedule_pane_activity_reconciliation(cx);
         self.schedule_workspace_watch_notifications(cx);
         if let Some(delay) =
@@ -56,6 +57,7 @@ impl Render for OcttyApp {
             .sidebar_rename_dialog
             .as_ref()
             .map(|dialog| (dialog.title.clone(), dialog.input.clone()));
+        let inner_session_resume_dialog = self.inner_session_resume_dialog.clone();
         let toasts = self
             .toasts
             .iter()
@@ -197,6 +199,33 @@ impl Render for OcttyApp {
                                                         ),
                                                 ),
                                         ),
+                                ),
+                        ),
+                ))
+            })
+            .when_some(inner_session_resume_dialog, |this, dialog| {
+                this.child(deferred(
+                    anchored()
+                        .anchor(Corner::TopLeft)
+                        .position(point(px(0.0), px(0.0)))
+                        .child(
+                            div()
+                                .w(window.viewport_size().width)
+                                .h(window.viewport_size().height)
+                                .occlude()
+                                .bg(rgba(0x00000033))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _window, cx| {
+                                        this.dismiss_inner_session_resume_dialog(cx);
+                                    }),
+                                )
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(WORKSPACE_SIDEBAR_WIDTH + 24.0))
+                                        .top(px(64.0))
+                                        .child(render_inner_session_resume_dialog(dialog, cx)),
                                 ),
                         ),
                 ))
