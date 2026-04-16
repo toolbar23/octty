@@ -197,6 +197,20 @@ pub(crate) fn live_terminal_key(workspace_id: &str, pane_id: &str) -> String {
     format!("{workspace_id}:{pane_id}")
 }
 
+pub(crate) fn rekey_live_terminal_key(
+    key: &str,
+    previous_workspace_id: &str,
+    next_workspace_id: &str,
+) -> Option<(String, String)> {
+    let (workspace_id, pane_id) = split_live_terminal_key(key)?;
+    (workspace_id == previous_workspace_id).then(|| {
+        (
+            key.to_owned(),
+            live_terminal_key(next_workspace_id, pane_id),
+        )
+    })
+}
+
 pub(crate) fn pane_activity_map(
     activities: Vec<PaneActivity>,
 ) -> HashMap<(String, String), PaneActivity> {
@@ -209,6 +223,25 @@ pub(crate) fn pane_activity_map(
             )
         })
         .collect()
+}
+
+pub(crate) fn rekey_pane_activity_map(
+    activities: &mut HashMap<(String, String), PaneActivity>,
+    previous_workspace_id: &str,
+    next_workspace_id: &str,
+) {
+    let rekeys = activities
+        .keys()
+        .filter(|(workspace_id, _pane_id)| workspace_id == previous_workspace_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    for previous_key in rekeys {
+        let Some(mut activity) = activities.remove(&previous_key) else {
+            continue;
+        };
+        activity.workspace_id = next_workspace_id.to_owned();
+        activities.insert((next_workspace_id.to_owned(), previous_key.1), activity);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

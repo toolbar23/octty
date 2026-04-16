@@ -73,6 +73,12 @@ impl OcttyApp {
         workspace_id: String,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .workspace_status_refresh_suspended
+            .contains(&workspace_id)
+        {
+            return;
+        }
         self.workspace_status_refresh_due_at.insert(
             workspace_id.clone(),
             Instant::now() + WORKSPACE_STATUS_REFRESH_DEBOUNCE,
@@ -96,7 +102,11 @@ impl OcttyApp {
                     .ok()
                     .flatten()
                 else {
-                    break;
+                    let _ = this.update(cx, |app, _cx| {
+                        app.workspace_status_refresh_timer_active
+                            .remove(&workspace_id);
+                    });
+                    return;
                 };
                 cx.background_executor().timer(delay).await;
                 let ready = this
@@ -125,6 +135,12 @@ impl OcttyApp {
                 .update(cx, |app, _cx| {
                     app.workspace_status_refresh_timer_active
                         .remove(&workspace_id);
+                    if app
+                        .workspace_status_refresh_suspended
+                        .contains(&workspace_id)
+                    {
+                        return None;
+                    }
                     app.workspaces
                         .iter()
                         .find(|workspace| workspace.id == workspace_id)
@@ -156,11 +172,34 @@ impl OcttyApp {
                     }
                 }
                 Err(error) => {
+                    if app
+                        .workspace_status_refresh_suspended
+                        .contains(&workspace_id)
+                        || !app
+                            .workspaces
+                            .iter()
+                            .any(|workspace| workspace.id == workspace_id)
+                    {
+                        return;
+                    }
                     eprintln!("[octty-app] workspace status refresh failed: {error:#}");
                 }
             });
         })
         .detach();
+    }
+
+    pub(crate) fn suspend_workspace_status_refresh(&mut self, workspace_id: &str) {
+        self.workspace_status_refresh_suspended
+            .insert(workspace_id.to_owned());
+        self.workspace_status_refresh_due_at.remove(workspace_id);
+        self.workspace_status_refresh_timer_active
+            .remove(workspace_id);
+        self.workspace_watchers.remove(workspace_id);
+    }
+
+    pub(crate) fn resume_workspace_status_refresh(&mut self, workspace_id: &str) {
+        self.workspace_status_refresh_suspended.remove(workspace_id);
     }
 }
 

@@ -93,6 +93,51 @@ fn workspace_activity_marker_stops_spinning_when_attention_closes_activity() {
 }
 
 #[test]
+fn live_terminal_key_rekeys_matching_workspace_only() {
+    assert_eq!(
+        rekey_live_terminal_key("workspace-old:pane-1", "workspace-old", "workspace-new"),
+        Some((
+            "workspace-old:pane-1".to_owned(),
+            "workspace-new:pane-1".to_owned()
+        ))
+    );
+    assert_eq!(
+        rekey_live_terminal_key("workspace-other:pane-1", "workspace-old", "workspace-new"),
+        None
+    );
+    assert_eq!(
+        rekey_live_terminal_key("malformed", "workspace-old", "workspace-new"),
+        None
+    );
+}
+
+#[test]
+fn pane_activity_map_rekeys_matching_workspace_only() {
+    let mut activities = HashMap::from([
+        (
+            ("workspace-old".to_owned(), "pane-1".to_owned()),
+            PaneActivity::new("workspace-old", "pane-1", 1_000),
+        ),
+        (
+            ("workspace-other".to_owned(), "pane-2".to_owned()),
+            PaneActivity::new("workspace-other", "pane-2", 2_000),
+        ),
+    ]);
+
+    rekey_pane_activity_map(&mut activities, "workspace-old", "workspace-new");
+
+    assert!(!activities.contains_key(&("workspace-old".to_owned(), "pane-1".to_owned())));
+    assert_eq!(
+        activities
+            .get(&("workspace-new".to_owned(), "pane-1".to_owned()))
+            .unwrap()
+            .workspace_id,
+        "workspace-new"
+    );
+    assert!(activities.contains_key(&("workspace-other".to_owned(), "pane-2".to_owned())));
+}
+
+#[test]
 fn workspace_activity_marker_stays_idle_after_attention_is_seen() {
     let workspace = test_workspace("workspace-1", "root-1", "main");
     let mut activity = PaneActivity::new("workspace-1", "pane-1", 1_000);

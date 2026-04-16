@@ -39,6 +39,7 @@ pub(crate) struct OcttyApp {
     pub(crate) workspace_watchers: HashMap<String, WorkspacePathWatcher>,
     pub(crate) workspace_status_refresh_due_at: HashMap<String, Instant>,
     pub(crate) workspace_status_refresh_timer_active: BTreeSet<String>,
+    pub(crate) workspace_status_refresh_suspended: BTreeSet<String>,
     pub(crate) terminal_glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
     pub(crate) terminal_render_cache: Rc<RefCell<TerminalRenderCache>>,
     pub(crate) sidebar_menu: Option<SidebarMenuOverlay>,

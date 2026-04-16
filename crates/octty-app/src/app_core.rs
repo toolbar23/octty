@@ -36,6 +36,7 @@ impl OcttyApp {
             workspace_watchers: HashMap::new(),
             workspace_status_refresh_due_at: HashMap::new(),
             workspace_status_refresh_timer_active: BTreeSet::new(),
+            workspace_status_refresh_suspended: BTreeSet::new(),
             terminal_glyph_cache: Rc::new(RefCell::new(TerminalGlyphLayoutCache::default())),
             terminal_render_cache: Rc::new(RefCell::new(TerminalRenderCache::default())),
             sidebar_menu: None,
@@ -563,21 +564,65 @@ impl OcttyApp {
                 );
             }
             SidebarRenameTarget::Workspace(workspace_id) => {
-                self.run_navigation_operation(
-                    format!("Renaming workspace to {display_name}..."),
-                    async move {
-                        rename_workspace_and_reload(
-                            store,
-                            workspace_id,
-                            display_name,
-                            active_workspace_id,
-                        )
-                        .await
-                    },
+                self.run_workspace_rename_operation(
+                    store,
+                    workspace_id,
+                    display_name,
+                    active_workspace_id,
                     cx,
                 );
             }
         }
+    }
+
+    pub(crate) fn run_workspace_rename_operation(
+        &mut self,
+        store: Arc<TursoStore>,
+        workspace_id: String,
+        display_name: String,
+        active_workspace_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let previous_workspace_id = workspace_id.clone();
+        let next_workspace_id = self
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .map(|workspace| octty_jj::workspace_id_for(&workspace.root_path, &display_name))
+            .unwrap_or_else(|| workspace_id.clone());
+
+        self.suspend_workspace_status_refresh(&previous_workspace_id);
+        self.status = format!("Renaming workspace to {display_name}...").into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
+                rename_workspace_and_reload(store, workspace_id, display_name, active_workspace_id)
+                    .await
+            }) {
+                Ok(task) => task.await,
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |app, cx| {
+                match result {
+                    Ok(bootstrap) => {
+                        app.rekey_workspace_runtime_state(
+                            &previous_workspace_id,
+                            &next_workspace_id,
+                        );
+                        app.apply_bootstrap(bootstrap, cx);
+                        app.resume_workspace_status_refresh(&previous_workspace_id);
+                        app.resume_workspace_status_refresh(&next_workspace_id);
+                    }
+                    Err(error) => {
+                        app.resume_workspace_status_refresh(&previous_workspace_id);
+                        app.ensure_workspace_watchers();
+                        app.show_error(format!("Navigation action failed: {error:#}"), cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn run_navigation_operation<F>(
@@ -621,6 +666,59 @@ impl OcttyApp {
         self.schedule_pane_activity_reconciliation(cx);
         self.ensure_workspace_watchers();
         self.record_active_pane_seen(cx);
+    }
+
+    pub(crate) fn rekey_workspace_runtime_state(
+        &mut self,
+        previous_workspace_id: &str,
+        next_workspace_id: &str,
+    ) {
+        if previous_workspace_id == next_workspace_id {
+            return;
+        }
+
+        let live_rekeys = self
+            .live_terminals
+            .keys()
+            .filter_map(|key| {
+                rekey_live_terminal_key(key, previous_workspace_id, next_workspace_id)
+            })
+            .collect::<Vec<_>>();
+        for (previous_key, next_key) in live_rekeys {
+            if let Some(live) = self.live_terminals.remove(&previous_key) {
+                self.live_terminals.insert(next_key, live);
+            }
+        }
+
+        let failed_rekeys = self
+            .failed_live_terminals
+            .iter()
+            .filter_map(|key| {
+                rekey_live_terminal_key(key, previous_workspace_id, next_workspace_id)
+            })
+            .collect::<Vec<_>>();
+        for (previous_key, next_key) in failed_rekeys {
+            self.failed_live_terminals.remove(&previous_key);
+            self.failed_live_terminals.insert(next_key);
+        }
+
+        rekey_pane_activity_map(
+            &mut self.pane_activity,
+            previous_workspace_id,
+            next_workspace_id,
+        );
+        rekey_pane_activity_map(
+            &mut self.pending_pane_activity_persistence,
+            previous_workspace_id,
+            next_workspace_id,
+        );
+
+        for pending in &mut self.pending_terminal_inputs {
+            if pending.workspace.id == previous_workspace_id {
+                pending.workspace.id = next_workspace_id.to_owned();
+                pending.snapshot.workspace_id = next_workspace_id.to_owned();
+            }
+        }
     }
 
     pub(crate) fn show_error(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
