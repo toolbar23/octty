@@ -339,17 +339,18 @@ pub(crate) async fn reconcile_pane_activity(
                 cols: 120,
                 rows: 40,
             };
-            let session_name = stable_tmux_session_name(&spec);
-            let Some(tmux_activity) = tmux_session_activity(&session_name).await? else {
+            let session_name = stable_retach_session_name(&spec);
+            let Some(retach_activity) = retach_session_activity(&session_name).await? else {
                 continue;
             };
-            let screen = capture_tmux_pane_by_session(&session_name)
-                .await
-                .ok()
-                .map(|screen| screen_fingerprint(&screen));
-            let activity_at_s = tmux_activity
+            // Retach does not currently expose a non-attaching screen capture API.
+            // Attaching here would evict the live UI client for inactive workspaces,
+            // so activity reconciliation only uses metadata that can be queried
+            // without taking over the session.
+            let screen = None;
+            let activity_at_s = retach_activity
                 .window_activity_at_s
-                .or(tmux_activity.session_activity_at_s);
+                .or(retach_activity.session_activity_at_s);
             let now = now_ms();
             let key = (snapshot.workspace_id.clone(), pane_id.clone());
             let activity = activity_by_pane

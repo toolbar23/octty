@@ -6,7 +6,7 @@ repaints terminal text, not like a terminal renderer.
 
 The current pipeline is:
 
-1. A real PTY runs `tmux`.
+1. A real PTY runs `retach`.
 2. PTY output bytes are fed into `libghostty-vt`.
 3. The VT state is extracted into an Octty terminal snapshot.
 4. GPUI builds paint input from the snapshot.
@@ -15,7 +15,7 @@ The current pipeline is:
    per visible non-space terminal cell.
 
 That model removed the worst mistakes from the first Rust version: the UI no
-longer uses `tmux capture-pane` as the display source, shaping is cached, and
+longer uses external pane capture as the display source, shaping is cached, and
 background runs are not split just because foreground syntax colors change.
 The remaining gap is mostly step 6.
 

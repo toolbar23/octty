@@ -439,7 +439,7 @@ pub(crate) fn render_sidebar_project_group(
             workspace,
             active_workspace_index == Some(*index),
             shortcut_labels.get(&workspace.id).map(String::as_str),
-            workspace_activity_state(workspace, pane_activity),
+            workspace_activity_indicator(workspace, pane_activity),
             cx,
         ));
     }
@@ -453,7 +453,7 @@ pub(crate) fn render_sidebar_workspace_row(
     workspace: &WorkspaceSummary,
     active: bool,
     shortcut_label: Option<&str>,
-    activity_state: ActivityState,
+    activity_indicator: WorkspaceActivityIndicator,
     cx: &mut Context<OcttyApp>,
 ) -> impl IntoElement {
     let bookmark_label = workspace_bookmark_label(workspace);
@@ -536,7 +536,7 @@ pub(crate) fn render_sidebar_workspace_row(
             .flex()
             .items_center()
             .gap_2()
-            .child(render_workspace_activity_icon(activity_state))
+            .child(render_workspace_activity_icon(activity_indicator))
             .child(workspace_name)
             .children(render_workspace_status_tags(&workspace.status)),
     );
@@ -549,29 +549,56 @@ pub(crate) fn render_sidebar_workspace_row(
     row
 }
 
-pub(crate) fn render_workspace_activity_icon(activity_state: ActivityState) -> gpui::Div {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkspaceActivityMarker {
+    AttentionActive,
+    AttentionIdle,
+    Active,
+    Idle,
+}
+
+pub(crate) fn workspace_activity_marker(
+    activity_indicator: WorkspaceActivityIndicator,
+) -> WorkspaceActivityMarker {
+    let has_recent_activity = activity_indicator.activity_state == ActivityState::Active;
+    match (activity_indicator.needs_attention, has_recent_activity) {
+        (true, true) => WorkspaceActivityMarker::AttentionActive,
+        (true, false) => WorkspaceActivityMarker::AttentionIdle,
+        (false, true) => WorkspaceActivityMarker::Active,
+        (false, false) => WorkspaceActivityMarker::Idle,
+    }
+}
+
+pub(crate) fn render_workspace_activity_icon(
+    activity_indicator: WorkspaceActivityIndicator,
+) -> gpui::Div {
     let base = div()
         .relative()
         .flex_none()
         .w(px(9.0))
         .h(px(9.0))
         .rounded_full();
-    match activity_state {
-        ActivityState::Active => base.child(render_workspace_activity_spinner()),
-        ActivityState::IdleUnseen => base.bg(rgb(0x4a7cff)),
-        ActivityState::IdleSeen => base.bg(rgb(0x6b7280)),
+    match workspace_activity_marker(activity_indicator) {
+        WorkspaceActivityMarker::AttentionActive => {
+            base.child(render_workspace_activity_spinner(rgb(0xe5484d).into()))
+        }
+        WorkspaceActivityMarker::AttentionIdle => base.bg(rgb(0xe5484d)),
+        WorkspaceActivityMarker::Active => {
+            base.child(render_workspace_activity_spinner(rgb(0x5f7bff).into()))
+        }
+        WorkspaceActivityMarker::Idle => base.bg(rgb(0x6b7280)),
     }
 }
 
-fn render_workspace_activity_spinner() -> impl IntoElement {
-    workspace_activity_spinner_canvas(0.0).with_animation(
+fn render_workspace_activity_spinner(color: Hsla) -> impl IntoElement {
+    workspace_activity_spinner_canvas(0.0, color).with_animation(
         "workspace-activity-spinner",
         Animation::new(Duration::from_millis(750)).repeat(),
-        |_, delta| workspace_activity_spinner_canvas(delta),
+        move |_, delta| workspace_activity_spinner_canvas(delta, color),
     )
 }
 
-fn workspace_activity_spinner_canvas(phase: f32) -> impl IntoElement {
+fn workspace_activity_spinner_canvas(phase: f32, color: Hsla) -> impl IntoElement {
     const DOTS: usize = 8;
     const DOT_SIZE: f32 = 1.8;
     const RADIUS: f32 = 3.0;
@@ -584,7 +611,6 @@ fn workspace_activity_spinner_canvas(phase: f32) -> impl IntoElement {
             let center_y =
                 bounds.origin.y.as_f64() as f32 + bounds.size.height.as_f64() as f32 / 2.0;
             let head = phase * DOTS as f32;
-            let color = Hsla::from(rgb(0x5f7bff));
 
             for dot in 0..DOTS {
                 let angle = (dot as f32 / DOTS as f32) * std::f32::consts::TAU;

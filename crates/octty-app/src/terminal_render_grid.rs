@@ -63,6 +63,126 @@ pub(crate) fn render_terminal_grid(
     grid
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TerminalScrollbarGeometry {
+    pub(crate) track_height: f32,
+    pub(crate) thumb_top: f32,
+    pub(crate) thumb_height: f32,
+}
+
+pub(crate) fn terminal_scrollbar_geometry(
+    scroll: TerminalScrollSnapshot,
+    track_height: f32,
+) -> Option<TerminalScrollbarGeometry> {
+    if track_height <= 0.0 || scroll.len == 0 || scroll.total <= scroll.len {
+        return None;
+    }
+
+    let max_offset = scroll.total.saturating_sub(scroll.len);
+    let offset = scroll.offset.min(max_offset);
+    let min_thumb_height = TERMINAL_SCROLLBAR_MIN_THUMB_HEIGHT.min(track_height);
+    let proportional_height = track_height * scroll.len as f32 / scroll.total as f32;
+    let thumb_height = proportional_height.clamp(min_thumb_height, track_height);
+    let travel = (track_height - thumb_height).max(0.0);
+    let thumb_top = if max_offset == 0 {
+        0.0
+    } else {
+        travel * offset as f32 / max_offset as f32
+    };
+
+    Some(TerminalScrollbarGeometry {
+        track_height,
+        thumb_top,
+        thumb_height,
+    })
+}
+
+pub(crate) fn terminal_scrollbar_click_scroll_lines(
+    scroll: TerminalScrollSnapshot,
+    rows: u16,
+    track_height: f32,
+    click_y: f32,
+) -> Option<isize> {
+    let geometry = terminal_scrollbar_geometry(scroll, track_height)?;
+    let page = rows.saturating_sub(1).max(1) as isize;
+    if click_y < geometry.thumb_top {
+        Some(-page)
+    } else if click_y > geometry.thumb_top + geometry.thumb_height {
+        Some(page)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn render_terminal_scrollbar(
+    workspace_id: &str,
+    pane_id: &str,
+    scroll: TerminalScrollSnapshot,
+    rows: u16,
+    cx: &mut Context<OcttyApp>,
+) -> gpui::Div {
+    let track_height = TERMINAL_CELL_HEIGHT * rows as f32;
+    let geometry = terminal_scrollbar_geometry(scroll, track_height);
+    let bounds: Rc<RefCell<Option<Bounds<Pixels>>>> = Rc::new(RefCell::new(None));
+    let paint_bounds = bounds.clone();
+    let click_bounds = bounds.clone();
+    let scroll_workspace_id = workspace_id.to_owned();
+    let scroll_pane_id = pane_id.to_owned();
+    let mut track = div()
+        .relative()
+        .flex_none()
+        .w(px(TERMINAL_SCROLLBAR_WIDTH))
+        .h(px(track_height))
+        .overflow_hidden()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                let Some(bounds) = click_bounds.borrow().as_ref().copied() else {
+                    return;
+                };
+                let click_y = (event.position.y - bounds.origin.y).as_f32();
+                let Some(lines) =
+                    terminal_scrollbar_click_scroll_lines(scroll, rows, track_height, click_y)
+                else {
+                    return;
+                };
+                this.scroll_live_terminal_lines(&scroll_workspace_id, &scroll_pane_id, lines, cx);
+            }),
+        )
+        .child(
+            canvas(
+                move |bounds, _window, _cx| {
+                    *paint_bounds.borrow_mut() = Some(bounds);
+                },
+                move |_bounds, _state, _window, _cx| {},
+            )
+            .absolute()
+            .top(px(0.0))
+            .left(px(0.0))
+            .w(px(TERMINAL_SCROLLBAR_WIDTH))
+            .h(px(track_height)),
+        );
+
+    if geometry.is_some() {
+        track = track.bg(rgba(0xffffff10));
+    }
+
+    if let Some(geometry) = geometry {
+        track = track.child(
+            div()
+                .absolute()
+                .top(px(geometry.thumb_top))
+                .left(px(1.0))
+                .w(px((TERMINAL_SCROLLBAR_WIDTH - 2.0).max(1.0)))
+                .h(px(geometry.thumb_height))
+                .rounded_sm()
+                .bg(rgba(0xd7dce480)),
+        );
+    }
+
+    track
+}
+
 pub(crate) fn terminal_paint_input(
     snapshot: &TerminalGridSnapshot,
     default_fg: Rgba,

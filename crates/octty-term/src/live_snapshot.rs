@@ -51,6 +51,9 @@ impl<'alloc> SnapshotExtractor<'alloc> {
         };
         let cols = snapshot.cols().map_err(renderer_context("read cols"))?;
         let rows = snapshot.rows().map_err(renderer_context("read rows"))?;
+        let scrollbar = terminal
+            .scrollbar()
+            .map_err(renderer_context("read scrollbar"))?;
         let mut rows_data = Vec::with_capacity(rows as usize);
         let mut plain_text = String::new();
         let mut row_iteration = self
@@ -154,6 +157,11 @@ impl<'alloc> SnapshotExtractor<'alloc> {
             session_id: session_id.to_owned(),
             cols,
             rows,
+            scroll: TerminalScrollSnapshot {
+                total: scrollbar.total,
+                offset: scrollbar.offset,
+                len: scrollbar.len,
+            },
             default_fg,
             default_bg,
             cursor,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::app_live_terminals::terminal_page_scroll_direction;
 use crate::app_panes::{SidebarRenameDialogKeyAction, sidebar_rename_dialog_key_action};
 use crate::cli::{TerminalReplayEventsStep, parse_terminal_replay_events};
 
@@ -26,6 +27,164 @@ fn test_workspace(id: &str, root_id: &str, workspace_name: &str) -> WorkspaceSum
         updated_at: 0,
         last_opened_at: 0,
     }
+}
+
+fn test_terminal_scroll(rows: u16) -> TerminalScrollSnapshot {
+    TerminalScrollSnapshot {
+        total: u64::from(rows),
+        offset: 0,
+        len: u64::from(rows),
+    }
+}
+
+fn test_key_event(shortcut: &str) -> KeyDownEvent {
+    KeyDownEvent {
+        keystroke: gpui::Keystroke::parse(shortcut).expect("parse shortcut"),
+        is_held: false,
+    }
+}
+
+#[test]
+fn workspace_activity_marker_combines_attention_and_recent_activity() {
+    assert_eq!(
+        workspace_activity_marker(WorkspaceActivityIndicator {
+            activity_state: ActivityState::Active,
+            needs_attention: true,
+        }),
+        WorkspaceActivityMarker::AttentionActive
+    );
+    assert_eq!(
+        workspace_activity_marker(WorkspaceActivityIndicator {
+            activity_state: ActivityState::IdleSeen,
+            needs_attention: true,
+        }),
+        WorkspaceActivityMarker::AttentionIdle
+    );
+    assert_eq!(
+        workspace_activity_marker(WorkspaceActivityIndicator {
+            activity_state: ActivityState::Active,
+            needs_attention: false,
+        }),
+        WorkspaceActivityMarker::Active
+    );
+    assert_eq!(
+        workspace_activity_marker(WorkspaceActivityIndicator {
+            activity_state: ActivityState::IdleUnseen,
+            needs_attention: false,
+        }),
+        WorkspaceActivityMarker::Idle
+    );
+}
+
+#[test]
+fn workspace_activity_marker_stops_spinning_when_attention_closes_activity() {
+    let workspace = test_workspace("workspace-1", "root-1", "main");
+    let mut activity = PaneActivity::new("workspace-1", "pane-1", 1_000);
+    activity.record_activity(now_ms(), None, None);
+    activity.record_attention(now_ms());
+    let pane_activity = [((workspace.id.clone(), "pane-1".to_owned()), activity)]
+        .into_iter()
+        .collect();
+
+    assert_eq!(
+        workspace_activity_marker(workspace_activity_indicator(&workspace, &pane_activity)),
+        WorkspaceActivityMarker::AttentionIdle
+    );
+}
+
+#[test]
+fn workspace_activity_marker_stays_idle_after_attention_is_seen() {
+    let workspace = test_workspace("workspace-1", "root-1", "main");
+    let mut activity = PaneActivity::new("workspace-1", "pane-1", 1_000);
+    let now = now_ms();
+    activity.record_activity(now, None, None);
+    activity.record_attention(now);
+    activity.record_seen(now);
+    let pane_activity = [((workspace.id.clone(), "pane-1".to_owned()), activity)]
+        .into_iter()
+        .collect();
+
+    assert_eq!(
+        workspace_activity_marker(workspace_activity_indicator(&workspace, &pane_activity)),
+        WorkspaceActivityMarker::Idle
+    );
+}
+
+#[test]
+fn pane_border_marker_prefers_attention_until_seen() {
+    assert_eq!(
+        pane_border_marker(
+            true,
+            PaneActivityIndicator {
+                activity_state: ActivityState::Active,
+                needs_attention: true,
+                show_attention: true,
+            },
+        ),
+        PaneBorderMarker::Attention
+    );
+    assert_eq!(
+        pane_border_marker(
+            false,
+            PaneActivityIndicator {
+                activity_state: ActivityState::IdleUnseen,
+                needs_attention: true,
+                show_attention: true,
+            },
+        ),
+        PaneBorderMarker::Attention
+    );
+    assert_eq!(
+        pane_border_marker(
+            true,
+            PaneActivityIndicator {
+                activity_state: ActivityState::Active,
+                needs_attention: false,
+                show_attention: false,
+            },
+        ),
+        PaneBorderMarker::Focused
+    );
+    assert_eq!(
+        pane_border_marker(
+            false,
+            PaneActivityIndicator {
+                activity_state: ActivityState::IdleUnseen,
+                needs_attention: false,
+                show_attention: false,
+            },
+        ),
+        PaneBorderMarker::Unfocused
+    );
+}
+
+#[test]
+fn pane_border_marker_keeps_attention_visible_after_seen() {
+    let mut activity = PaneActivity::new("workspace-1", "pane-1", 1_000);
+    activity.record_attention(2_000);
+    activity.record_seen(2_100);
+
+    assert!(pane_attention_visible(&activity, 2_500));
+    assert_eq!(
+        pane_attention_clear_remaining_ms(&activity, 2_500),
+        Some(3_600)
+    );
+    assert_eq!(
+        pane_border_marker(
+            true,
+            PaneActivityIndicator {
+                activity_state: activity.state_at(2_500, PANE_ACTIVITY_ACTIVE_WINDOW_MS),
+                needs_attention: activity.needs_attention,
+                show_attention: pane_attention_visible(&activity, 2_500),
+            },
+        ),
+        PaneBorderMarker::Attention
+    );
+    assert!(pane_attention_visible(&activity, 5_500));
+    assert!(!pane_attention_visible(&activity, 6_100));
+
+    activity.record_seen(10_000);
+    assert!(!pane_attention_visible(&activity, 10_000));
 }
 
 #[test]
@@ -89,6 +248,34 @@ fn named_keys_become_terminal_keys() {
         live_terminal_input_from_key_parts("backspace", None, false, false, false, false, false)
             .expect("backspace input");
     assert_eq!(backspace.key, LiveTerminalKey::Backspace);
+
+    let page_up =
+        live_terminal_input_from_key_parts("pageup", None, false, false, false, false, false)
+            .expect("page-up input");
+    assert_eq!(page_up.key, LiveTerminalKey::PageUp);
+
+    let page_down =
+        live_terminal_input_from_key_parts("pagedown", None, false, false, false, false, false)
+            .expect("page-down input");
+    assert_eq!(page_down.key, LiveTerminalKey::PageDown);
+}
+
+#[test]
+fn page_keys_map_to_viewport_scroll_directions() {
+    let page_up =
+        live_terminal_input_from_key_parts("pageup", None, false, false, false, false, false)
+            .expect("page-up input");
+    assert_eq!(terminal_page_scroll_direction(&page_up), Some(-1));
+
+    let page_down =
+        live_terminal_input_from_key_parts("pagedown", None, false, false, false, false, false)
+            .expect("page-down input");
+    assert_eq!(terminal_page_scroll_direction(&page_down), Some(1));
+
+    let modified =
+        live_terminal_input_from_key_parts("pageup", None, true, false, false, false, false)
+            .expect("modified page-up input");
+    assert_eq!(terminal_page_scroll_direction(&modified), None);
 }
 
 #[test]
@@ -133,13 +320,13 @@ fn tab_keys_become_terminal_tab_keys() {
 }
 
 #[test]
-fn tmux_fallback_maps_tab_and_control_j() {
+fn retach_fallback_maps_tab_and_control_j() {
     assert_eq!(
-        tmux_key_for_live_key(&terminal_tab_input(false)).as_deref(),
+        retach_key_for_live_key(&terminal_tab_input(false)).as_deref(),
         Some("Tab")
     );
     assert_eq!(
-        tmux_key_for_live_key(&terminal_control_j_input()).as_deref(),
+        retach_key_for_live_key(&terminal_control_j_input()).as_deref(),
         Some("C-j")
     );
 }
@@ -289,6 +476,124 @@ fn terminal_input_preserves_paste_shortcut() {
         live_terminal_input_from_key_parts("p", Some("P"), true, false, true, false, false)
             .is_some()
     );
+    for key in ["c", "x", "v", "p"] {
+        assert_eq!(
+            live_terminal_input_from_key_parts(key, None, false, false, false, true, false),
+            None
+        );
+    }
+    assert_eq!(
+        live_terminal_input_from_key_parts("KeyC", Some("c"), false, false, false, true, false),
+        None
+    );
+    assert_eq!(
+        live_terminal_input_from_key_parts("KeyX", Some("x"), false, false, false, true, false),
+        None
+    );
+    assert_eq!(
+        live_terminal_input_from_key_parts("KeyV", Some("v"), false, false, false, true, false),
+        None
+    );
+    assert_eq!(
+        live_terminal_input_from_key_parts("KeyP", Some("p"), false, false, false, true, false),
+        None
+    );
+    assert_eq!(
+        live_terminal_input_from_key_parts("insert", None, true, false, false, false, false),
+        None
+    );
+    assert_eq!(
+        live_terminal_input_from_key_parts("insert", None, false, false, true, false, false),
+        None
+    );
+    assert!(
+        live_terminal_input_from_key_parts("x", Some("x"), true, false, false, false, false)
+            .is_some()
+    );
+}
+
+#[test]
+fn platform_clipboard_shortcuts_are_app_actions() {
+    assert_eq!(
+        clipboard_shortcut_action_from_key_event(&test_key_event("super-c")),
+        Some(ClipboardShortcutAction::Copy)
+    );
+    assert_eq!(
+        clipboard_shortcut_action_from_key_event(&test_key_event("super-x")),
+        Some(ClipboardShortcutAction::Cut)
+    );
+    assert_eq!(
+        clipboard_shortcut_action_from_key_event(&test_key_event("super-v")),
+        Some(ClipboardShortcutAction::Paste)
+    );
+    assert_eq!(
+        clipboard_shortcut_action_from_key_event(&test_key_event("super-p")),
+        Some(ClipboardShortcutAction::Paste)
+    );
+    assert_eq!(
+        clipboard_shortcut_action_from_key_parts(
+            "KeyC",
+            Some("c"),
+            false,
+            false,
+            false,
+            true,
+            false
+        ),
+        Some(ClipboardShortcutAction::Copy)
+    );
+    assert_eq!(
+        clipboard_shortcut_action_from_key_parts(
+            "KeyV",
+            Some("v"),
+            false,
+            false,
+            false,
+            true,
+            false
+        ),
+        Some(ClipboardShortcutAction::Paste)
+    );
+    assert_eq!(
+        clipboard_shortcut_action_from_key_parts(
+            "KeyX",
+            Some("x"),
+            false,
+            false,
+            false,
+            true,
+            false
+        ),
+        Some(ClipboardShortcutAction::Cut)
+    );
+    assert_eq!(
+        clipboard_shortcut_action_from_key_parts(
+            "KeyP",
+            Some("p"),
+            false,
+            false,
+            false,
+            true,
+            false
+        ),
+        Some(ClipboardShortcutAction::Paste)
+    );
+}
+
+#[test]
+fn rewritten_clipboard_shortcuts_are_app_actions() {
+    assert_eq!(
+        clipboard_shortcut_action_from_key_parts("insert", None, true, false, false, false, false),
+        Some(ClipboardShortcutAction::Copy)
+    );
+    assert_eq!(
+        clipboard_shortcut_action_from_key_parts("insert", None, false, false, true, false, false),
+        Some(ClipboardShortcutAction::Paste)
+    );
+    assert_eq!(
+        clipboard_shortcut_action_from_key_parts("x", Some("x"), true, false, false, false, false),
+        None
+    );
 }
 
 #[test]
@@ -397,6 +702,20 @@ fn workspace_key_bindings_include_configured_shell_shortcuts() {
         .expect("ctrl-shift-a binding");
 
     assert!(binding.action().partial_eq(&codex_action));
+}
+
+#[test]
+fn configured_shell_shortcuts_match_key_events_before_terminal_input() {
+    let config = default_shell_type_config().expect("default shell config");
+
+    assert_eq!(
+        shell_type_shortcut_from_key_event(&config.shell_types, &test_key_event("ctrl-shift-a")),
+        Some("codex".to_owned())
+    );
+    assert_eq!(
+        shell_type_shortcut_from_key_event(&config.shell_types, &test_key_event("ctrl-shift-j")),
+        Some("jjui".to_owned())
+    );
 }
 
 #[test]
@@ -864,6 +1183,7 @@ fn terminal_paint_input_shapes_only_visible_text_cells() {
         session_id: "session-1".to_owned(),
         cols: 3,
         rows: 1,
+        scroll: test_terminal_scroll(1),
         default_fg,
         default_bg,
         cursor: None,
@@ -952,6 +1272,7 @@ fn terminal_background_runs_ignore_foreground_style_splits() {
         session_id: "session-1".to_owned(),
         cols: 4,
         rows: 1,
+        scroll: test_terminal_scroll(1),
         default_fg,
         default_bg,
         cursor: None,
@@ -1013,6 +1334,7 @@ fn terminal_background_runs_render_inverse_default_colors() {
         session_id: "session-1".to_owned(),
         cols: 2,
         rows: 1,
+        scroll: test_terminal_scroll(1),
         default_fg,
         default_bg,
         cursor: None,
@@ -1057,6 +1379,7 @@ fn terminal_paint_input_rebuilds_only_dirty_rows() {
         session_id: "session-1".to_owned(),
         cols: 2,
         rows: 2,
+        scroll: test_terminal_scroll(2),
         default_fg,
         default_bg,
         cursor: None,
@@ -1138,6 +1461,7 @@ fn terminal_paint_input_keeps_cursor_out_of_row_cache() {
         session_id: "cursor-overlay-test".to_owned(),
         cols: 2,
         rows: 1,
+        scroll: test_terminal_scroll(1),
         default_fg,
         default_bg,
         cursor: Some(octty_term::live::TerminalCursorSnapshot {
@@ -1228,6 +1552,7 @@ fn terminal_focus_only_render_reuses_row_cache() {
         session_id: "focus-overlay-test".to_owned(),
         cols: 3,
         rows: 1,
+        scroll: test_terminal_scroll(1),
         default_fg,
         default_bg,
         cursor: Some(octty_term::live::TerminalCursorSnapshot {
@@ -1288,6 +1613,7 @@ fn terminal_paint_input_keeps_glyphs_on_original_cell_columns() {
         session_id: "session-1".to_owned(),
         cols: 3,
         rows: 1,
+        scroll: test_terminal_scroll(1),
         default_fg,
         default_bg,
         cursor: None,
@@ -1338,6 +1664,7 @@ fn terminal_paint_input_preserves_wide_cell_widths() {
         session_id: "session-1".to_owned(),
         cols: 3,
         rows: 1,
+        scroll: test_terminal_scroll(1),
         default_fg,
         default_bg,
         cursor: None,
@@ -1385,6 +1712,7 @@ fn terminal_paint_input_moves_highlight_for_dirty_rows() {
         session_id: "session-1".to_owned(),
         cols: 4,
         rows: 2,
+        scroll: test_terminal_scroll(2),
         default_fg,
         default_bg,
         cursor: None,
@@ -1729,6 +2057,94 @@ fn terminal_resize_rows_subtracts_visible_chrome_without_perf_overlay() {
 }
 
 #[test]
+fn terminal_resize_from_viewport_height_matches_rendered_taskspace_chrome() {
+    let snapshot = add_pane(
+        create_default_snapshot("workspace-1"),
+        create_pane_state(PaneType::Shell, "/tmp", None),
+    );
+
+    let requests =
+        terminal_resize_requests(Some(&snapshot), taskspace_height_for_viewport(1_000.0));
+
+    assert_eq!(taskspace_height_for_viewport(1_000.0), 976.0);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].2, 90);
+    assert_eq!(requests[0].3, 53);
+}
+
+#[test]
+fn terminal_scrollbar_geometry_tracks_viewport_offset() {
+    let geometry = terminal_scrollbar_geometry(
+        TerminalScrollSnapshot {
+            total: 100,
+            offset: 50,
+            len: 25,
+        },
+        200.0,
+    )
+    .expect("scrollbar geometry");
+
+    assert_eq!(
+        geometry,
+        TerminalScrollbarGeometry {
+            track_height: 200.0,
+            thumb_top: 100.0,
+            thumb_height: 50.0,
+        }
+    );
+    assert_eq!(
+        terminal_scrollbar_geometry(
+            TerminalScrollSnapshot {
+                total: 25,
+                offset: 0,
+                len: 25,
+            },
+            200.0,
+        ),
+        None
+    );
+    assert_eq!(
+        terminal_scrollbar_click_scroll_lines(
+            TerminalScrollSnapshot {
+                total: 100,
+                offset: 50,
+                len: 25,
+            },
+            25,
+            200.0,
+            20.0,
+        ),
+        Some(-24)
+    );
+    assert_eq!(
+        terminal_scrollbar_click_scroll_lines(
+            TerminalScrollSnapshot {
+                total: 100,
+                offset: 50,
+                len: 25,
+            },
+            25,
+            200.0,
+            180.0,
+        ),
+        Some(24)
+    );
+    assert_eq!(
+        terminal_scrollbar_click_scroll_lines(
+            TerminalScrollSnapshot {
+                total: 100,
+                offset: 50,
+                len: 25,
+            },
+            25,
+            200.0,
+            120.0,
+        ),
+        None
+    );
+}
+
+#[test]
 fn resize_focused_column_only_changes_active_column_width() {
     let mut snapshot = create_default_snapshot("workspace-1");
     snapshot = add_pane(snapshot, create_pane_state(PaneType::Note, "/tmp", None));
@@ -1832,6 +2248,7 @@ fn picker_preview_snapshot(frame: usize, cols: u16, rows: u16) -> TerminalGridSn
         session_id: "picker-preview-profile".to_owned(),
         cols,
         rows,
+        scroll: test_terminal_scroll(rows),
         default_fg,
         default_bg,
         cursor: Some(octty_term::live::TerminalCursorSnapshot {
@@ -1871,6 +2288,7 @@ fn shell_prompt_snapshot(
         session_id: session_id.to_owned(),
         cols,
         rows,
+        scroll: test_terminal_scroll(rows),
         default_fg,
         default_bg,
         cursor: Some(octty_term::live::TerminalCursorSnapshot {
@@ -2065,6 +2483,7 @@ fn test_terminal_snapshot(
         session_id: session_id.to_owned(),
         cols,
         rows,
+        scroll: test_terminal_scroll(rows),
         default_fg,
         default_bg,
         cursor: None,

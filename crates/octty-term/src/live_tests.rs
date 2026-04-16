@@ -151,6 +151,69 @@ fn terminal_osc_parser_ignores_conemu_progress_sequences() {
 }
 
 #[test]
+fn terminal_osc_parser_reports_shell_command_completion() {
+    let mut parser = TerminalOscNotificationParser::default();
+
+    assert_eq!(
+        parser.push(b"\x1b]133;D;exit=success\x07"),
+        vec![TerminalNotification {
+            title: "Command finished".to_owned(),
+            body: "Command completed.".to_owned(),
+        }]
+    );
+    assert_eq!(
+        parser.push(b"\x1b]633;D;status=0\x07"),
+        vec![TerminalNotification {
+            title: "Command finished".to_owned(),
+            body: "Command completed.".to_owned(),
+        }]
+    );
+    assert_eq!(
+        parser.push(b"\x1b]133;D\x07"),
+        vec![TerminalNotification {
+            title: "Command finished".to_owned(),
+            body: "Command completed.".to_owned(),
+        }]
+    );
+
+    let notifications = parser.push(b"\x1b]133;D;exit=failure;status=130;signal=SIGINT\x07");
+
+    assert_eq!(
+        notifications,
+        vec![TerminalNotification {
+            title: "Command needs attention".to_owned(),
+            body: "Exited with status 130 (SIGINT).".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn terminal_osc_filter_strips_well_known_shell_integration_sequences() {
+    let mut filter = TerminalOscPassthroughFilter::default();
+
+    let output = filter.push(b"before\x1b]133;C;id=abc;cwd=/tmp\x07after");
+
+    assert_eq!(output, b"beforeafter");
+}
+
+#[test]
+fn terminal_osc_filter_preserves_non_shell_integration_sequences() {
+    let mut filter = TerminalOscPassthroughFilter::default();
+
+    let output = filter.push(b"\x1b]0;title\x07body");
+
+    assert_eq!(output, b"\x1b]0;title\x07body");
+}
+
+#[test]
+fn terminal_osc_filter_strips_split_shell_integration_sequences() {
+    let mut filter = TerminalOscPassthroughFilter::default();
+
+    assert_eq!(filter.push(b"before\x1b]633;C;id"), b"before");
+    assert_eq!(filter.push(b"=abc\x1b\\after"), b"after");
+}
+
+#[test]
 fn picker_preview_ansi_fixture_reaches_snapshot() {
     let mut terminal = Terminal::new(TerminalOptions {
         cols: 120,
@@ -208,17 +271,44 @@ fn terminal_trace_helpers_are_stable() {
 fn xtversion_query_does_not_emit_pty_input() {
     let grid_size = Cell::new((80, 24));
     let pty_responses = RefCell::new(VecDeque::<Vec<u8>>::new());
+    let (notification_tx, _notification_rx) = mpsc::channel();
     let mut terminal = Terminal::new(TerminalOptions {
         cols: 80,
         rows: 24,
         max_scrollback: 100,
     })
     .expect("terminal");
-    install_terminal_effects(&mut terminal, &grid_size, &pty_responses).expect("terminal effects");
+    install_terminal_effects(&mut terminal, &grid_size, &pty_responses, notification_tx)
+        .expect("terminal effects");
 
     terminal.vt_write(b"\x1b[>q");
 
     assert!(pty_responses.borrow().is_empty());
+}
+
+#[test]
+fn bell_emits_attention_notification() {
+    let grid_size = Cell::new((80, 24));
+    let pty_responses = RefCell::new(VecDeque::<Vec<u8>>::new());
+    let (notification_tx, notification_rx) = mpsc::channel();
+    let mut terminal = Terminal::new(TerminalOptions {
+        cols: 80,
+        rows: 24,
+        max_scrollback: 100,
+    })
+    .expect("terminal");
+    install_terminal_effects(&mut terminal, &grid_size, &pty_responses, notification_tx)
+        .expect("terminal effects");
+
+    terminal.vt_write(b"\x07");
+
+    assert_eq!(
+        notification_rx.try_recv(),
+        Ok(TerminalNotification {
+            title: "Terminal needs attention".to_owned(),
+            body: "A terminal emitted a bell.".to_owned(),
+        })
+    );
 }
 
 #[test]

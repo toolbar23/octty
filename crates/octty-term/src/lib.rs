@@ -8,9 +8,8 @@ pub mod ghostty_vt;
 #[cfg(feature = "ghostty-vt")]
 pub mod live;
 
-mod tmux;
-pub(crate) use tmux::ensure_tmux_config;
-pub use tmux::*;
+mod retach;
+pub use retach::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalSessionSpec {
@@ -26,15 +25,15 @@ pub struct TerminalSessionSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TmuxLaunch {
-    pub socket_name: String,
+pub struct RetachLaunch {
+    pub program: String,
     pub session_name: String,
     pub args: Vec<String>,
     pub clean_env: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TmuxSessionActivity {
+pub struct RetachSessionActivity {
     pub session_name: String,
     pub session_activity_at_s: Option<i64>,
     pub window_activity_at_s: Option<i64>,
@@ -48,8 +47,8 @@ pub struct TmuxSessionActivity {
 pub enum TerminalError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("tmux command failed: {0}")]
-    Tmux(String),
+    #[error("retach command failed: {0}")]
+    Retach(String),
     #[error("pty error: {0}")]
     Pty(String),
     #[error("terminal renderer error: {0}")]

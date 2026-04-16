@@ -6,6 +6,7 @@ pub(crate) struct LiveTerminalRuntime {
     pub(crate) master: Box<dyn portable_pty::MasterPty + Send>,
     pub(crate) writer: Box<dyn Write + Send>,
     pub(crate) child: Box<dyn portable_pty::Child + Send + Sync>,
+    pub(crate) startup_command: Option<Vec<u8>>,
     pub(crate) command_rx: mpsc::Receiver<LiveTerminalCommand>,
     pub(crate) pty_output_rx: mpsc::Receiver<Vec<u8>>,
     pub(crate) wake_rx: mpsc::Receiver<LiveTerminalWake>,
@@ -33,7 +34,12 @@ impl LiveTerminalRuntime {
                 u32::from(DEFAULT_CELL_HEIGHT),
             )
             .map_err(renderer_error)?;
-        install_terminal_effects(&mut terminal, &grid_size, &pty_responses)?;
+        install_terminal_effects(
+            &mut terminal,
+            &grid_size,
+            &pty_responses,
+            self.notification_tx.clone(),
+        )?;
 
         let mut renderer = SnapshotExtractor::new()?;
         let mut input = KeyInputEncoder::new()?;
@@ -46,8 +52,10 @@ impl LiveTerminalRuntime {
         let mut pending_vt_write_micros = 0u64;
         let mut pending_pty_output_bytes = 0u64;
         let mut notification_parser = TerminalOscNotificationParser::default();
+        let mut osc_passthrough_filter = TerminalOscPassthroughFilter::default();
         let mut recorder =
             TerminalTraceRecorder::from_env(&self.session_id, self.spec.cols, self.spec.rows);
+        let mut startup_command = self.startup_command.take();
 
         loop {
             let timeout = terminal_command_wait_timeout(
@@ -100,8 +108,10 @@ impl LiveTerminalRuntime {
                 let effect = self.handle_pty_output(
                     pty_output,
                     &mut notification_parser,
+                    &mut osc_passthrough_filter,
                     &mut terminal,
                     recorder.as_mut(),
+                    &mut startup_command,
                 )?;
                 pending_vt_write_micros =
                     pending_vt_write_micros.saturating_add(effect.vt_write_micros);
@@ -238,8 +248,10 @@ impl LiveTerminalRuntime {
         &mut self,
         bytes: Vec<u8>,
         notification_parser: &mut TerminalOscNotificationParser,
+        osc_passthrough_filter: &mut TerminalOscPassthroughFilter,
         terminal: &mut Terminal<'a, 'a>,
         mut recorder: Option<&mut TerminalTraceRecorder>,
+        startup_command: &mut Option<Vec<u8>>,
     ) -> Result<LiveTerminalCommandEffect, TerminalError> {
         let byte_count = bytes.len() as u64;
         if let Some(recorder) = recorder.as_mut() {
@@ -248,8 +260,22 @@ impl LiveTerminalRuntime {
         for notification in notification_parser.push(&bytes) {
             let _ = self.notification_tx.send(notification);
         }
+        let vt_bytes = osc_passthrough_filter.push(&bytes);
+        if startup_command.is_some()
+            && bytes
+                .windows(b"[retach: new session".len())
+                .any(|window| window == b"[retach: new session")
+        {
+            if let Some(command) = startup_command.take() {
+                self.writer.write_all(&command)?;
+                self.writer.flush()?;
+                if let Some(recorder) = recorder.as_mut() {
+                    recorder.record_input("startup", &command);
+                }
+            }
+        }
         let vt_write_started_at = Instant::now();
-        terminal.vt_write(&bytes);
+        terminal.vt_write(&vt_bytes);
         Ok(LiveTerminalCommandEffect::changed_with_vt_write(
             micros_since(vt_write_started_at, Instant::now()),
             byte_count,
@@ -382,12 +408,20 @@ pub(crate) fn install_terminal_effects<'a>(
     terminal: &mut Terminal<'a, 'a>,
     grid_size: &'a Cell<(u16, u16)>,
     pty_responses: &'a RefCell<VecDeque<Vec<u8>>>,
+    notification_tx: mpsc::Sender<TerminalNotification>,
 ) -> Result<(), TerminalError> {
     terminal
         .on_pty_write(|_terminal, data| {
             if !terminal_pty_response_is_xtversion(data) {
                 pty_responses.borrow_mut().push_back(data.to_vec());
             }
+        })
+        .map_err(renderer_error)?
+        .on_bell(move |_terminal| {
+            let _ = notification_tx.send(TerminalNotification {
+                title: "Terminal needs attention".to_owned(),
+                body: "A terminal emitted a bell.".to_owned(),
+            });
         })
         .map_err(renderer_error)?
         .on_size(move |_terminal| {

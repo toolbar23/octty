@@ -46,6 +46,7 @@ impl OcttyApp {
             pending_pane_activity_persistence: HashMap::new(),
             pane_activity_persist_active: false,
             pane_activity_reconcile_active: false,
+            pane_attention_clear_timer_active: false,
         };
         if app.status.starts_with("Startup failed:") {
             app.show_error(app.status.clone(), cx);

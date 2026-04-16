@@ -1,5 +1,11 @@
 use super::*;
 
+impl LiveTerminalPane {
+    pub(crate) fn scroll_viewport(&self, lines: isize) {
+        let _ = self.handle.scroll(lines);
+    }
+}
+
 impl OcttyApp {
     pub(crate) fn ensure_live_terminals_for_active_snapshot(&mut self, cx: &mut Context<Self>) {
         let Some(workspace) = self.active_workspace().cloned() else {
@@ -21,7 +27,7 @@ impl OcttyApp {
                 let session_id = payload
                     .session_id
                     .clone()
-                    .unwrap_or_else(|| stable_tmux_session_name(&spec));
+                    .unwrap_or_else(|| stable_retach_session_name(&spec));
                 payload.session_id = Some(session_id);
                 payload.session_state = SessionState::Live;
                 Some((pane_id.clone(), spec))
@@ -156,10 +162,11 @@ impl OcttyApp {
         let mut updates = Vec::new();
         let mut notifications = Vec::new();
         for (key, live) in &mut self.live_terminals {
+            let selected = focused_live_key.as_deref() == Some(key.as_str());
+            let panel_focused = self.terminal_window_active && selected;
             for notification in live.handle.drain_notifications() {
-                notifications.push(notification);
+                notifications.push((key.clone(), notification, panel_focused));
             }
-            let focused = focused_live_key.as_deref() == Some(key.as_str());
             if let Some(snapshot) = coalesce_terminal_snapshots(live.handle.drain_snapshots()) {
                 let input_at = live.last_input_at.take();
                 if terminal_performance_data_enabled() {
@@ -184,7 +191,7 @@ impl OcttyApp {
                 live.pending_snapshot = Some(snapshot);
             }
 
-            if let Some(mut snapshot) = take_presentable_terminal_snapshot(live, focused, now) {
+            if let Some(mut snapshot) = take_presentable_terminal_snapshot(live, selected, now) {
                 if split_live_terminal_key(key)
                     .is_none_or(|(workspace_id, _)| workspace_id != active_workspace.id)
                 {
@@ -192,26 +199,40 @@ impl OcttyApp {
                 }
                 live.latest = Some(snapshot.clone());
                 live.last_presented_snapshot_at = Some(now);
-                updates.push((key.clone(), snapshot));
+                updates.push((key.clone(), snapshot, panel_focused));
             } else if live.pending_snapshot.is_some()
-                && let Some(delay) = terminal_snapshot_presentation_delay(live, focused, now)
+                && let Some(delay) = terminal_snapshot_presentation_delay(live, selected, now)
             {
                 result.defer_for(delay);
             }
         }
 
-        for notification in notifications {
+        let now_ms = now_ms();
+        for (key, notification, panel_focused) in notifications {
+            if let Some((workspace_id, pane_id)) = split_live_terminal_key(&key) {
+                if panel_focused {
+                    self.record_pane_seen(workspace_id, pane_id, now_ms, cx);
+                    result.changed = true;
+                    continue;
+                }
+                self.record_pane_attention(workspace_id, pane_id, now_ms, cx);
+                result.changed = true;
+            }
             show_desktop_notification(&notification);
         }
 
-        for (key, snapshot) in updates {
+        for (key, snapshot, panel_focused) in updates {
             let Some((workspace_id, pane_id)) = split_live_terminal_key(&key) else {
                 continue;
             };
+            self.record_pane_activity(workspace_id, pane_id, now_ms, None, None, cx);
+            result.changed = true;
+            if panel_focused {
+                self.record_pane_seen(workspace_id, pane_id, now_ms, cx);
+            }
             if workspace_id != active_workspace.id {
                 continue;
             }
-            self.record_pane_seen(workspace_id, pane_id, now_ms(), cx);
             if let Some(active_snapshot) = self.active_snapshot.as_mut()
                 && let Some(pane) = active_snapshot.panes.get_mut(pane_id)
                 && let PanePayload::Terminal(payload) = &mut pane.payload
@@ -219,7 +240,7 @@ impl OcttyApp {
                 payload.session_id = Some(snapshot.session_id.clone());
                 payload.session_state = SessionState::Live;
                 payload.restored_buffer = snapshot.plain_text.clone();
-                active_snapshot.updated_at = now_ms();
+                active_snapshot.updated_at = now_ms;
                 result.changed = true;
             }
         }
@@ -310,20 +331,56 @@ impl OcttyApp {
         event: &ScrollWheelEvent,
         cx: &mut Context<Self>,
     ) {
+        let lines = match event.delta {
+            ScrollDelta::Lines(point) => -(point.y.round() as isize),
+            ScrollDelta::Pixels(point) => {
+                -((f32::from(point.y) / TERMINAL_CELL_HEIGHT).round() as isize)
+            }
+        };
+        self.scroll_live_terminal_lines(workspace_id, pane_id, lines, cx);
+    }
+
+    pub(crate) fn scroll_live_terminal_lines(
+        &mut self,
+        workspace_id: &str,
+        pane_id: &str,
+        lines: isize,
+        cx: &mut Context<Self>,
+    ) {
+        if lines == 0 {
+            return;
+        }
         let key = live_terminal_key(workspace_id, pane_id);
         let Some(live) = self.live_terminals.get(&key) else {
             return;
         };
-        let lines = match event.delta {
-            ScrollDelta::Lines(point) => point.y.round() as isize,
-            ScrollDelta::Pixels(point) => {
-                (f32::from(point.y) / TERMINAL_CELL_HEIGHT).round() as isize
-            }
-        };
-        if lines == 0 {
-            return;
-        }
-        let _ = live.handle.scroll(lines);
+        live.scroll_viewport(lines);
         cx.stop_propagation();
+    }
+}
+
+pub(crate) fn terminal_page_scroll_lines(live: &LiveTerminalPane, direction: isize) -> isize {
+    let rows = live
+        .latest
+        .as_ref()
+        .or(live.pending_snapshot.as_ref())
+        .map(|snapshot| snapshot.rows)
+        .unwrap_or(24);
+    direction * rows.saturating_sub(1).max(1) as isize
+}
+
+pub(crate) fn terminal_page_scroll_direction(input: &LiveTerminalKeyInput) -> Option<isize> {
+    if input.text.is_some()
+        || input.modifiers.shift
+        || input.modifiers.alt
+        || input.modifiers.control
+        || input.modifiers.platform
+    {
+        return None;
+    }
+    match input.key {
+        LiveTerminalKey::PageUp => Some(-1),
+        LiveTerminalKey::PageDown => Some(1),
+        _ => None,
     }
 }

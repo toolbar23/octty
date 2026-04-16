@@ -40,6 +40,8 @@ pub(crate) fn workspace_key_bindings(shell_types: &[ShellTypeConfig]) -> Vec<Key
         KeyBinding::new("ctrl-shift-v", PasteTerminalClipboard, None),
         KeyBinding::new("super-c", CopyTerminalSelection, None),
         KeyBinding::new("super-x", CutTerminalSelection, None),
+        KeyBinding::new("super-v", PasteTerminalClipboard, None),
+        KeyBinding::new("super-p", PasteTerminalClipboard, None),
         KeyBinding::new("cmd-v", PasteTerminalClipboard, None),
         KeyBinding::new("tab", ForwardTerminalTab { shift: false }, Some("OcttyApp")),
         KeyBinding::new(

@@ -49,6 +49,7 @@ pub(crate) struct OcttyApp {
     pub(crate) pending_pane_activity_persistence: HashMap<(String, String), PaneActivity>,
     pub(crate) pane_activity_persist_active: bool,
     pub(crate) pane_activity_reconcile_active: bool,
+    pub(crate) pane_attention_clear_timer_active: bool,
 }
 
 pub(crate) struct LiveTerminalPane {

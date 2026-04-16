@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fs::{File, OpenOptions, create_dir_all},
     hash::{DefaultHasher, Hash, Hasher},
     io::{Read, Write},
@@ -21,7 +21,8 @@ use libghostty_vt::{
 };
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
-use crate::{TerminalError, TerminalSessionSpec, build_tmux_pty_launch, ensure_tmux_config};
+use crate::retach::{build_retach_pty_launch, ensure_retach_config, retach_startup_command};
+use crate::{TerminalError, TerminalSessionSpec};
 
 const DEFAULT_CELL_WIDTH: u16 = 8;
 const DEFAULT_CELL_HEIGHT: u16 = 18;
@@ -58,7 +59,7 @@ pub use types::{
     LiveTerminalHandle, LiveTerminalKey, LiveTerminalKeyInput, LiveTerminalModifiers,
     LiveTerminalSnapshotNotifier, TerminalCellSnapshot, TerminalCursorSnapshot,
     TerminalDamageSnapshot, TerminalGridSnapshot, TerminalNotification, TerminalResize,
-    TerminalRgb, TerminalRowSnapshot, TerminalSnapshotTiming,
+    TerminalRgb, TerminalRowSnapshot, TerminalScrollSnapshot, TerminalSnapshotTiming,
 };
 
 pub(crate) use input::*;

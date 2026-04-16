@@ -203,8 +203,10 @@ async fn round_trips_pane_activity() {
     let store = TursoStore::open_memory().await.unwrap();
     let mut activity = PaneActivity::new("workspace-1", "pane-1", 1_000);
     activity.record_activity(2_000, Some(2), Some("screen-a".to_owned()));
+    activity.record_attention(2_500);
     activity.record_seen(3_000);
     activity.record_tmux_observation(4_000, Some(4), Some("screen-b".to_owned()));
+    activity.record_attention(4_500);
 
     store.upsert_pane_activity(&activity).await.unwrap();
 

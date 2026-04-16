@@ -97,6 +97,12 @@ pub struct PaneActivity {
     pub last_seen_tmux_activity_at_s: Option<i64>,
     pub last_screen_fingerprint: Option<String>,
     pub last_seen_screen_fingerprint: Option<String>,
+    #[serde(default)]
+    pub needs_attention: bool,
+    #[serde(default)]
+    pub needs_attention_at_ms: i64,
+    #[serde(default)]
+    pub needs_attention_cleared_at_ms: i64,
     pub updated_at_ms: i64,
 }
 
@@ -112,6 +118,9 @@ impl PaneActivity {
             last_seen_tmux_activity_at_s: None,
             last_screen_fingerprint: None,
             last_seen_screen_fingerprint: None,
+            needs_attention: false,
+            needs_attention_at_ms: 0,
+            needs_attention_cleared_at_ms: 0,
             updated_at_ms: now_ms,
         }
     }
@@ -157,25 +166,43 @@ impl PaneActivity {
         self.updated_at_ms = self.updated_at_ms.max(observed_at_ms);
     }
 
+    pub fn record_attention(&mut self, at_ms: i64) {
+        self.needs_attention = true;
+        self.needs_attention_at_ms = self.needs_attention_at_ms.max(at_ms);
+        self.needs_attention_cleared_at_ms = 0;
+        self.updated_at_ms = self.updated_at_ms.max(at_ms);
+    }
+
     pub fn record_seen(&mut self, seen_at_ms: i64) {
         self.last_seen_at_ms = seen_at_ms;
         self.last_seen_activity_at_ms = self.last_activity_at_ms;
         self.last_seen_tmux_activity_at_s = self.last_tmux_activity_at_s;
         self.last_seen_screen_fingerprint = self.last_screen_fingerprint.clone();
+        if self.needs_attention {
+            self.needs_attention_cleared_at_ms = seen_at_ms;
+        }
+        self.needs_attention = false;
         self.updated_at_ms = self.updated_at_ms.max(seen_at_ms);
     }
 
     pub fn state_at(&self, now_ms: i64, active_window_ms: i64) -> ActivityState {
-        if self.last_activity_at_ms > 0
-            && self.last_activity_at_ms > self.last_seen_activity_at_ms
-            && now_ms.saturating_sub(self.last_activity_at_ms) <= active_window_ms
-        {
+        if self.has_recent_activity(now_ms, active_window_ms) {
             ActivityState::Active
         } else if self.has_unseen_activity() {
             ActivityState::IdleUnseen
         } else {
             ActivityState::IdleSeen
         }
+    }
+
+    pub fn has_recent_activity(&self, now_ms: i64, active_window_ms: i64) -> bool {
+        self.last_activity_at_ms > 0
+            && !self.attention_closes_current_activity()
+            && now_ms.saturating_sub(self.last_activity_at_ms) <= active_window_ms
+    }
+
+    pub fn attention_closes_current_activity(&self) -> bool {
+        self.needs_attention_at_ms > 0 && self.needs_attention_at_ms >= self.last_activity_at_ms
     }
 
     pub fn has_unseen_activity(&self) -> bool {
@@ -462,7 +489,8 @@ mod tests {
 
         assert_eq!(activity.state_at(2_500, 1_000), ActivityState::Active);
         activity.record_seen(2_600);
-        assert_eq!(activity.state_at(2_700, 1_000), ActivityState::IdleSeen);
+        assert_eq!(activity.state_at(2_700, 1_000), ActivityState::Active);
+        assert_eq!(activity.state_at(3_100, 1_000), ActivityState::IdleSeen);
 
         activity.record_activity(3_000, None, Some(screen_fingerprint("hello again")));
         assert_eq!(activity.state_at(4_100, 1_000), ActivityState::IdleUnseen);
@@ -518,6 +546,43 @@ mod tests {
 
         assert_eq!(activity.last_activity_at_ms, 10_000);
         assert_eq!(activity.state_at(20_000, 3_000), ActivityState::IdleSeen);
+    }
+
+    #[test]
+    fn pane_attention_is_explicit_and_cleared_when_seen() {
+        let mut activity = PaneActivity::new("workspace-1", "pane-1", 1_000);
+
+        activity.record_activity(2_000, None, None);
+        assert!(!activity.needs_attention);
+
+        activity.record_attention(2_100);
+        assert!(activity.needs_attention);
+        assert_eq!(activity.needs_attention_at_ms, 2_100);
+
+        activity.record_seen(2_200);
+        assert!(!activity.needs_attention);
+        assert_eq!(activity.needs_attention_cleared_at_ms, 2_200);
+        assert_eq!(activity.last_seen_activity_at_ms, 2_000);
+    }
+
+    #[test]
+    fn pane_attention_suppresses_recent_activity_until_newer_activity_arrives() {
+        let mut activity = PaneActivity::new("workspace-1", "pane-1", 1_000);
+
+        activity.record_activity(2_000, None, None);
+        assert_eq!(activity.state_at(2_500, 1_000), ActivityState::Active);
+
+        activity.record_attention(2_500);
+        assert!(activity.attention_closes_current_activity());
+        assert_eq!(activity.state_at(2_600, 1_000), ActivityState::IdleUnseen);
+
+        activity.record_seen(2_600);
+        assert!(activity.attention_closes_current_activity());
+        assert_eq!(activity.state_at(2_650, 1_000), ActivityState::IdleSeen);
+
+        activity.record_activity(2_700, None, None);
+        assert!(!activity.attention_closes_current_activity());
+        assert_eq!(activity.state_at(2_800, 1_000), ActivityState::Active);
     }
 
     #[test]

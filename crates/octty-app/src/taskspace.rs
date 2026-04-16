@@ -10,7 +10,7 @@ pub(crate) fn render_taskspace(
     viewport_width: f32,
     cx: &mut Context<OcttyApp>,
 ) -> gpui::Div {
-    let taskspace = div().mt_4().flex_1().h_full().overflow_hidden();
+    let taskspace = div().flex_1().h_full().overflow_hidden();
     let Some(snapshot) = snapshot else {
         return taskspace.flex().child(
             div()
@@ -57,7 +57,7 @@ pub(crate) fn render_taskspace(
                     diff_pane_state,
                     pane,
                     active,
-                    pane_activity_state(&snapshot.workspace_id, &pane.id, pane_activity),
+                    pane_activity_indicator(&snapshot.workspace_id, &pane.id, pane_activity),
                     terminal_live,
                     terminal_glyph_cache.clone(),
                     terminal_render_cache.clone(),
@@ -75,7 +75,7 @@ pub(crate) fn render_pane(
     diff_pane_state: DiffPaneRenderState<'_>,
     pane: &PaneState,
     active: bool,
-    activity_state: ActivityState,
+    activity_indicator: PaneActivityIndicator,
     terminal_live: Option<&LiveTerminalPane>,
     terminal_glyph_cache: Rc<RefCell<TerminalGlyphLayoutCache>>,
     terminal_render_cache: Rc<RefCell<TerminalRenderCache>>,
@@ -85,12 +85,13 @@ pub(crate) fn render_pane(
     let scroll_workspace_id = workspace_id.to_owned();
     let scroll_pane_id = pane.id.clone();
     let mut pane_el = div()
+        .relative()
         .flex()
         .flex_col()
         .flex_1()
         .overflow_hidden()
         .border_1()
-        .border_color(pane_border_color(active, activity_state))
+        .border_color(pane_border_color(active, activity_indicator))
         .rounded_md()
         .on_mouse_up(
             MouseButton::Left,
@@ -113,7 +114,7 @@ pub(crate) fn render_pane(
         );
     }
 
-    pane_el.child(render_pane_body(
+    pane_el = pane_el.child(render_pane_body(
         workspace_id,
         diff_pane_state,
         &pane.id,
@@ -123,7 +124,25 @@ pub(crate) fn render_pane(
         terminal_glyph_cache,
         terminal_render_cache,
         cx,
-    ))
+    ));
+
+    if activity_indicator.show_attention {
+        pane_el = pane_el.child(render_pane_attention_border());
+    }
+
+    pane_el
+}
+
+fn render_pane_attention_border() -> gpui::Div {
+    div()
+        .absolute()
+        .top(px(0.0))
+        .right(px(0.0))
+        .bottom(px(0.0))
+        .left(px(0.0))
+        .border_2()
+        .border_color(rgb(0xe5484d))
+        .rounded_md()
 }
 
 pub(crate) fn render_pane_body(
@@ -244,16 +263,29 @@ pub(crate) fn render_terminal_surface(
         );
     }
 
-    surface.child(render_terminal_grid(
-        live_key,
-        snapshot,
-        selection,
-        default_fg,
-        default_bg,
-        terminal_glyph_cache,
-        terminal_render_cache,
-        cx,
-    ))
+    surface.child(
+        div()
+            .flex()
+            .items_start()
+            .overflow_hidden()
+            .child(render_terminal_grid(
+                live_key,
+                snapshot,
+                selection,
+                default_fg,
+                default_bg,
+                terminal_glyph_cache,
+                terminal_render_cache,
+                cx,
+            ))
+            .child(render_terminal_scrollbar(
+                workspace_id,
+                pane_id,
+                snapshot.scroll,
+                snapshot.rows,
+                cx,
+            )),
+    )
 }
 
 pub(crate) fn pane_body_label(pane: &PaneState) -> String {

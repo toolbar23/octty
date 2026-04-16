@@ -106,7 +106,15 @@ pub(crate) fn terminal_surface_chrome_height() -> f32 {
     } else {
         0.0
     };
-    TERMINAL_SURFACE_PADDING_Y + debug_height
+    terminal_pane_border_chrome() + TERMINAL_SURFACE_PADDING_Y + debug_height
+}
+
+pub(crate) fn terminal_surface_chrome_width() -> f32 {
+    terminal_pane_border_chrome() + TERMINAL_SURFACE_PADDING_X + TERMINAL_SCROLLBAR_WIDTH
+}
+
+fn terminal_pane_border_chrome() -> f32 {
+    TERMINAL_PANE_BORDER_WIDTH * 2.0
 }
 
 pub(crate) fn taskspace_viewport_offset(snapshot: &WorkspaceSnapshot, viewport_width: f32) -> f32 {
@@ -168,7 +176,8 @@ pub(crate) fn terminal_resize_requests(
             (taskspace_height - (pane_count.saturating_sub(1) as f32 * 12.0)) / pane_count as f32;
         let terminal_height =
             (pane_height - terminal_surface_chrome_height()).max(TERMINAL_CELL_HEIGHT);
-        let cols = ((column.width_px as f32 - 24.0) / TERMINAL_CELL_WIDTH)
+        let cols = ((column.width_px as f32 - terminal_surface_chrome_width())
+            / TERMINAL_CELL_WIDTH)
             .floor()
             .max(20.0) as u16;
         let rows = (terminal_height / TERMINAL_CELL_HEIGHT).floor().max(4.0) as u16;
@@ -202,40 +211,121 @@ pub(crate) fn pane_activity_map(
         .collect()
 }
 
-pub(crate) fn pane_activity_state(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WorkspaceActivityIndicator {
+    pub(crate) activity_state: ActivityState,
+    pub(crate) needs_attention: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PaneActivityIndicator {
+    pub(crate) activity_state: ActivityState,
+    pub(crate) needs_attention: bool,
+    pub(crate) show_attention: bool,
+}
+
+pub(crate) fn pane_activity_indicator(
     workspace_id: &str,
     pane_id: &str,
     pane_activity: &HashMap<(String, String), PaneActivity>,
-) -> ActivityState {
+) -> PaneActivityIndicator {
+    let now = now_ms();
     pane_activity
         .get(&(workspace_id.to_owned(), pane_id.to_owned()))
-        .map(|activity| activity.state_at(now_ms(), PANE_ACTIVITY_ACTIVE_WINDOW_MS))
-        .unwrap_or(ActivityState::IdleSeen)
+        .map(|activity| PaneActivityIndicator {
+            activity_state: activity.state_at(now, PANE_ACTIVITY_ACTIVE_WINDOW_MS),
+            needs_attention: activity.needs_attention,
+            show_attention: pane_attention_visible(activity, now),
+        })
+        .unwrap_or(PaneActivityIndicator {
+            activity_state: ActivityState::IdleSeen,
+            needs_attention: false,
+            show_attention: false,
+        })
 }
 
-pub(crate) fn workspace_activity_state(
+pub(crate) fn pane_attention_visible(activity: &PaneActivity, now_ms: i64) -> bool {
+    activity.needs_attention || pane_attention_clear_remaining_ms(activity, now_ms).is_some()
+}
+
+pub(crate) fn pane_attention_clear_remaining_ms(
+    activity: &PaneActivity,
+    now_ms: i64,
+) -> Option<i64> {
+    if activity.needs_attention
+        || activity.needs_attention_cleared_at_ms == 0
+        || activity.needs_attention_cleared_at_ms < activity.needs_attention_at_ms
+    {
+        return None;
+    }
+    let elapsed = now_ms.saturating_sub(activity.needs_attention_cleared_at_ms);
+    (elapsed < PANE_ATTENTION_CLEAR_GRACE_MS).then_some(PANE_ATTENTION_CLEAR_GRACE_MS - elapsed)
+}
+
+pub(crate) fn pane_attention_clear_delay(
+    snapshot: Option<&WorkspaceSnapshot>,
+    pane_activity: &HashMap<(String, String), PaneActivity>,
+) -> Option<Duration> {
+    let snapshot = snapshot?;
+    let now = now_ms();
+    snapshot
+        .panes
+        .keys()
+        .filter_map(|pane_id| {
+            pane_activity
+                .get(&(snapshot.workspace_id.clone(), pane_id.clone()))
+                .and_then(|activity| pane_attention_clear_remaining_ms(activity, now))
+        })
+        .min()
+        .map(|remaining_ms| Duration::from_millis(remaining_ms as u64))
+}
+
+pub(crate) fn workspace_activity_indicator(
     workspace: &WorkspaceSummary,
     pane_activity: &HashMap<(String, String), PaneActivity>,
-) -> ActivityState {
-    derive_workspace_activity(
-        pane_activity
-            .iter()
-            .filter_map(|((workspace_id, _), activity)| {
-                (workspace_id == &workspace.id)
-                    .then(|| activity.state_at(now_ms(), PANE_ACTIVITY_ACTIVE_WINDOW_MS))
-            }),
-    )
+) -> WorkspaceActivityIndicator {
+    let now = now_ms();
+    let mut needs_attention = false;
+    let activity_state = derive_workspace_activity(pane_activity.iter().filter_map(
+        |((workspace_id, _), activity)| {
+            if workspace_id != &workspace.id {
+                return None;
+            }
+            needs_attention |= activity.needs_attention;
+            Some(activity.state_at(now, PANE_ACTIVITY_ACTIVE_WINDOW_MS))
+        },
+    ));
+    WorkspaceActivityIndicator {
+        activity_state,
+        needs_attention,
+    }
 }
 
-pub(crate) fn pane_border_color(active: bool, activity_state: ActivityState) -> Hsla {
-    if active {
-        rgb(0x6aa36f).into()
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PaneBorderMarker {
+    Attention,
+    Focused,
+    Unfocused,
+}
+
+pub(crate) fn pane_border_marker(
+    active: bool,
+    activity_indicator: PaneActivityIndicator,
+) -> PaneBorderMarker {
+    if activity_indicator.show_attention {
+        PaneBorderMarker::Attention
+    } else if active {
+        PaneBorderMarker::Focused
     } else {
-        match activity_state {
-            ActivityState::Active => rgb(0x4e86d8).into(),
-            ActivityState::IdleUnseen => rgb(0xb68a35).into(),
-            ActivityState::IdleSeen => rgb(0x444444).into(),
-        }
+        PaneBorderMarker::Unfocused
+    }
+}
+
+pub(crate) fn pane_border_color(active: bool, activity_indicator: PaneActivityIndicator) -> Hsla {
+    match pane_border_marker(active, activity_indicator) {
+        PaneBorderMarker::Attention => rgb(0xe5484d).into(),
+        PaneBorderMarker::Focused => rgb(0x4e86d8).into(),
+        PaneBorderMarker::Unfocused => rgb(0x444444).into(),
     }
 }
 

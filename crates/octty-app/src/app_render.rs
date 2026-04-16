@@ -3,10 +3,20 @@ use super::*;
 impl Render for OcttyApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_live_terminals_for_active_snapshot(cx);
-        self.terminal_window_active = window.is_window_active();
+        let window_active = window.is_window_active();
+        let window_became_active = window_active && !self.terminal_window_active;
+        self.terminal_window_active = window_active;
+        if window_became_active {
+            self.record_active_pane_seen(cx);
+        }
         self.schedule_terminal_snapshot_notifications(cx);
         self.schedule_pane_activity_reconciliation(cx);
         self.schedule_workspace_watch_notifications(cx);
+        if let Some(delay) =
+            pane_attention_clear_delay(self.active_snapshot.as_ref(), &self.pane_activity)
+        {
+            self.schedule_pane_attention_clear_notification(delay, cx);
+        }
         self.ensure_workspace_watchers();
         let taskspace_height =
             taskspace_height_for_viewport(f32::from(window.viewport_size().height));
@@ -102,7 +112,7 @@ impl Render for OcttyApp {
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    .p_6()
+                    .p_3()
                     .child(taskspace),
             )
             .when(!toasts.is_empty(), |this| {

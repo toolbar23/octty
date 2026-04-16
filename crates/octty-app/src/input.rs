@@ -25,6 +25,94 @@ pub(crate) fn workspace_shortcut_index_from_key_event(event: &KeyDownEvent) -> O
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClipboardShortcutAction {
+    Copy,
+    Cut,
+    Paste,
+}
+
+pub(crate) fn clipboard_shortcut_action_from_key_event(
+    event: &KeyDownEvent,
+) -> Option<ClipboardShortcutAction> {
+    clipboard_shortcut_action_from_key_parts(
+        &event.keystroke.key,
+        event.keystroke.key_char.as_deref(),
+        event.keystroke.modifiers.control,
+        event.keystroke.modifiers.alt,
+        event.keystroke.modifiers.shift,
+        event.keystroke.modifiers.platform,
+        event.keystroke.modifiers.function,
+    )
+}
+
+pub(crate) fn clipboard_shortcut_action_from_key_parts(
+    key: &str,
+    key_char: Option<&str>,
+    control: bool,
+    alt: bool,
+    shift: bool,
+    platform: bool,
+    function: bool,
+) -> Option<ClipboardShortcutAction> {
+    if let Some(action) = rewritten_clipboard_shortcut_action_from_key_parts(
+        key, key_char, control, alt, shift, platform, function,
+    ) {
+        return Some(action);
+    }
+    if !platform || control || alt || shift || function {
+        return None;
+    }
+    clipboard_shortcut_action_from_token(key)
+        .or_else(|| key_char.and_then(clipboard_shortcut_action_from_token))
+}
+
+pub(crate) fn rewritten_clipboard_shortcut_action_from_key_parts(
+    key: &str,
+    key_char: Option<&str>,
+    control: bool,
+    alt: bool,
+    shift: bool,
+    platform: bool,
+    function: bool,
+) -> Option<ClipboardShortcutAction> {
+    if alt || platform || function || !is_insert_key(key, key_char) {
+        return None;
+    }
+    match (control, shift) {
+        (true, false) => Some(ClipboardShortcutAction::Copy),
+        (false, true) => Some(ClipboardShortcutAction::Paste),
+        _ => None,
+    }
+}
+
+pub(crate) fn clipboard_shortcut_action_from_token(token: &str) -> Option<ClipboardShortcutAction> {
+    match token.to_ascii_lowercase().as_str() {
+        "c" => Some(ClipboardShortcutAction::Copy),
+        "x" => Some(ClipboardShortcutAction::Cut),
+        "v" | "p" => Some(ClipboardShortcutAction::Paste),
+        _ => None,
+    }
+}
+
+pub(crate) fn shell_type_shortcut_from_key_event(
+    shell_types: &[ShellTypeConfig],
+    event: &KeyDownEvent,
+) -> Option<String> {
+    shell_types
+        .iter()
+        .find(|shell_type| shortcut_matches_key_event(&shell_type.shortcut, event))
+        .map(|shell_type| shell_type.name.clone())
+}
+
+pub(crate) fn shortcut_matches_key_event(shortcut: &str, event: &KeyDownEvent) -> bool {
+    let Ok(shortcut) = gpui::Keystroke::parse(shortcut.trim()) else {
+        return false;
+    };
+    let target = gpui::KeybindingKeystroke::from_keystroke(shortcut);
+    event.keystroke.should_match(&target)
+}
+
 pub(crate) fn workspace_shortcut_index_from_key_parts(
     key: &str,
     key_char: Option<&str>,
@@ -75,7 +163,20 @@ pub(crate) fn live_terminal_input_from_key_parts(
     {
         return None;
     }
-    if control && shift && is_clipboard_action_key(key) {
+    if rewritten_clipboard_shortcut_action_from_key_parts(
+        key, key_char, control, alt, shift, platform, false,
+    )
+    .is_some()
+    {
+        return None;
+    }
+    if control && shift && is_control_clipboard_action_key(key) {
+        return None;
+    }
+    if platform
+        && (is_platform_clipboard_action_key(key)
+            || key_char.is_some_and(is_platform_clipboard_action_key))
+    {
         return None;
     }
     if control && shift && is_pane_action_key(key) {
@@ -274,7 +375,20 @@ pub(crate) fn is_column_resize_key(key: &str) -> bool {
 }
 
 pub(crate) fn is_clipboard_action_key(key: &str) -> bool {
+    matches!(key.to_ascii_lowercase().as_str(), "c" | "x" | "v" | "p")
+}
+
+pub(crate) fn is_control_clipboard_action_key(key: &str) -> bool {
     matches!(key.to_ascii_lowercase().as_str(), "c" | "x" | "v")
+}
+
+pub(crate) fn is_platform_clipboard_action_key(key: &str) -> bool {
+    is_clipboard_action_key(key)
+}
+
+pub(crate) fn is_insert_key(key: &str, key_char: Option<&str>) -> bool {
+    key.eq_ignore_ascii_case("insert")
+        || key_char.is_some_and(|key_char| key_char.eq_ignore_ascii_case("insert"))
 }
 
 pub(crate) fn unshifted_character(character: char) -> char {

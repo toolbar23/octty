@@ -8,8 +8,8 @@ pub fn spawn_live_terminal_with_notifier(
     spec: TerminalSessionSpec,
     snapshot_notifier: LiveTerminalSnapshotNotifier,
 ) -> Result<LiveTerminalHandle, TerminalError> {
-    ensure_tmux_config()?;
-    let launch = build_tmux_pty_launch(&spec);
+    ensure_retach_config()?;
+    let launch = build_retach_pty_launch(&spec);
     let session_id = launch.session_name.clone();
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -21,10 +21,14 @@ pub fn spawn_live_terminal_with_notifier(
         })
         .map_err(|error| TerminalError::Pty(error.to_string()))?;
 
-    let mut command = CommandBuilder::new("tmux");
+    let mut command = CommandBuilder::new(&launch.program);
     command.args(launch.args);
     command.cwd(&spec.cwd);
     command.env("TERM", "xterm-256color");
+    command.env_remove("GHOSTTY_RESOURCES_DIR");
+    command.env_remove("GHOSTTY_SHELL_INTEGRATION");
+    command.env_remove("TERM_PROGRAM");
+    command.env_remove("TERM_PROGRAM_VERSION");
     command.env_remove("TMUX");
     command.env_remove("TMUX_PANE");
 
@@ -62,12 +66,14 @@ pub fn spawn_live_terminal_with_notifier(
         .spawn({
             let session_id = session_id.clone();
             move || {
+                let startup_command = retach_startup_command(&spec);
                 let runtime = LiveTerminalRuntime {
                     spec,
                     session_id,
                     master: pair.master,
                     writer,
                     child,
+                    startup_command,
                     command_rx,
                     pty_output_rx,
                     wake_rx,

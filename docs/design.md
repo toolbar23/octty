@@ -46,7 +46,7 @@ That means the app should avoid expensive reconstruction on every workspace swit
 
 - persistent workspace taskspaces
 - persistent terminal emulators
-- durable tmux-backed shell processes
+- durable retach-backed shell processes
 - cheap reattachment of UI state instead of replaying history
 
 ### 3. Tiled, not tabbed
@@ -117,24 +117,24 @@ Default width policy today:
 
 This keeps the common working set practical without manual resizing every time.
 
-## Why tmux for shells
+## Why retach for shells
 
 Terminal process persistence and terminal rendering are different problems.
 
-Octty uses tmux for shell/session durability because tmux already solves:
+Octty uses retach for shell/session durability because retach solves:
 
 - long-lived shell processes
 - reattachment
-- capture of current screen state
+- scrollback replay into the attached terminal
 - resilience across UI reloads
 
-This is cleaner than treating the UI terminal renderer as the durable source of truth.
+This keeps persistence separate from Octty's UI renderer without adding tmux's scrollback and copy-mode layer.
 
 ## Why libghostty-vt
 
 Octty uses `libghostty-vt` as the in-app terminal model.
 
-Its job is parsing terminal bytes and exposing terminal state to the Rust UI. It should not be treated as the durable owner of the shell session. That ownership belongs to tmux.
+Its job is parsing terminal bytes and exposing terminal state to the Rust UI. It should not be treated as the durable owner of the shell session. That ownership belongs to retach.
 
 ## Current rough edges
 
@@ -152,7 +152,7 @@ The long-term shape is:
 
 - stable workspace switching
 - persistent and isolated pane runtimes
-- tmux-backed terminal durability
+- retach-backed terminal durability
 - filesystem-native notes
 - lightweight local metadata cache
 - a taskspace that feels closer to a tiling desktop than to a tabbed IDE

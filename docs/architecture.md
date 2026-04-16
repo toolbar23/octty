@@ -8,12 +8,12 @@ Octty is a Rust-only workspace. The application is split into focused Cargo crat
 - `octty-core`: domain types, pane/layout state, activity state, and shortcut assignment
 - `octty-store`: local Turso persistence and migrations
 - `octty-jj`: JJ workspace discovery and status calculation
-- `octty-term`: tmux launch/control, PTY-backed live terminal sessions, and `libghostty-vt` terminal state extraction
+- `octty-term`: retach launch/control, PTY-backed live terminal sessions, and `libghostty-vt` terminal state extraction
 
 Supporting those are:
 
 - Turso/SQLite for persisted app state
-- tmux for durable terminal sessions
+- retach for durable terminal sessions
 - JJ and filesystem watchers for workspace status refresh
 
 ## Process model
@@ -53,7 +53,7 @@ Core implementation: [crates/octty-term/src/lib.rs](/home/pm/dev/workspac/crates
 
 Responsibilities:
 
-- start and reuse tmux sessions for durable panes
+- start and reuse retach sessions for durable panes
 - run live PTY-backed terminal sessions
 - feed terminal bytes into `libghostty-vt`
 - expose grid snapshots, dirty rows, cursor state, and notifications to `octty-app`
@@ -65,21 +65,21 @@ Terminal I/O is native Rust code. The old Node sidecar has been removed.
 
 The terminal stack has four distinct responsibilities:
 
-### 1. Process durability: tmux
+### 1. Process durability: retach
 
-Octty uses tmux to keep shell-like sessions durable across UI reloads and pane restore.
+Octty uses retach to keep shell-like sessions durable across UI reloads and pane restore.
 
 Important details:
 
-- Octty tmux sessions use a dedicated socket name
-- Octty writes its own tmux config
-- Octty strips `TMUX` and `TMUX_PANE` from child env
+- Octty session names are stable per workspace pane
+- the retach daemon owns the long-lived PTY process
+- live panes attach through `retach open <session>`
 
-This prevents the app from accidentally inheriting or mutating the user's normal tmux environment.
+This avoids putting tmux's scrollback and copy-mode layer between the terminal process and the user.
 
 ### 2. PTY transport: Rust live terminal runtime
 
-The Rust terminal runtime launches tmux inside a PTY and forwards:
+The Rust terminal runtime launches retach inside a PTY and forwards:
 
 - output
 - input
@@ -94,7 +94,7 @@ Terminal output bytes are parsed by `libghostty-vt`. Octty extracts structured t
 
 This means:
 
-- tmux owns the durable shell session
+- retach owns the durable shell session
 - `octty-term` owns I/O transport and terminal state extraction
 - `octty-app` owns the GPUI paint model and taskspace layout
 
@@ -198,12 +198,12 @@ Typical workspace open flow:
 2. store and JJ data load workspace summary, notes, and saved snapshot
 3. app restores terminal payload state from saved session metadata
 4. GPUI taskspace mounts panes
-5. terminal panes create or reattach to tmux-backed sessions
+5. terminal panes create or reattach to retach-backed sessions
 
 Typical terminal flow:
 
 1. app creates a terminal pane
-2. `octty-term` creates or reuses a tmux session
+2. `octty-term` creates or reuses a retach session
 3. PTY bytes feed `libghostty-vt`
 4. dirty terminal snapshots flow back to `octty-app`
 5. GPUI repaints the affected terminal rows
@@ -251,7 +251,7 @@ There is unavoidable complexity because Octty mixes:
 
 - filesystem state
 - Turso metadata
-- live tmux sessions
+- live retach sessions
 - GPUI view state
 
 The architecture works best when those layers stay clearly separated.

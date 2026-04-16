@@ -14,7 +14,7 @@ It keeps repo and workspace state on disk, stores cached UI state in local Turso
 - Rust toolchain
 - Zig, because the app enables the `libghostty-vt` terminal adapter by default
 - `jj`
-- `tmux`
+- `retach`
 
 ## Development
 
@@ -40,9 +40,9 @@ These checks exercise the Rust app without needing a normal interactive run:
 cargo run -p octty-app --bin octty -- --headless-check
 cargo run -p octty-app --bin octty -- --bootstrap-check
 OCTTY_RS_STATE_PATH=/tmp/octty-rs-check.turso cargo run -p octty-app --bin octty -- --pane-check
-OCTTY_RS_STATE_PATH=/tmp/octty-rs-shell.turso OCTTY_RS_TMUX_SOCKET=octty-rs-check cargo run -p octty-app --bin octty -- --shell-check
-OCTTY_RS_STATE_PATH=/tmp/octty-rs-io.turso OCTTY_RS_TMUX_SOCKET=octty-rs-io cargo run -p octty-app --bin octty -- --terminal-io-check
-OCTTY_RS_STATE_PATH=/tmp/octty-rs-live.turso OCTTY_RS_TMUX_SOCKET=octty-rs-live cargo run -p octty-app --bin octty -- --live-terminal-check
+OCTTY_RS_STATE_PATH=/tmp/octty-rs-shell.turso cargo run -p octty-app --bin octty -- --shell-check
+OCTTY_RS_STATE_PATH=/tmp/octty-rs-io.turso cargo run -p octty-app --bin octty -- --terminal-io-check
+OCTTY_RS_STATE_PATH=/tmp/octty-rs-live.turso cargo run -p octty-app --bin octty -- --live-terminal-check
 ```
 
 ## Workspace Layout
@@ -50,7 +50,7 @@ OCTTY_RS_STATE_PATH=/tmp/octty-rs-live.turso OCTTY_RS_TMUX_SOCKET=octty-rs-live 
 - `crates/octty-core`: domain types, layout state, workspace shortcut assignment
 - `crates/octty-store`: local Turso database and migrations
 - `crates/octty-jj`: JJ workspace discovery/status helpers
-- `crates/octty-term`: tmux launch/session/input/capture plumbing and `libghostty-vt` integration
+- `crates/octty-term`: retach launch/session/input/capture plumbing and `libghostty-vt` integration
 - `crates/octty-app`: GPUI + gpui-component application shell
 
 The terminal adapter is behind an optional feature in `octty-term`, but the main app enables it:
@@ -65,12 +65,17 @@ Terminal font rendering can also be tuned from the environment:
 OCTTY_RS_TERMINAL_FONT_FAMILY='"Iosevka Term", monospace' cargo run -p octty-app --bin octty
 ```
 
+Retach integration can be pointed at a non-default binary or history size:
+
+```bash
+OCTTY_RETACH_BIN=/path/to/retach OCTTY_RETACH_HISTORY=20000 cargo run -p octty-app --bin octty
+```
+
 ## Storage
 
 - App state DB: `~/.local/share/octty-rs/state.turso`
-- tmux config/cache: `~/.cache/octty`
 - Notes: `*.note.md` files inside the workspace directory
-- Terminal sessions: backed by a dedicated `tmux` socket, defaulting to `octty-rs`
+- Terminal sessions: backed by the local `retach` daemon socket
 
 ## Current Shape
 

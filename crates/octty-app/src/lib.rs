@@ -34,7 +34,7 @@ use octty_core::{
     WorkspaceSummary, add_pane, create_default_snapshot, create_pane_state,
     derive_workspace_activity, has_recorded_workspace_path,
     layout::{LAYOUT_VERSION, now_ms},
-    remove_pane, screen_fingerprint, workspace_shortcut_targets,
+    remove_pane, workspace_shortcut_targets,
 };
 use octty_jj::{
     create_workspace as jj_create_workspace, discover_workspaces,
@@ -43,16 +43,16 @@ use octty_jj::{
 };
 use octty_store::{TursoStore, default_store_path};
 use octty_term::{
-    TerminalSessionSpec, capture_tmux_pane, capture_tmux_pane_by_session, ensure_tmux_session,
-    kill_tmux_session,
+    TerminalSessionSpec, capture_retach_pane, ensure_retach_session, kill_retach_session,
     live::{
         LiveTerminalHandle, LiveTerminalKey, LiveTerminalKeyInput, LiveTerminalModifiers,
         LiveTerminalSnapshotNotifier, TerminalGridSnapshot, TerminalNotification,
-        TerminalReplayStep, TerminalResize, TerminalRgb, replay_terminal_bytes,
-        replay_terminal_steps, spawn_live_terminal, spawn_live_terminal_with_notifier,
+        TerminalReplayStep, TerminalResize, TerminalRgb, TerminalScrollSnapshot,
+        replay_terminal_bytes, replay_terminal_steps, spawn_live_terminal,
+        spawn_live_terminal_with_notifier,
     },
-    resize_tmux_session, send_tmux_keys, send_tmux_keys_to_session, send_tmux_text,
-    send_tmux_text_to_session, stable_tmux_session_name, tmux_session_activity,
+    resize_retach_session, retach_session_activity, send_retach_keys, send_retach_keys_to_session,
+    send_retach_text, send_retach_text_to_session, stable_retach_session_name,
 };
 
 mod actions;
@@ -109,11 +109,15 @@ const TERMINAL_CELL_HEIGHT: f32 = 18.0;
 const TERMINAL_FONT_SIZE: f32 = 14.0;
 const TERMINAL_DEBUG_TIMER_FONT_SIZE: f32 = 10.0;
 const TERMINAL_DEBUG_TIMER_LINE_HEIGHT: f32 = 12.0;
+const TERMINAL_PANE_BORDER_WIDTH: f32 = 1.0;
+const TERMINAL_SURFACE_PADDING_X: f32 = 16.0;
 const TERMINAL_SURFACE_PADDING_Y: f32 = 16.0;
 const TERMINAL_SURFACE_DEBUG_TIMER_MARGIN_BOTTOM: f32 = 4.0;
-const TERMINAL_TASKSPACE_VERTICAL_CHROME_HEIGHT: f32 = 176.0;
+const TERMINAL_SCROLLBAR_WIDTH: f32 = 6.0;
+const TERMINAL_SCROLLBAR_MIN_THUMB_HEIGHT: f32 = 24.0;
+const TERMINAL_TASKSPACE_VERTICAL_CHROME_HEIGHT: f32 = 24.0;
 const WORKSPACE_SIDEBAR_WIDTH: f32 = 280.0;
-const TASKSPACE_HORIZONTAL_PADDING: f32 = 48.0;
+const TASKSPACE_HORIZONTAL_PADDING: f32 = 24.0;
 const TASKSPACE_PANEL_GAP: f32 = 12.0;
 const COLUMN_WIDTH_STEP_PX: f64 = 80.0;
 const MIN_COLUMN_WIDTH_PX: f64 = 240.0;
@@ -124,6 +128,7 @@ const TERMINAL_BACKGROUND_FRAME_INTERVAL: Duration = Duration::from_millis(100);
 const TERMINAL_INTERACTIVE_SNAPSHOT_WINDOW: Duration = Duration::from_millis(150);
 const TERMINAL_LATENCY_SAMPLE_LIMIT: usize = 256;
 const PANE_ACTIVITY_ACTIVE_WINDOW_MS: i64 = 3_000;
+const PANE_ATTENTION_CLEAR_GRACE_MS: i64 = 4_000;
 const PANE_ACTIVITY_PERSIST_DELAY: Duration = Duration::from_millis(500);
 const PANE_ACTIVITY_RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 

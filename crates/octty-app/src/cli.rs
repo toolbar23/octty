@@ -181,13 +181,14 @@ pub(crate) async fn terminal_io_check() -> anyhow::Result<String> {
 
     let payload = terminal_payload_for_pane(&snapshot, &pane_id)?.clone();
     let spec = terminal_spec_for_payload(workspace, &pane_id, &payload, 120, 40);
-    resize_tmux_session(&spec, 120, 40).await?;
+    resize_retach_session(&spec, 120, 40).await?;
 
     let marker = format!("octty-terminal-io-{}", now_ms());
-    let session_id = ensure_tmux_session(&spec).await?;
-    send_tmux_text(&spec, &format!("clear; printf '{marker}\\n'")).await?;
-    send_tmux_keys(&spec, &["Enter"]).await?;
-    let screen = capture_tmux_until_contains(&spec, &marker, Duration::from_millis(1_000)).await?;
+    let session_id = ensure_retach_session(&spec).await?;
+    send_retach_text(&spec, &format!("clear; printf '{marker}\\n'")).await?;
+    send_retach_keys(&spec, &["Enter"]).await?;
+    let screen =
+        capture_retach_until_contains(&spec, &marker, Duration::from_millis(1_000)).await?;
     snapshot =
         persist_terminal_screen(&store, workspace, snapshot, &pane_id, session_id, screen).await?;
     store.save_snapshot(&snapshot).await?;
@@ -218,14 +219,14 @@ pub(crate) async fn live_terminal_check() -> anyhow::Result<String> {
             if snapshot.plain_text.contains(&marker) {
                 let session_id = terminal.session_id().to_owned();
                 drop(terminal);
-                let _ = kill_tmux_session(&session_id).await;
+                let _ = kill_retach_session(&session_id).await;
                 return Ok(marker);
             }
         }
         if tokio::time::Instant::now() >= deadline {
             let session_id = terminal.session_id().to_owned();
             drop(terminal);
-            let _ = kill_tmux_session(&session_id).await;
+            let _ = kill_retach_session(&session_id).await;
             anyhow::bail!("live terminal snapshot did not contain marker `{marker}`");
         }
         tokio::time::sleep(Duration::from_millis(16)).await;

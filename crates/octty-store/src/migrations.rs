@@ -90,6 +90,9 @@ impl TursoStore {
               last_seen_tmux_activity_at_s integer,
               last_screen_fingerprint text,
               last_seen_screen_fingerprint text,
+              needs_attention integer not null default 0,
+              needs_attention_at_ms integer not null default 0,
+              needs_attention_cleared_at_ms integer not null default 0,
               updated_at_ms integer not null,
               primary key (workspace_id, pane_id)
             );
@@ -100,6 +103,7 @@ impl TursoStore {
         )
         .await?;
         ensure_workspace_status_columns(&conn).await?;
+        ensure_pane_activity_columns(&conn).await?;
         Ok(())
     }
 }
@@ -156,6 +160,42 @@ async fn ensure_workspace_status_columns(conn: &turso::Connection) -> Result<(),
         if !columns.contains(name) {
             conn.execute(
                 format!("alter table workspaces add column {definition}").as_str(),
+                (),
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn ensure_pane_activity_columns(conn: &turso::Connection) -> Result<(), StoreError> {
+    let mut rows = conn.query("pragma table_info(pane_activity)", ()).await?;
+    let mut columns = HashSet::new();
+    while let Some(row) = rows.next().await? {
+        if let turso::Value::Text(name) = row.get_value(1)? {
+            columns.insert(name);
+        }
+    }
+    drop(rows);
+
+    for (name, definition) in [
+        (
+            "needs_attention",
+            "needs_attention integer not null default 0",
+        ),
+        (
+            "needs_attention_at_ms",
+            "needs_attention_at_ms integer not null default 0",
+        ),
+        (
+            "needs_attention_cleared_at_ms",
+            "needs_attention_cleared_at_ms integer not null default 0",
+        ),
+    ] {
+        if !columns.contains(name) {
+            conn.execute(
+                format!("alter table pane_activity add column {definition}").as_str(),
                 (),
             )
             .await?;

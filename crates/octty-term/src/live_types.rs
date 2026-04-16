@@ -39,6 +39,7 @@ pub struct TerminalGridSnapshot {
     pub session_id: String,
     pub cols: u16,
     pub rows: u16,
+    pub scroll: TerminalScrollSnapshot,
     pub default_fg: TerminalRgb,
     pub default_bg: TerminalRgb,
     pub cursor: Option<TerminalCursorSnapshot>,
@@ -46,6 +47,13 @@ pub struct TerminalGridSnapshot {
     pub rows_data: Vec<TerminalRowSnapshot>,
     pub plain_text: String,
     pub timing: TerminalSnapshotTiming,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TerminalScrollSnapshot {
+    pub total: u64,
+    pub offset: u64,
+    pub len: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

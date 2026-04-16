@@ -13,13 +13,13 @@ pub(crate) async fn flush_terminal_inputs(
             .payload
             .session_id
             .clone()
-            .unwrap_or_else(|| stable_tmux_session_name(&spec));
+            .unwrap_or_else(|| stable_retach_session_name(&spec));
 
         if send_terminal_input_to_session(&session_id, &input.input)
             .await
             .is_err()
         {
-            let session_id = ensure_tmux_session(&spec).await?;
+            let session_id = ensure_retach_session(&spec).await?;
             send_terminal_input_to_session(&session_id, &input.input).await?;
         }
         touched.push(input);
@@ -39,8 +39,8 @@ pub(crate) async fn flush_terminal_inputs(
             .payload
             .session_id
             .clone()
-            .unwrap_or_else(|| stable_tmux_session_name(&spec));
-        let screen = capture_tmux_pane(&spec).await.unwrap_or_default();
+            .unwrap_or_else(|| stable_retach_session_name(&spec));
+        let screen = capture_retach_pane(&spec).await.unwrap_or_default();
         let snapshot = persist_terminal_screen(
             &store,
             &input.workspace,
@@ -64,16 +64,16 @@ pub(crate) async fn send_terminal_input_to_session(
     match input {
         TerminalInput::LiveKey(key_input) => {
             if let Some(text) = &key_input.text {
-                send_tmux_text_to_session(session_id, text).await?;
-            } else if let Some(key) = tmux_key_for_live_key(key_input) {
-                send_tmux_keys_to_session(session_id, &[key.as_str()]).await?;
+                send_retach_text_to_session(session_id, text).await?;
+            } else if let Some(key) = retach_key_for_live_key(key_input) {
+                send_retach_keys_to_session(session_id, &[key.as_str()]).await?;
             }
         }
     }
     Ok(())
 }
 
-pub(crate) fn tmux_key_for_live_key(input: &LiveTerminalKeyInput) -> Option<String> {
+pub(crate) fn retach_key_for_live_key(input: &LiveTerminalKeyInput) -> Option<String> {
     let key = match input.key {
         LiveTerminalKey::Enter => "Enter".to_owned(),
         LiveTerminalKey::Backspace => "BSpace".to_owned(),
@@ -98,14 +98,14 @@ pub(crate) fn tmux_key_for_live_key(input: &LiveTerminalKeyInput) -> Option<Stri
     Some(key)
 }
 
-pub(crate) async fn capture_tmux_until_contains(
+pub(crate) async fn capture_retach_until_contains(
     spec: &TerminalSessionSpec,
     needle: &str,
     timeout: Duration,
 ) -> anyhow::Result<String> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        let screen = capture_tmux_pane(spec).await?;
+        let screen = capture_retach_pane(spec).await?;
         if screen.contains(needle) {
             return Ok(screen);
         }
@@ -130,7 +130,7 @@ pub(crate) fn prepare_live_terminal_snapshot(
     };
     let (cols, rows) = default_terminal_grid_for_pane();
     let spec = terminal_spec_for_payload(workspace, pane_id, payload, cols, rows);
-    payload.session_id = Some(stable_tmux_session_name(&spec));
+    payload.session_id = Some(stable_retach_session_name(&spec));
     payload.session_state = SessionState::Live;
     snapshot.updated_at = now_ms();
     Ok(snapshot)
@@ -144,8 +144,8 @@ pub(crate) async fn start_terminal_session(
 ) -> anyhow::Result<WorkspaceSnapshot> {
     let payload = terminal_payload_for_pane(&snapshot, pane_id)?.clone();
     let spec = terminal_spec_for_payload(workspace, pane_id, &payload, 120, 40);
-    let session_id = ensure_tmux_session(&spec).await?;
-    let screen = capture_tmux_pane(&spec).await.unwrap_or_default();
+    let session_id = ensure_retach_session(&spec).await?;
+    let screen = capture_retach_pane(&spec).await.unwrap_or_default();
 
     persist_terminal_screen(store, workspace, snapshot, pane_id, session_id, screen).await
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::app_live_terminals::{terminal_page_scroll_direction, terminal_page_scroll_lines};
 
 impl OcttyApp {
     pub(crate) fn add_shell_pane(
@@ -459,7 +460,7 @@ impl OcttyApp {
         cx.spawn(async move |this, cx| {
             let session_id_for_error = session_id.clone();
             let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
-                kill_tmux_session(&session_id).await?;
+                kill_retach_session(&session_id).await?;
                 Ok(())
             }) {
                 Ok(task) => task.await,
@@ -502,6 +503,28 @@ impl OcttyApp {
 
         if let Some(index) = workspace_shortcut_index_from_key_event(event) {
             self.open_workspace(&OpenWorkspaceShortcut { index }, window, cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        if let Some(action) = clipboard_shortcut_action_from_key_event(event) {
+            match action {
+                ClipboardShortcutAction::Copy => {
+                    self.copy_terminal_selection(&CopyTerminalSelection, window, cx);
+                }
+                ClipboardShortcutAction::Cut => {
+                    self.cut_terminal_selection(&CutTerminalSelection, window, cx);
+                }
+                ClipboardShortcutAction::Paste => {
+                    self.paste_terminal_clipboard(&PasteTerminalClipboard, window, cx);
+                }
+            }
+            cx.stop_propagation();
+            return;
+        }
+
+        if let Some(shell_type) = shell_type_shortcut_from_key_event(&self.shell_types, event) {
+            self.add_shell_type_pane(&shell_type, cx);
             cx.stop_propagation();
             return;
         }
@@ -552,7 +575,9 @@ impl OcttyApp {
         if let Some(live) = self.live_terminals.get_mut(&live_key) {
             match &input {
                 TerminalInput::LiveKey(key_input) => {
-                    if let Err(error) = live.handle.send_key(key_input.clone()) {
+                    if let Some(direction) = terminal_page_scroll_direction(key_input) {
+                        live.scroll_viewport(terminal_page_scroll_lines(live, direction));
+                    } else if let Err(error) = live.handle.send_key(key_input.clone()) {
                         send_error = Some(format!("Terminal input failed: {error:#}"));
                     } else {
                         live.last_input_at = Some(Instant::now());

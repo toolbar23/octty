@@ -4,8 +4,8 @@ use turso::params;
 use crate::{
     StoreError, TursoStore,
     codecs::{
-        integer, optional_i64_to_value, optional_integer, optional_str_to_value, optional_text,
-        text,
+        bool_to_int, integer, optional_i64_to_value, optional_integer, optional_str_to_value,
+        optional_text, text,
     },
 };
 
@@ -17,9 +17,10 @@ impl TursoStore {
                workspace_id, pane_id, last_activity_at_ms, last_seen_at_ms,
                last_seen_activity_at_ms, last_tmux_activity_at_s,
                last_seen_tmux_activity_at_s, last_screen_fingerprint,
-               last_seen_screen_fingerprint, updated_at_ms
+               last_seen_screen_fingerprint, needs_attention, needs_attention_at_ms,
+               needs_attention_cleared_at_ms, updated_at_ms
              )
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              on conflict(workspace_id, pane_id) do update set
                last_activity_at_ms = excluded.last_activity_at_ms,
                last_seen_at_ms = excluded.last_seen_at_ms,
@@ -28,6 +29,9 @@ impl TursoStore {
                last_seen_tmux_activity_at_s = excluded.last_seen_tmux_activity_at_s,
                last_screen_fingerprint = excluded.last_screen_fingerprint,
                last_seen_screen_fingerprint = excluded.last_seen_screen_fingerprint,
+               needs_attention = excluded.needs_attention,
+               needs_attention_at_ms = excluded.needs_attention_at_ms,
+               needs_attention_cleared_at_ms = excluded.needs_attention_cleared_at_ms,
                updated_at_ms = excluded.updated_at_ms",
             params![
                 activity.workspace_id.as_str(),
@@ -39,6 +43,9 @@ impl TursoStore {
                 optional_i64_to_value(activity.last_seen_tmux_activity_at_s),
                 optional_str_to_value(activity.last_screen_fingerprint.as_deref()),
                 optional_str_to_value(activity.last_seen_screen_fingerprint.as_deref()),
+                bool_to_int(activity.needs_attention),
+                activity.needs_attention_at_ms,
+                activity.needs_attention_cleared_at_ms,
                 activity.updated_at_ms,
             ],
         )
@@ -77,7 +84,9 @@ impl TursoStore {
                 "select workspace_id, pane_id, last_activity_at_ms, last_seen_at_ms,
                         last_seen_activity_at_ms, last_tmux_activity_at_s,
                         last_seen_tmux_activity_at_s, last_screen_fingerprint,
-                        last_seen_screen_fingerprint, updated_at_ms
+                        last_seen_screen_fingerprint, needs_attention,
+                        needs_attention_at_ms, needs_attention_cleared_at_ms,
+                        updated_at_ms
                  from pane_activity
                  order by workspace_id, pane_id",
                 (),
@@ -107,7 +116,13 @@ impl TursoStore {
                     row.get_value(8)?,
                     "last_seen_screen_fingerprint",
                 )?,
-                updated_at_ms: integer(row.get_value(9)?, "updated_at_ms")?,
+                needs_attention: integer(row.get_value(9)?, "needs_attention")? != 0,
+                needs_attention_at_ms: integer(row.get_value(10)?, "needs_attention_at_ms")?,
+                needs_attention_cleared_at_ms: integer(
+                    row.get_value(11)?,
+                    "needs_attention_cleared_at_ms",
+                )?,
+                updated_at_ms: integer(row.get_value(12)?, "updated_at_ms")?,
             });
         }
         Ok(activities)

@@ -24,6 +24,44 @@ impl OcttyApp {
         self.schedule_pane_activity_persistence(cx);
     }
 
+    pub(crate) fn record_pane_activity(
+        &mut self,
+        workspace_id: &str,
+        pane_id: &str,
+        activity_at_ms: i64,
+        tmux_activity_at_s: Option<i64>,
+        screen_fingerprint: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (workspace_id.to_owned(), pane_id.to_owned());
+        let activity = self
+            .pane_activity
+            .entry(key.clone())
+            .or_insert_with(|| PaneActivity::new(workspace_id, pane_id, activity_at_ms));
+        activity.record_activity(activity_at_ms, tmux_activity_at_s, screen_fingerprint);
+        self.pending_pane_activity_persistence
+            .insert(key, activity.clone());
+        self.schedule_pane_activity_persistence(cx);
+    }
+
+    pub(crate) fn record_pane_attention(
+        &mut self,
+        workspace_id: &str,
+        pane_id: &str,
+        attention_at_ms: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (workspace_id.to_owned(), pane_id.to_owned());
+        let activity = self
+            .pane_activity
+            .entry(key.clone())
+            .or_insert_with(|| PaneActivity::new(workspace_id, pane_id, attention_at_ms));
+        activity.record_attention(attention_at_ms);
+        self.pending_pane_activity_persistence
+            .insert(key, activity.clone());
+        self.schedule_pane_activity_persistence(cx);
+    }
+
     pub(crate) fn record_active_pane_seen(&mut self, cx: &mut Context<Self>) {
         let Some(workspace_id) = self
             .active_workspace()
@@ -175,6 +213,25 @@ impl OcttyApp {
                     .timer(PANE_ACTIVITY_RECONCILE_INTERVAL)
                     .await;
             }
+        })
+        .detach();
+    }
+
+    pub(crate) fn schedule_pane_attention_clear_notification(
+        &mut self,
+        delay: Duration,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pane_attention_clear_timer_active {
+            return;
+        }
+        self.pane_attention_clear_timer_active = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |app, cx| {
+                app.pane_attention_clear_timer_active = false;
+                cx.notify();
+            });
         })
         .detach();
     }
