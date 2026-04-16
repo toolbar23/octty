@@ -41,6 +41,7 @@ pub(crate) fn workspace_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("super-c", CopyTerminalSelection, None),
         KeyBinding::new("super-x", CutTerminalSelection, None),
         KeyBinding::new("cmd-v", PasteTerminalClipboard, None),
+        KeyBinding::new("ctrl-s", AddShellPane, None),
         KeyBinding::new("tab", ForwardTerminalTab { shift: false }, Some("OcttyApp")),
         KeyBinding::new(
             "shift-tab",

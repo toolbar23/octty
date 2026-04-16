@@ -1,4 +1,5 @@
 use super::*;
+use crate::app_panes::{SidebarRenameDialogKeyAction, sidebar_rename_dialog_key_action};
 use crate::cli::{TerminalReplayEventsStep, parse_terminal_replay_events};
 
 fn test_project_root(id: &str, display_name: &str) -> ProjectRootRecord {
@@ -338,6 +339,17 @@ fn rename_dialog_only_intercepts_commit_keys() {
     );
     assert_eq!(sidebar_rename_dialog_key_action("a"), None);
     assert_eq!(sidebar_rename_dialog_key_action("space"), None);
+}
+
+#[test]
+fn workspace_key_bindings_include_new_shell_shortcut() {
+    let key = gpui::Keystroke::parse("ctrl-s").expect("parse ctrl-s");
+    let binding = workspace_key_bindings()
+        .into_iter()
+        .find(|binding| binding.match_keystrokes(&[key.clone()]) == Some(false))
+        .expect("ctrl-s binding");
+
+    assert_eq!(binding.action().name(), AddShellPane::name_for_type());
 }
 
 #[test]
