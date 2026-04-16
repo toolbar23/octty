@@ -262,6 +262,42 @@ pub enum WorkspaceState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BaselineRelationTarget {
+    Local,
+    Remote,
+    None,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BaselineRelationState {
+    Same,
+    Ahead,
+    Behind,
+    Diverged,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BaselineRelation {
+    pub target_name: String,
+    pub detail_name: Option<String>,
+    pub ahead_count: i64,
+    pub behind_count: i64,
+}
+
+impl BaselineRelation {
+    pub fn state(&self) -> BaselineRelationState {
+        match (self.ahead_count > 0, self.behind_count > 0) {
+            (false, false) => BaselineRelationState::Same,
+            (true, false) => BaselineRelationState::Ahead,
+            (false, true) => BaselineRelationState::Behind,
+            (true, true) => BaselineRelationState::Diverged,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmbeddedSessionRef {
     pub provider: String,
     pub id: String,
@@ -282,16 +318,10 @@ pub struct ProjectRootRecord {
 pub struct WorkspaceStatus {
     pub workspace_state: WorkspaceState,
     pub has_working_copy_changes: bool,
-    pub effective_added_lines: i64,
-    pub effective_removed_lines: i64,
     pub has_conflicts: bool,
-    pub unpublished_change_count: i64,
-    pub unpublished_added_lines: i64,
-    pub unpublished_removed_lines: i64,
-    pub not_in_default_available: bool,
-    pub not_in_default_change_count: i64,
-    pub not_in_default_added_lines: i64,
-    pub not_in_default_removed_lines: i64,
+    pub local_relation: Option<BaselineRelation>,
+    pub remote_relation: Option<BaselineRelation>,
+    pub primary_relation: BaselineRelationTarget,
     pub bookmarks: Vec<String>,
     pub bookmark_relation: WorkspaceBookmarkRelation,
     pub unread_notes: i64,
@@ -306,16 +336,10 @@ impl Default for WorkspaceStatus {
         Self {
             workspace_state: WorkspaceState::Unknown,
             has_working_copy_changes: false,
-            effective_added_lines: 0,
-            effective_removed_lines: 0,
             has_conflicts: false,
-            unpublished_change_count: 0,
-            unpublished_added_lines: 0,
-            unpublished_removed_lines: 0,
-            not_in_default_available: false,
-            not_in_default_change_count: 0,
-            not_in_default_added_lines: 0,
-            not_in_default_removed_lines: 0,
+            local_relation: None,
+            remote_relation: None,
+            primary_relation: BaselineRelationTarget::None,
             bookmarks: Vec::new(),
             bookmark_relation: WorkspaceBookmarkRelation::None,
             unread_notes: 0,

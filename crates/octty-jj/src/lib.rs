@@ -2,8 +2,9 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use octty_core::{
-    ProjectRootRecord, WorkspaceBookmarkRelation, WorkspaceState, WorkspaceStatus,
-    WorkspaceSummary, encode_missing_workspace_path, layout::now_ms,
+    BaselineRelation, BaselineRelationTarget, ProjectRootRecord, WorkspaceBookmarkRelation,
+    WorkspaceState, WorkspaceStatus, WorkspaceSummary, encode_missing_workspace_path,
+    layout::now_ms,
 };
 use thiserror::Error;
 use tokio::process::Command;
@@ -13,9 +14,9 @@ pub const EFFECTIVE_WORKSPACE_REVSET: &str = "coalesce(@ ~ empty(), @-)";
 pub const DISPLAY_BOOKMARK_REVSET: &str =
     "heads(first_ancestors(coalesce(@ ~ empty(), @-)) & bookmarks())";
 pub const CONFLICTED_WORKSPACE_REVSET: &str = "coalesce(@ ~ empty(), @-) & conflicts()";
-pub const UNPUBLISHED_WORKSPACE_REVSET: &str = "remote_bookmarks()..@ ~ empty()";
 pub const DEFAULT_WORKSPACE_REVSET: &str = "present(default@)";
-pub const NOT_IN_DEFAULT_WORKSPACE_REVSET: &str = "default@..@ ~ empty()";
+pub const LOCAL_AHEAD_REVSET: &str = "default@..@ ~ empty()";
+pub const LOCAL_BEHIND_REVSET: &str = "@..default@ ~ empty()";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscoveredWorkspace {
@@ -102,14 +103,28 @@ pub fn classify_bookmark_relation(
 
 pub fn classify_workspace_state(
     has_conflicts: bool,
-    unpublished_change_count: i64,
+    primary_relation: BaselineRelationTarget,
+    relation: Option<&BaselineRelation>,
 ) -> WorkspaceState {
     if has_conflicts {
         WorkspaceState::Conflicted
-    } else if unpublished_change_count == 0 {
-        WorkspaceState::Published
     } else {
-        WorkspaceState::Draft
+        match (primary_relation, relation) {
+            (BaselineRelationTarget::Remote, Some(relation))
+                if relation.ahead_count == 0 && relation.behind_count == 0 =>
+            {
+                WorkspaceState::Published
+            }
+            (BaselineRelationTarget::Local, Some(relation))
+                if relation.ahead_count == 0 && relation.behind_count == 0 =>
+            {
+                WorkspaceState::MergedLocal
+            }
+            (BaselineRelationTarget::Remote | BaselineRelationTarget::Local, Some(_)) => {
+                WorkspaceState::Draft
+            }
+            _ => WorkspaceState::Unknown,
+        }
     }
 }
 
@@ -139,10 +154,24 @@ pub async fn discover_workspaces(
     )
     .await?;
     let entries = parse_workspace_list_output(&output);
+    let current_change_id = current_workspace_change_id(root_path).await.ok();
+    let current_workspace_path = current_workspace_path(root_path).await.ok();
     let mut summaries = Vec::with_capacity(entries.len());
     for entry in entries {
         let workspace_path = workspace_path(root_path, &entry.workspace_name)
             .await
+            .or_else(|_| {
+                if current_change_id.as_deref() == Some(entry.target_change_id.as_str()) {
+                    current_workspace_path.clone().ok_or_else(|| {
+                        JjError::Command("current workspace path unavailable".to_owned())
+                    })
+                } else {
+                    Err(JjError::Command(format!(
+                        "workspace has no recorded path: {}",
+                        entry.workspace_name
+                    )))
+                }
+            })
             .unwrap_or_else(|_| encode_missing_workspace_path(&entry.workspace_name));
         summaries.push(WorkspaceSummary {
             id: workspace_id_for(root_path, &entry.workspace_name),
@@ -163,8 +192,10 @@ pub async fn discover_workspaces(
 
 pub async fn read_workspace_status(
     workspace_path: impl AsRef<Path>,
+    workspace_name: impl AsRef<str>,
 ) -> Result<WorkspaceStatus, JjError> {
     let workspace_path = workspace_path.as_ref();
+    let workspace_name = workspace_name.as_ref();
     let exact_bookmark_output = with_stale_retry(
         workspace_path,
         &[
@@ -198,32 +229,7 @@ pub async fn read_workspace_status(
         &["diff", "-r", "@", "--git", "--color=never"],
     )
     .await?;
-    let effective_diff = with_stale_retry(
-        workspace_path,
-        &[
-            "diff",
-            "-r",
-            EFFECTIVE_WORKSPACE_REVSET,
-            "--git",
-            "--color=never",
-        ],
-    )
-    .await?;
     let conflicted_count = count_revset(workspace_path, CONFLICTED_WORKSPACE_REVSET).await?;
-    let unpublished_change_count =
-        count_revset(workspace_path, UNPUBLISHED_WORKSPACE_REVSET).await?;
-    let unpublished_diff_stats =
-        diff_stats_for_revset(workspace_path, UNPUBLISHED_WORKSPACE_REVSET).await?;
-    let default_workspace_count = count_revset(workspace_path, DEFAULT_WORKSPACE_REVSET).await?;
-    let not_in_default_available = default_workspace_count > 0;
-    let (not_in_default_change_count, not_in_default_diff_stats) = if not_in_default_available {
-        (
-            count_revset(workspace_path, NOT_IN_DEFAULT_WORKSPACE_REVSET).await?,
-            diff_stats_for_revset(workspace_path, NOT_IN_DEFAULT_WORKSPACE_REVSET).await?,
-        )
-    } else {
-        (0, DiffStats::default())
-    };
     let exact_bookmarks = parse_bookmarks(&exact_bookmark_output);
     let display_bookmarks = parse_bookmarks(&display_bookmark_output);
     let bookmark_relation = classify_bookmark_relation(&exact_bookmarks, &display_bookmarks);
@@ -232,24 +238,29 @@ pub async fn read_workspace_status(
     } else {
         exact_bookmarks
     };
-    let effective_diff_stats = summarize_unified_diff(&effective_diff);
+    let local_relation = local_relation(workspace_path).await?;
+    let remote_relation = remote_relation(workspace_path, &bookmarks).await?;
+    let primary_relation = primary_relation(workspace_name, &local_relation, &remote_relation);
+    let primary_baseline_relation = match primary_relation {
+        BaselineRelationTarget::Local => local_relation.as_ref(),
+        BaselineRelationTarget::Remote => remote_relation.as_ref(),
+        BaselineRelationTarget::None => None,
+    };
     let has_conflicts = conflicted_count > 0;
     let has_working_copy_changes = !diff.trim().is_empty();
-    let workspace_state = classify_workspace_state(has_conflicts, unpublished_change_count);
+    let workspace_state = classify_workspace_state(
+        has_conflicts,
+        primary_relation.clone(),
+        primary_baseline_relation,
+    );
 
     Ok(WorkspaceStatus {
         workspace_state,
         has_working_copy_changes,
-        effective_added_lines: effective_diff_stats.added_lines,
-        effective_removed_lines: effective_diff_stats.removed_lines,
         has_conflicts,
-        unpublished_change_count,
-        unpublished_added_lines: unpublished_diff_stats.added_lines,
-        unpublished_removed_lines: unpublished_diff_stats.removed_lines,
-        not_in_default_available,
-        not_in_default_change_count,
-        not_in_default_added_lines: not_in_default_diff_stats.added_lines,
-        not_in_default_removed_lines: not_in_default_diff_stats.removed_lines,
+        local_relation,
+        remote_relation,
+        primary_relation,
         bookmarks,
         bookmark_relation,
         recent_activity_at: now_ms(),
@@ -264,13 +275,131 @@ async fn count_revset(workspace_path: &Path, revset: &str) -> Result<i64, JjErro
     ))
 }
 
-async fn diff_stats_for_revset(workspace_path: &Path, revset: &str) -> Result<DiffStats, JjError> {
-    let diff = with_stale_retry(
+async fn local_relation(workspace_path: &Path) -> Result<Option<BaselineRelation>, JjError> {
+    if count_revset(workspace_path, DEFAULT_WORKSPACE_REVSET).await? == 0 {
+        return Ok(None);
+    }
+    baseline_relation(
         workspace_path,
-        &["diff", "-r", revset, "--git", "--color=never"],
+        "Default",
+        Some("default@"),
+        LOCAL_AHEAD_REVSET,
+        LOCAL_BEHIND_REVSET,
+    )
+    .await
+}
+
+async fn remote_relation(
+    workspace_path: &Path,
+    bookmarks: &[String],
+) -> Result<Option<BaselineRelation>, JjError> {
+    for bookmark in bookmarks {
+        let remote_revset = format!(
+            "tracked_remote_bookmarks(exact:{})",
+            revset_string_literal(bookmark)
+        );
+        if count_revset(workspace_path, &remote_revset).await? == 1 {
+            let detail_name = remote_bookmark_detail(workspace_path, &remote_revset, bookmark)
+                .await?
+                .unwrap_or_else(|| {
+                    format!(
+                        "tracked_remote_bookmarks(exact:{})",
+                        revset_string_literal(bookmark)
+                    )
+                });
+            return baseline_relation(
+                workspace_path,
+                "Remote",
+                Some(detail_name),
+                &format!("{remote_revset}..@ ~ empty()"),
+                &format!("@..{remote_revset} ~ empty()"),
+            )
+            .await;
+        }
+    }
+
+    if count_revset(workspace_path, "present(trunk()) ~ root()").await? == 1 {
+        return baseline_relation(
+            workspace_path,
+            "Remote",
+            Some("trunk()"),
+            "trunk()..@ ~ empty()",
+            "@..trunk() ~ empty()",
+        )
+        .await;
+    }
+
+    Ok(None)
+}
+
+async fn remote_bookmark_detail(
+    workspace_path: &Path,
+    remote_revset: &str,
+    bookmark: &str,
+) -> Result<Option<String>, JjError> {
+    let output = with_stale_retry(
+        workspace_path,
+        &[
+            "log",
+            "-r",
+            remote_revset,
+            "-n",
+            "1",
+            "--no-graph",
+            "-T",
+            "remote_bookmarks.map(|b| b.name() ++ \"\\t\" ++ b.remote()).join(\"\\n\") ++ \"\\n\"",
+        ],
     )
     .await?;
-    Ok(summarize_unified_diff(&diff))
+    let matches = output
+        .lines()
+        .filter_map(|line| {
+            let (name, remote) = line.split_once('\t')?;
+            (name == bookmark).then(|| format!("{name}@{remote}"))
+        })
+        .collect::<Vec<_>>();
+
+    Ok(matches
+        .iter()
+        .find(|name| !name.ends_with("@git"))
+        .cloned()
+        .or_else(|| matches.first().cloned()))
+}
+
+async fn baseline_relation(
+    workspace_path: &Path,
+    target_name: &str,
+    detail_name: Option<impl Into<String>>,
+    ahead_revset: &str,
+    behind_revset: &str,
+) -> Result<Option<BaselineRelation>, JjError> {
+    Ok(Some(BaselineRelation {
+        target_name: target_name.to_owned(),
+        detail_name: detail_name.map(Into::into),
+        ahead_count: count_revset(workspace_path, ahead_revset).await?,
+        behind_count: count_revset(workspace_path, behind_revset).await?,
+    }))
+}
+
+fn primary_relation(
+    workspace_name: &str,
+    local_relation: &Option<BaselineRelation>,
+    remote_relation: &Option<BaselineRelation>,
+) -> BaselineRelationTarget {
+    if workspace_name == "default" && remote_relation.is_some() {
+        BaselineRelationTarget::Remote
+    } else if local_relation.is_some() {
+        BaselineRelationTarget::Local
+    } else if remote_relation.is_some() {
+        BaselineRelationTarget::Remote
+    } else {
+        BaselineRelationTarget::None
+    }
+}
+
+fn revset_string_literal(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 pub async fn create_workspace(
@@ -337,6 +466,33 @@ async fn workspace_path(root_path: &str, workspace_name: &str) -> Result<String,
         .await?
         .to_string_lossy()
         .to_string())
+}
+
+async fn current_workspace_path(root_path: &str) -> Result<String, JjError> {
+    let output = run_jj(root_path.as_ref(), &["workspace", "root", "-R", root_path]).await?;
+    Ok(tokio::fs::canonicalize(output.trim())
+        .await?
+        .to_string_lossy()
+        .to_string())
+}
+
+async fn current_workspace_change_id(root_path: &str) -> Result<String, JjError> {
+    Ok(run_jj(
+        root_path.as_ref(),
+        &[
+            "log",
+            "-R",
+            root_path,
+            "-r",
+            "@",
+            "--no-graph",
+            "-T",
+            "change_id.short()",
+        ],
+    )
+    .await?
+    .trim()
+    .to_owned())
 }
 
 async fn with_stale_retry(workspace_path: &Path, args: &[&str]) -> Result<String, JjError> {
@@ -417,12 +573,9 @@ mod tests {
             CONFLICTED_WORKSPACE_REVSET,
             "coalesce(@ ~ empty(), @-) & conflicts()"
         );
-        assert_eq!(
-            UNPUBLISHED_WORKSPACE_REVSET,
-            "remote_bookmarks()..@ ~ empty()"
-        );
         assert_eq!(DEFAULT_WORKSPACE_REVSET, "present(default@)");
-        assert_eq!(NOT_IN_DEFAULT_WORKSPACE_REVSET, "default@..@ ~ empty()");
+        assert_eq!(LOCAL_AHEAD_REVSET, "default@..@ ~ empty()");
+        assert_eq!(LOCAL_BEHIND_REVSET, "@..default@ ~ empty()");
     }
 
     #[test]
@@ -474,15 +627,40 @@ diff --git a/a.txt b/a.txt
     }
 
     #[test]
-    fn classifies_workspace_state_from_conflicts_and_unpublished_count() {
+    fn classifies_workspace_state_from_primary_relation() {
+        let same = BaselineRelation {
+            target_name: "Default".to_owned(),
+            detail_name: Some("default@".to_owned()),
+            ahead_count: 0,
+            behind_count: 0,
+        };
+        let ahead = BaselineRelation {
+            target_name: "Default".to_owned(),
+            detail_name: Some("default@".to_owned()),
+            ahead_count: 2,
+            behind_count: 0,
+        };
         assert_eq!(
-            classify_workspace_state(true, 3),
+            classify_workspace_state(true, BaselineRelationTarget::Local, Some(&ahead)),
             WorkspaceState::Conflicted
         );
         assert_eq!(
-            classify_workspace_state(false, 0),
+            classify_workspace_state(false, BaselineRelationTarget::Remote, Some(&same)),
             WorkspaceState::Published
         );
-        assert_eq!(classify_workspace_state(false, 2), WorkspaceState::Draft);
+        assert_eq!(
+            classify_workspace_state(false, BaselineRelationTarget::Local, Some(&same)),
+            WorkspaceState::MergedLocal
+        );
+        assert_eq!(
+            classify_workspace_state(false, BaselineRelationTarget::Local, Some(&ahead)),
+            WorkspaceState::Draft
+        );
+    }
+
+    #[test]
+    fn quotes_revset_string_literals() {
+        assert_eq!(revset_string_literal("main"), "\"main\"");
+        assert_eq!(revset_string_literal("team/\"x\""), "\"team/\\\"x\\\"\"");
     }
 }

@@ -13,26 +13,28 @@ use std::{
 
 use futures::{StreamExt, channel::mpsc};
 use gpui::{
-    Action, Animation, AnimationExt as _, AnyView, App, Application, Bounds, ClipboardEntry,
-    ClipboardItem, Context, Corner, Entity, FocusHandle, Font, FontFallbacks, FontFeatures, Hsla,
-    Image, ImageFormat, IntoElement, KeyBinding, KeyDownEvent, Menu, MenuItem, Modifiers,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
-    PromptLevel, Render, Rgba, ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString, TextRun,
-    Window, WindowBounds, WindowOptions, anchored, canvas, deferred, div, fill, font, point,
-    prelude::*, px, rgb, rgba, size,
+    Action, Animation, AnimationExt as _, AnyElement, AnyView, App, Application, Bounds,
+    ClipboardEntry, ClipboardItem, Context, Corner, Entity, FocusHandle, Font, FontFallbacks,
+    FontFeatures, Hsla, Image, ImageFormat, InteractiveElement as _, IntoElement, KeyBinding,
+    KeyDownEvent, Menu, MenuItem, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render, Rgba, ScrollDelta,
+    ScrollWheelEvent, ShapedLine, SharedString, TextRun, Window, WindowBounds, WindowOptions,
+    anchored, canvas, deferred, div, fill, font, point, prelude::*, px, rgb, rgba, size,
 };
 use gpui_component::{
     Icon, IconName, PixelsExt, Root, Sizable,
     input::{Input, InputState},
     scroll::ScrollableElement,
     tag::Tag,
+    tooltip::Tooltip,
 };
 use octty_core::{
-    ActivityState, PaneActivity, PanePayload, PaneState, PaneType, ProjectRootRecord,
-    SessionSnapshot, SessionState, TerminalExitBehavior, TerminalKind, TerminalPanePayload,
-    WorkspaceBookmarkRelation, WorkspaceSnapshot, WorkspaceState, WorkspaceStatus,
-    WorkspaceSummary, add_pane, create_default_snapshot, create_pane_state,
-    derive_workspace_activity, has_recorded_workspace_path,
+    ActivityState, BaselineRelation, BaselineRelationState, BaselineRelationTarget, PaneActivity,
+    PanePayload, PaneState, PaneType, ProjectRootRecord, SessionSnapshot, SessionState,
+    TerminalExitBehavior, TerminalKind, TerminalPanePayload, WorkspaceBookmarkRelation,
+    WorkspaceSnapshot, WorkspaceState, WorkspaceStatus, WorkspaceSummary, add_pane,
+    create_default_snapshot, create_pane_state, derive_workspace_activity,
+    has_recorded_workspace_path,
     layout::{LAYOUT_VERSION, now_ms},
     remove_pane, workspace_shortcut_targets,
 };

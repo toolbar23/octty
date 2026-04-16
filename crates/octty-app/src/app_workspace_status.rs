@@ -194,7 +194,7 @@ async fn refresh_workspace_status(
     next.status = if has_recorded_workspace_path(&workspace.workspace_path) {
         merge_jj_workspace_status(
             &workspace.status,
-            read_workspace_status(&workspace.workspace_path).await?,
+            read_workspace_status(&workspace.workspace_path, &workspace.workspace_name).await?,
         )
     } else {
         reset_jj_workspace_status(&workspace.status)
