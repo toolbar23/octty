@@ -445,12 +445,17 @@ impl OcttyApp {
         cx: &mut Context<Self>,
     ) {
         if self.sidebar_rename_dialog.is_some() {
-            match event.keystroke.key.to_ascii_lowercase().as_str() {
-                "enter" => self.confirm_sidebar_rename_dialog(cx),
-                "escape" => self.cancel_sidebar_rename_dialog(cx),
-                _ => {}
+            match sidebar_rename_dialog_key_action(&event.keystroke.key) {
+                Some(SidebarRenameDialogKeyAction::Confirm) => {
+                    self.confirm_sidebar_rename_dialog(cx);
+                    cx.stop_propagation();
+                }
+                Some(SidebarRenameDialogKeyAction::Cancel) => {
+                    self.cancel_sidebar_rename_dialog(cx);
+                    cx.stop_propagation();
+                }
+                None => {}
             }
-            cx.stop_propagation();
             return;
         }
 
@@ -672,5 +677,19 @@ impl OcttyApp {
             }
             active_snapshot.updated_at = now_ms();
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SidebarRenameDialogKeyAction {
+    Confirm,
+    Cancel,
+}
+
+pub(crate) fn sidebar_rename_dialog_key_action(key: &str) -> Option<SidebarRenameDialogKeyAction> {
+    match key.to_ascii_lowercase().as_str() {
+        "enter" | "return" => Some(SidebarRenameDialogKeyAction::Confirm),
+        "escape" => Some(SidebarRenameDialogKeyAction::Cancel),
+        _ => None,
     }
 }

@@ -323,6 +323,24 @@ fn control_letters_keep_control_modifier_for_encoder() {
 }
 
 #[test]
+fn rename_dialog_only_intercepts_commit_keys() {
+    assert_eq!(
+        sidebar_rename_dialog_key_action("enter"),
+        Some(SidebarRenameDialogKeyAction::Confirm)
+    );
+    assert_eq!(
+        sidebar_rename_dialog_key_action("return"),
+        Some(SidebarRenameDialogKeyAction::Confirm)
+    );
+    assert_eq!(
+        sidebar_rename_dialog_key_action("escape"),
+        Some(SidebarRenameDialogKeyAction::Cancel)
+    );
+    assert_eq!(sidebar_rename_dialog_key_action("a"), None);
+    assert_eq!(sidebar_rename_dialog_key_action("space"), None);
+}
+
+#[test]
 fn css_font_stack_prefers_first_real_family() {
     assert_eq!(
         first_font_family("\"Iosevka Term\", monospace").as_deref(),

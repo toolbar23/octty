@@ -79,6 +79,7 @@ pub fn run() {
 
     Application::new().run(move |cx: &mut App| {
         gpui_component::init(cx);
+        gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
         gpui_tokio::init_from_runtime(cx, runtime.clone());
         cx.bind_keys(workspace_key_bindings());
         set_workspace_menu(cx, &bootstrap.workspaces);
