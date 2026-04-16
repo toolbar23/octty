@@ -12,6 +12,7 @@ pub(crate) struct LiveTerminalRuntime {
     pub(crate) wake_rx: mpsc::Receiver<LiveTerminalWake>,
     pub(crate) snapshot_tx: mpsc::Sender<TerminalGridSnapshot>,
     pub(crate) notification_tx: mpsc::Sender<TerminalNotification>,
+    pub(crate) exit_tx: mpsc::Sender<LiveTerminalExit>,
     pub(crate) snapshot_notifier: LiveTerminalSnapshotNotifier,
 }
 
@@ -168,7 +169,12 @@ impl LiveTerminalRuntime {
                 }
             }
 
-            if let Ok(Some(_status)) = self.child.try_wait() {
+            if let Ok(Some(status)) = self.child.try_wait() {
+                let _ = self.exit_tx.send(LiveTerminalExit {
+                    session_id: self.session_id.clone(),
+                    exit_code: Some(i64::from(status.exit_code())),
+                });
+                self.snapshot_notifier.notify();
                 return Ok(());
             }
         }

@@ -56,10 +56,11 @@ pub use spawn::{
     spawn_live_terminal_with_notifier,
 };
 pub use types::{
-    LiveTerminalHandle, LiveTerminalKey, LiveTerminalKeyInput, LiveTerminalModifiers,
-    LiveTerminalSnapshotNotifier, TerminalCellSnapshot, TerminalCursorSnapshot,
-    TerminalDamageSnapshot, TerminalGridSnapshot, TerminalNotification, TerminalResize,
-    TerminalRgb, TerminalRowSnapshot, TerminalScrollSnapshot, TerminalSnapshotTiming,
+    LiveTerminalExit, LiveTerminalHandle, LiveTerminalKey, LiveTerminalKeyInput,
+    LiveTerminalModifiers, LiveTerminalSnapshotNotifier, TerminalCellSnapshot,
+    TerminalCursorSnapshot, TerminalDamageSnapshot, TerminalGridSnapshot, TerminalNotification,
+    TerminalResize, TerminalRgb, TerminalRowSnapshot, TerminalScrollSnapshot,
+    TerminalSnapshotTiming,
 };
 
 pub(crate) use input::*;

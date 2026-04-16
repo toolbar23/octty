@@ -25,7 +25,11 @@ pub(crate) struct ShellTypeConfig {
 pub(crate) fn load_or_create_shell_type_config() -> anyhow::Result<ShellTypeConfigFile> {
     let path = default_shell_type_config_path();
     if path.exists() {
-        return load_shell_type_config(&path);
+        let mut config = load_shell_type_config(&path)?;
+        if normalize_custom_shell_exit_behavior(&mut config) {
+            fs::write(&path, serde_json::to_string_pretty(&config)?)?;
+        }
+        return Ok(config);
     }
 
     if let Some(parent) = path.parent() {
@@ -61,6 +65,21 @@ pub(crate) fn parse_shell_type_config(input: &str) -> anyhow::Result<ShellTypeCo
         }
     }
     Ok(config)
+}
+
+pub(crate) fn normalize_custom_shell_exit_behavior(config: &mut ShellTypeConfigFile) -> bool {
+    let mut changed = false;
+    for shell_type in &mut config.shell_types {
+        if matches!(
+            shell_type.name.trim().to_ascii_lowercase().as_str(),
+            "codex" | "jjui"
+        ) && shell_type.on_exit != TerminalExitBehavior::Close
+        {
+            shell_type.on_exit = TerminalExitBehavior::Close;
+            changed = true;
+        }
+    }
+    changed
 }
 
 pub(crate) fn default_shell_type_config_path() -> PathBuf {

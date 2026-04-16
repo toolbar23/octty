@@ -1,0 +1,36 @@
+[package]
+name = "retach-octty"
+version = "0.8.0"
+edition = "2021"
+description = "Octty-patched retach with command-aware session creation"
+license = "BSD-2-Clause"
+repository = "https://github.com/gHexaByte/retach"
+homepage = "https://github.com/gHexaByte/retach"
+readme = "README.md"
+keywords = ["terminal", "multiplexer", "tmux", "session", "pty"]
+categories = ["command-line-utilities"]
+
+[lib]
+name = "retach"
+
+[[bin]]
+name = "retach-octty"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+vte = "0.13"
+portable-pty = "0.8"
+nix = { version = "0.29", features = ["term", "signal", "user", "fs"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+terminal_size = "0.4"
+unicode-width = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

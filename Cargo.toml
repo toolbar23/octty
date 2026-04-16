@@ -5,6 +5,7 @@ members = [
     "crates/octty-jj",
     "crates/octty-store",
     "crates/octty-term",
+    "crates/retach-octty",
 ]
 resolver = "3"
 

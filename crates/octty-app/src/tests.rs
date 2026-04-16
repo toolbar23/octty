@@ -1,5 +1,5 @@
 use super::*;
-use crate::app_live_terminals::terminal_page_scroll_direction;
+use crate::app_live_terminals::{terminal_exit_status_label, terminal_page_scroll_direction};
 use crate::app_panes::{SidebarRenameDialogKeyAction, sidebar_rename_dialog_key_action};
 use crate::cli::{TerminalReplayEventsStep, parse_terminal_replay_events};
 
@@ -662,7 +662,9 @@ fn default_shell_type_config_defines_initial_types() {
         config.shell_types[1].command_parameters,
         vec!["--dangerously-bypass-approvals-and-sandbox".to_owned()]
     );
+    assert_eq!(config.shell_types[1].on_exit, TerminalExitBehavior::Close);
     assert_eq!(config.shell_types[2].shortcut, "ctrl-shift-j");
+    assert_eq!(config.shell_types[2].on_exit, TerminalExitBehavior::Close);
 }
 
 #[test]
@@ -683,8 +685,49 @@ fn shell_pane_state_copies_configured_metadata() {
     assert_eq!(payload.shell_type, "codex");
     assert_eq!(payload.cwd, "/tmp/workspace");
     assert_eq!(payload.command, "codex");
-    assert_eq!(payload.on_exit, TerminalExitBehavior::RestartManually);
+    assert_eq!(payload.on_exit, TerminalExitBehavior::Close);
     assert_eq!(payload.default_width_chars, 120);
+}
+
+#[test]
+fn custom_shell_exit_behavior_is_normalized_to_close() {
+    let mut config = ShellTypeConfigFile {
+        shell_types: vec![
+            ShellTypeConfig {
+                name: "codex".to_owned(),
+                shortcut: "ctrl-shift-a".to_owned(),
+                directory: "workspace".to_owned(),
+                command: "codex".to_owned(),
+                command_parameters: Vec::new(),
+                on_exit: TerminalExitBehavior::RestartManually,
+                default_width_chars: 120,
+            },
+            ShellTypeConfig {
+                name: "jjui".to_owned(),
+                shortcut: "ctrl-shift-j".to_owned(),
+                directory: "workspace".to_owned(),
+                command: "jjui".to_owned(),
+                command_parameters: Vec::new(),
+                on_exit: TerminalExitBehavior::RestartAuto,
+                default_width_chars: 120,
+            },
+        ],
+    };
+
+    assert!(normalize_custom_shell_exit_behavior(&mut config));
+    assert_eq!(config.shell_types[0].on_exit, TerminalExitBehavior::Close);
+    assert_eq!(config.shell_types[1].on_exit, TerminalExitBehavior::Close);
+    assert!(!normalize_custom_shell_exit_behavior(&mut config));
+}
+
+#[test]
+fn terminal_exit_status_label_describes_close_reason() {
+    assert_eq!(terminal_exit_status_label(Some(0)), "exited");
+    assert_eq!(
+        terminal_exit_status_label(Some(130)),
+        "exited with status 130"
+    );
+    assert_eq!(terminal_exit_status_label(None), "exited");
 }
 
 #[test]

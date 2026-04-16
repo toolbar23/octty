@@ -15,7 +15,7 @@
       "directory": "workspace",
       "command": "codex",
       "command_parameters": ["--dangerously-bypass-approvals-and-sandbox"],
-      "on_exit": "restart-manually",
+      "on_exit": "close",
       "default_width_chars": 120
     },
     {
@@ -24,7 +24,7 @@
       "directory": "workspace",
       "command": "jjui",
       "command_parameters": [],
-      "on_exit": "restart-manually",
+      "on_exit": "close",
       "default_width_chars": 120
     }
   ]

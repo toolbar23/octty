@@ -128,12 +128,19 @@ pub struct LiveTerminalHandle {
     pub(crate) wake_tx: mpsc::Sender<LiveTerminalWake>,
     pub(crate) snapshot_rx: mpsc::Receiver<TerminalGridSnapshot>,
     pub(crate) notification_rx: mpsc::Receiver<TerminalNotification>,
+    pub(crate) exit_rx: mpsc::Receiver<LiveTerminalExit>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalNotification {
     pub title: String,
     pub body: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveTerminalExit {
+    pub session_id: String,
+    pub exit_code: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -237,6 +244,14 @@ impl LiveTerminalHandle {
             notifications.push(notification);
         }
         notifications
+    }
+
+    pub fn drain_exits(&mut self) -> Vec<LiveTerminalExit> {
+        let mut exits = Vec::new();
+        while let Ok(exit) = self.exit_rx.try_recv() {
+            exits.push(exit);
+        }
+        exits
     }
 }
 

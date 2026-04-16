@@ -52,6 +52,7 @@ pub fn spawn_live_terminal_with_notifier(
     let (wake_tx, wake_rx) = mpsc::channel();
     let (snapshot_tx, snapshot_rx) = mpsc::channel();
     let (notification_tx, notification_rx) = mpsc::channel();
+    let (exit_tx, exit_rx) = mpsc::channel();
 
     thread::Builder::new()
         .name(format!("octty-pty-read-{session_id}"))
@@ -79,6 +80,7 @@ pub fn spawn_live_terminal_with_notifier(
                     wake_rx,
                     snapshot_tx,
                     notification_tx,
+                    exit_tx,
                     snapshot_notifier,
                 };
                 if let Err(error) = runtime.run() {
@@ -94,6 +96,7 @@ pub fn spawn_live_terminal_with_notifier(
         wake_tx,
         snapshot_rx,
         notification_rx,
+        exit_rx,
     })
 }
 

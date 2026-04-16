@@ -47,10 +47,10 @@ use octty_store::{TursoStore, default_store_path};
 use octty_term::{
     TerminalSessionSpec, capture_retach_pane, ensure_retach_session, kill_retach_session,
     live::{
-        LiveTerminalHandle, LiveTerminalKey, LiveTerminalKeyInput, LiveTerminalModifiers,
-        LiveTerminalSnapshotNotifier, TerminalGridSnapshot, TerminalNotification,
-        TerminalReplayStep, TerminalResize, TerminalRgb, TerminalScrollSnapshot,
-        replay_terminal_bytes, replay_terminal_steps, spawn_live_terminal,
+        LiveTerminalExit, LiveTerminalHandle, LiveTerminalKey, LiveTerminalKeyInput,
+        LiveTerminalModifiers, LiveTerminalSnapshotNotifier, TerminalGridSnapshot,
+        TerminalNotification, TerminalReplayStep, TerminalResize, TerminalRgb,
+        TerminalScrollSnapshot, replay_terminal_bytes, replay_terminal_steps, spawn_live_terminal,
         spawn_live_terminal_with_notifier,
     },
     resize_retach_session, retach_session_activity, send_retach_keys, send_retach_keys_to_session,

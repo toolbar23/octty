@@ -61,6 +61,32 @@ fn runtime_input_drain_prioritizes_control_and_batches_pty_output() {
 }
 
 #[test]
+fn live_terminal_handle_drains_exit_events() {
+    let (command_tx, _command_rx) = mpsc::channel();
+    let (wake_tx, _wake_rx) = mpsc::channel();
+    let (_snapshot_tx, snapshot_rx) = mpsc::channel();
+    let (_notification_tx, notification_rx) = mpsc::channel();
+    let (exit_tx, exit_rx) = mpsc::channel();
+    let mut handle = LiveTerminalHandle {
+        session_id: "session-1".to_owned(),
+        command_tx,
+        wake_tx,
+        snapshot_rx,
+        notification_rx,
+        exit_rx,
+    };
+    let exit = LiveTerminalExit {
+        session_id: "session-1".to_owned(),
+        exit_code: Some(0),
+    };
+
+    exit_tx.send(exit.clone()).expect("send exit");
+
+    assert_eq!(handle.drain_exits(), vec![exit]);
+    assert!(handle.drain_exits().is_empty());
+}
+
+#[test]
 fn runtime_input_drain_caps_pty_output_work_per_tick() {
     let (_command_tx, command_rx) = mpsc::channel();
     let (pty_output_tx, pty_output_rx) = mpsc::channel();

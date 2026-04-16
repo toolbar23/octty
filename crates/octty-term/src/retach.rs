@@ -39,11 +39,18 @@ enum ClientMsg {
         cols: u16,
         rows: u16,
         mode: ConnectMode,
+        spawn: SpawnRequest,
     },
     KillSession {
         name: String,
     },
     RefreshScreen,
+}
+
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
+struct SpawnRequest {
+    cwd: Option<String>,
+    command: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -68,15 +75,23 @@ enum ServerMsg {
 
 pub fn build_retach_launch(spec: &TerminalSessionSpec) -> RetachLaunch {
     let session_name = stable_retach_session_name(spec);
+    let mut args = vec![
+        "open".to_owned(),
+        session_name.clone(),
+        "--history".to_owned(),
+        retach_history().to_string(),
+        "--cwd".to_owned(),
+        spec.cwd.clone(),
+    ];
+    let command_args = terminal_command_args(spec);
+    if !command_args.is_empty() {
+        args.push("--".to_owned());
+        args.extend(command_args);
+    }
     RetachLaunch {
         program: retach_binary(),
         session_name: session_name.clone(),
-        args: vec![
-            "open".to_owned(),
-            session_name,
-            "--history".to_owned(),
-            retach_history().to_string(),
-        ],
+        args,
         clean_env: BTreeMap::new(),
     }
 }
@@ -95,6 +110,7 @@ pub async fn ensure_retach_session(spec: &TerminalSessionSpec) -> Result<String,
         spec.cols,
         spec.rows,
         ConnectMode::CreateOrAttach,
+        spawn_request(spec),
     )
     .await?;
     let _ = write_message(&mut stream, &ClientMsg::Detach).await;
@@ -111,8 +127,14 @@ async fn capture_retach_pane_by_session_with_size(
     cols: u16,
     rows: u16,
 ) -> Result<String, TerminalError> {
-    let (mut stream, mut frames) =
-        connect_retach_session(session_name, cols, rows, ConnectMode::AttachOnly).await?;
+    let (mut stream, mut frames) = connect_retach_session(
+        session_name,
+        cols,
+        rows,
+        ConnectMode::AttachOnly,
+        SpawnRequest::default(),
+    )
+    .await?;
     let mut screen = String::new();
     let mut saw_screen = false;
     let deadline = tokio::time::Instant::now() + CONTROL_READ_TIMEOUT;
@@ -211,8 +233,14 @@ pub async fn send_retach_bytes_to_session(
     session_name: &str,
     bytes: &[u8],
 ) -> Result<(), TerminalError> {
-    let (mut stream, _) =
-        connect_retach_session(session_name, 120, 40, ConnectMode::AttachOnly).await?;
+    let (mut stream, _) = connect_retach_session(
+        session_name,
+        120,
+        40,
+        ConnectMode::AttachOnly,
+        SpawnRequest::default(),
+    )
+    .await?;
     write_message(&mut stream, &ClientMsg::Input(bytes.to_vec())).await?;
     write_message(&mut stream, &ClientMsg::Detach).await?;
     Ok(())
@@ -224,8 +252,14 @@ pub async fn resize_retach_session(
     rows: u16,
 ) -> Result<(), TerminalError> {
     let session_name = ensure_retach_session(spec).await?;
-    let (mut stream, _) =
-        connect_retach_session(&session_name, cols, rows, ConnectMode::AttachOnly).await?;
+    let (mut stream, _) = connect_retach_session(
+        &session_name,
+        cols,
+        rows,
+        ConnectMode::AttachOnly,
+        SpawnRequest::default(),
+    )
+    .await?;
     write_message(&mut stream, &ClientMsg::Resize { cols, rows }).await?;
     write_message(&mut stream, &ClientMsg::Detach).await?;
     Ok(())
@@ -252,7 +286,20 @@ pub async fn kill_retach_session(session_name: &str) -> Result<(), TerminalError
 }
 
 pub fn retach_binary() -> String {
-    std::env::var("OCTTY_RETACH_BIN").unwrap_or_else(|_| "retach".to_owned())
+    if let Ok(path) = std::env::var("OCTTY_RETACH_BIN")
+        && !path.trim().is_empty()
+    {
+        return path;
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let sibling = dir.join("retach-octty");
+        if sibling.is_file() {
+            return sibling.to_string_lossy().to_string();
+        }
+    }
+    "retach-octty".to_owned()
 }
 
 pub fn terminal_kind_command(kind: &TerminalKind) -> &'static str {
@@ -265,7 +312,7 @@ pub fn terminal_kind_command(kind: &TerminalKind) -> &'static str {
     }
 }
 
-pub fn terminal_command(spec: &TerminalSessionSpec) -> Option<String> {
+pub fn terminal_command_args(spec: &TerminalSessionSpec) -> Vec<String> {
     let command = spec.command.trim();
     let command = if command.is_empty() {
         terminal_kind_command(&spec.kind)
@@ -273,27 +320,29 @@ pub fn terminal_command(spec: &TerminalSessionSpec) -> Option<String> {
         command
     };
     if command.is_empty() {
-        return None;
+        return Vec::new();
     }
 
     let line = shell_command_line(command, &spec.command_parameters);
-    Some(match spec.on_exit {
-        TerminalExitBehavior::RestartAuto => restart_auto_shell_command(&line),
-        TerminalExitBehavior::RestartManually | TerminalExitBehavior::Close => line,
-    })
+    match spec.on_exit {
+        TerminalExitBehavior::RestartAuto => shell_argv(restart_auto_shell_command(&line)),
+        TerminalExitBehavior::RestartManually => shell_argv(restart_manually_shell_command(&line)),
+        TerminalExitBehavior::Close => std::iter::once(command.to_owned())
+            .chain(spec.command_parameters.iter().cloned())
+            .collect(),
+    }
 }
 
 pub fn retach_startup_command(spec: &TerminalSessionSpec) -> Option<Vec<u8>> {
-    let cwd = shell_single_quote(&spec.cwd);
-    let Some(command) = terminal_command(spec) else {
-        return Some(format!("cd -- {cwd}\r").into_bytes());
-    };
-    let exec = if spec.on_exit == TerminalExitBehavior::Close {
-        "exec "
-    } else {
-        ""
-    };
-    Some(format!("cd -- {cwd} && {exec}{command}\r").into_bytes())
+    let _ = spec;
+    None
+}
+
+fn spawn_request(spec: &TerminalSessionSpec) -> SpawnRequest {
+    SpawnRequest {
+        cwd: Some(spec.cwd.clone()),
+        command: terminal_command_args(spec),
+    }
 }
 
 pub fn stable_retach_session_name(spec: &TerminalSessionSpec) -> String {
@@ -339,6 +388,7 @@ async fn connect_retach_session(
     cols: u16,
     rows: u16,
     mode: ConnectMode,
+    spawn: SpawnRequest,
 ) -> Result<(UnixStream, FrameReader), TerminalError> {
     ensure_retach_server_running().await?;
     let mut stream = UnixStream::connect(retach_socket_path()?).await?;
@@ -350,6 +400,7 @@ async fn connect_retach_session(
             cols,
             rows,
             mode,
+            spawn,
         },
     )
     .await?;
@@ -411,12 +462,12 @@ async fn ensure_retach_server_running() -> Result<(), TerminalError> {
 }
 
 fn retach_socket_path() -> Result<PathBuf, TerminalError> {
-    let base = if let Some(runtime_dir) = env_path("XDG_RUNTIME_DIR") {
-        runtime_dir
+    let dir = if let Some(runtime_dir) = env_path("XDG_RUNTIME_DIR") {
+        runtime_dir.join("retach-octty")
     } else {
-        PathBuf::from("/tmp").join(format!("retach-{}", current_uid()))
+        PathBuf::from("/tmp").join(format!("retach-octty-{}", current_uid()))
     };
-    Ok(base.join("retach").join("retach.sock"))
+    Ok(dir.join("retach-octty.sock"))
 }
 
 fn env_path(key: &str) -> Option<PathBuf> {
@@ -473,6 +524,23 @@ fn restart_auto_shell_command(command_line: &str) -> String {
     format!(
         "while true; do {command_line}; status=$?; printf '\n[octty] exited with status %s; restarting in 1s...\n' \"$status\"; sleep 1; done"
     )
+}
+
+fn restart_manually_shell_command(command_line: &str) -> String {
+    format!(
+        "{command_line}; status=$?; printf '\n[octty] exited with status %s. Restart manually or exit the shell to close.\n' \"$status\"; exec \"${{SHELL:-sh}}\" -l"
+    )
+}
+
+fn shell_argv(command_line: String) -> Vec<String> {
+    vec![
+        std::env::var("SHELL")
+            .ok()
+            .filter(|shell| !shell.trim().is_empty())
+            .unwrap_or_else(|| "sh".to_owned()),
+        "-lc".to_owned(),
+        command_line,
+    ]
 }
 
 fn shell_quote(value: &str) -> String {
@@ -707,6 +775,19 @@ mod tests {
         assert_eq!(launch.args[0], "open");
         assert_eq!(launch.args[1], stable_retach_session_name(&spec));
         assert!(launch.args.contains(&"--history".to_owned()));
+        assert_eq!(
+            launch.args,
+            vec![
+                "open".to_owned(),
+                stable_retach_session_name(&spec),
+                "--history".to_owned(),
+                retach_history().to_string(),
+                "--cwd".to_owned(),
+                "/tmp/repo".to_owned(),
+                "--".to_owned(),
+                "codex".to_owned(),
+            ]
+        );
         assert!(!launch.session_name.contains(':'));
     }
 
@@ -740,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn retach_startup_command_sets_cwd_for_shells() {
+    fn retach_startup_command_is_not_needed_with_command_aware_retach() {
         let spec = TerminalSessionSpec {
             workspace_id: "workspace-1".to_owned(),
             pane_id: "pane-1".to_owned(),
@@ -753,34 +834,36 @@ mod tests {
             rows: 24,
         };
 
-        assert_eq!(
-            retach_startup_command(&spec),
-            Some(b"cd -- '/tmp/repo with '\\'' quote'\r".to_vec())
-        );
+        assert_eq!(retach_startup_command(&spec), None);
+        assert!(terminal_command_args(&spec).is_empty());
     }
 
     #[test]
-    fn retach_startup_command_execs_non_shell_kind_after_cd() {
+    fn close_exit_behavior_runs_command_directly() {
         let spec = TerminalSessionSpec {
             workspace_id: "workspace-1".to_owned(),
             pane_id: "pane-1".to_owned(),
             kind: TerminalKind::Codex,
             cwd: "/tmp/repo".to_owned(),
             command: "codex".to_owned(),
-            command_parameters: Vec::new(),
+            command_parameters: vec!["resume".to_owned(), "two words".to_owned()],
             on_exit: TerminalExitBehavior::Close,
             cols: 80,
             rows: 24,
         };
 
         assert_eq!(
-            retach_startup_command(&spec),
-            Some(b"cd -- '/tmp/repo' && exec codex\r".to_vec())
+            terminal_command_args(&spec),
+            vec![
+                "codex".to_owned(),
+                "resume".to_owned(),
+                "two words".to_owned()
+            ]
         );
     }
 
     #[test]
-    fn retach_startup_command_uses_configured_command_parameters_and_exit_behavior() {
+    fn restart_manually_wraps_command_in_shell() {
         let spec = TerminalSessionSpec {
             workspace_id: "workspace-1".to_owned(),
             pane_id: "pane-1".to_owned(),
@@ -796,13 +879,11 @@ mod tests {
             rows: 24,
         };
 
-        assert_eq!(
-            retach_startup_command(&spec),
-            Some(
-                b"cd -- '/tmp/repo' && codex --dangerously-bypass-approvals-and-sandbox 'two words'\r"
-                    .to_vec()
-            )
-        );
+        let args = terminal_command_args(&spec);
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[1], "-lc");
+        assert!(args[2].contains("codex --dangerously-bypass-approvals-and-sandbox 'two words'"));
+        assert!(args[2].contains("Restart manually"));
     }
 
     #[test]

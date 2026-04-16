@@ -14,11 +14,11 @@ It keeps repo and workspace state on disk, stores cached UI state in local Turso
 - Rust toolchain
 - Zig, because the app enables the `libghostty-vt` terminal adapter by default
 - `jj`
-- `retach`
 
 ## Development
 
 ```bash
+cargo build -p retach-octty
 cargo run -p octty-app --bin octty
 ```
 
@@ -28,6 +28,7 @@ Useful commands:
 cargo fmt --all
 cargo clippy --workspace --all-targets
 cargo test --workspace --all-targets
+cargo build -p retach-octty
 cargo run -p octty-app --bin octty -- --headless-check
 cargo run -p octty-app --bin octty -- --bootstrap-check
 ```
@@ -52,6 +53,7 @@ OCTTY_RS_STATE_PATH=/tmp/octty-rs-live.turso cargo run -p octty-app --bin octty 
 - `crates/octty-jj`: JJ workspace discovery/status helpers
 - `crates/octty-term`: retach launch/session/input/capture plumbing and `libghostty-vt` integration
 - `crates/octty-app`: GPUI + gpui-component application shell
+- `crates/retach-octty`: vendored retach binary patched for cwd/argv session creation
 
 The terminal adapter is behind an optional feature in `octty-term`, but the main app enables it:
 
@@ -68,14 +70,14 @@ OCTTY_RS_TERMINAL_FONT_FAMILY='"Iosevka Term", monospace' cargo run -p octty-app
 Retach integration can be pointed at a non-default binary or history size:
 
 ```bash
-OCTTY_RETACH_BIN=/path/to/retach OCTTY_RETACH_HISTORY=20000 cargo run -p octty-app --bin octty
+OCTTY_RETACH_BIN=/path/to/retach-octty OCTTY_RETACH_HISTORY=20000 cargo run -p octty-app --bin octty
 ```
 
 ## Storage
 
 - App state DB: `~/.local/share/octty-rs/state.turso`
 - Notes: `*.note.md` files inside the workspace directory
-- Terminal sessions: backed by the local `retach` daemon socket
+- Terminal sessions: backed by the local `retach-octty` daemon socket
 
 ## Current Shape
 

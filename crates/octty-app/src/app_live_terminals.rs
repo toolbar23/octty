@@ -161,9 +161,13 @@ impl OcttyApp {
             .map(|pane_id| live_terminal_key(&active_workspace.id, &pane_id));
         let mut updates = Vec::new();
         let mut notifications = Vec::new();
+        let mut exits = Vec::new();
         for (key, live) in &mut self.live_terminals {
             let selected = focused_live_key.as_deref() == Some(key.as_str());
             let panel_focused = self.terminal_window_active && selected;
+            for exit in live.handle.drain_exits() {
+                exits.push((key.clone(), exit));
+            }
             for notification in live.handle.drain_notifications() {
                 notifications.push((key.clone(), notification, panel_focused));
             }
@@ -244,6 +248,7 @@ impl OcttyApp {
                 result.changed = true;
             }
         }
+        self.close_exited_live_terminal_panes(exits, cx, &mut result);
         result
     }
 
@@ -301,6 +306,119 @@ impl OcttyApp {
         changed
     }
 
+    pub(crate) fn close_exited_live_terminal_panes(
+        &mut self,
+        exits: Vec<(String, LiveTerminalExit)>,
+        cx: &mut Context<Self>,
+        result: &mut TerminalSnapshotDrainResult,
+    ) {
+        for (key, exit) in exits {
+            let Some((workspace_id, pane_id)) = split_live_terminal_key(&key)
+                .map(|(workspace_id, pane_id)| (workspace_id.to_owned(), pane_id.to_owned()))
+            else {
+                continue;
+            };
+            self.live_terminals.remove(&key);
+            self.failed_live_terminals.remove(&key);
+            if self.close_exited_active_terminal_pane(&workspace_id, &pane_id, &exit, cx, result) {
+                continue;
+            }
+            self.close_exited_stored_terminal_pane(workspace_id, pane_id, exit, cx);
+        }
+    }
+
+    fn close_exited_active_terminal_pane(
+        &mut self,
+        workspace_id: &str,
+        pane_id: &str,
+        exit: &LiveTerminalExit,
+        cx: &mut Context<Self>,
+        result: &mut TerminalSnapshotDrainResult,
+    ) -> bool {
+        let Some(snapshot) = self.active_snapshot.take() else {
+            return false;
+        };
+        if snapshot.workspace_id != workspace_id || !snapshot.panes.contains_key(pane_id) {
+            self.active_snapshot = Some(snapshot);
+            return false;
+        }
+
+        match remove_pane(snapshot.clone(), pane_id) {
+            Ok(updated_snapshot) => {
+                let exit_label = terminal_exit_status_label(exit.exit_code);
+                self.status = format!("Closed pane {pane_id} after terminal {exit_label}.").into();
+                self.active_snapshot = Some(updated_snapshot.clone());
+                self.delete_pane_activity(workspace_id, pane_id, cx);
+                self.save_workspace_snapshot(
+                    updated_snapshot,
+                    "Terminal exited, but failed to save taskspace",
+                    cx,
+                );
+                result.changed = true;
+                true
+            }
+            Err(error) => {
+                self.active_snapshot = Some(snapshot);
+                self.show_error(
+                    format!("Terminal exited, but pane close failed: {error:#}"),
+                    cx,
+                );
+                true
+            }
+        }
+    }
+
+    fn close_exited_stored_terminal_pane(
+        &self,
+        workspace_id: String,
+        pane_id: String,
+        exit: LiveTerminalExit,
+        cx: &mut Context<Self>,
+    ) {
+        let store = self.store.clone();
+        let workspace_id_for_store = workspace_id.clone();
+        let pane_id_for_store = pane_id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = match gpui_tokio::Tokio::spawn_result(cx, async move {
+                let Some(snapshot) = store.get_snapshot(&workspace_id_for_store).await? else {
+                    return Ok(false);
+                };
+                if !snapshot.panes.contains_key(&pane_id_for_store) {
+                    return Ok(false);
+                }
+                let snapshot = remove_pane(snapshot, &pane_id_for_store)?;
+                store.save_snapshot(&snapshot).await?;
+                store
+                    .delete_pane_activity(&workspace_id_for_store, &pane_id_for_store)
+                    .await?;
+                Ok::<bool, anyhow::Error>(true)
+            }) {
+                Ok(task) => task.await,
+                Err(error) => Err(error),
+            };
+
+            let _ = this.update(cx, |app, cx| match result {
+                Ok(true) => {
+                    let exit_label = terminal_exit_status_label(exit.exit_code);
+                    app.status =
+                        format!("Closed pane {pane_id} after terminal {exit_label}.").into();
+                    cx.notify();
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    app.show_error(
+                        format!(
+                            "Terminal {} exited, but failed to save pane close: {error:#}",
+                            exit.session_id
+                        ),
+                        cx,
+                    );
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn resize_live_terminal(
         &mut self,
         workspace_id: &str,
@@ -356,6 +474,14 @@ impl OcttyApp {
         };
         live.scroll_viewport(lines);
         cx.stop_propagation();
+    }
+}
+
+pub(crate) fn terminal_exit_status_label(exit_code: Option<i64>) -> String {
+    match exit_code {
+        Some(0) => "exited".to_owned(),
+        Some(code) => format!("exited with status {code}"),
+        None => "exited".to_owned(),
     }
 }
 
